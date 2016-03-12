@@ -5,7 +5,7 @@
         <FrameworkType>None</FrameworkType>
         <MainSource>development.dpr</MainSource>
         <Base>True</Base>
-        <Config Condition="'$(Config)'==''">Debug</Config>
+        <Config Condition="'$(Config)'==''">PUREPASCAL</Config>
         <Platform Condition="'$(Platform)'==''">Win32</Platform>
         <TargetedPlatforms>19</TargetedPlatforms>
         <AppType>Console</AppType>
@@ -64,6 +64,7 @@
         <Base>true</Base>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base)'!=''">
+        <DCC_Define>BRAINMM_UNITTEST;$(DCC_Define)</DCC_Define>
         <SanitizedProjectName>development</SanitizedProjectName>
         <DCC_UnitSearchPath>..\sources;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <Manifest_File>$(BDS)\bin\default_app.manifest</Manifest_File>
@@ -130,6 +131,7 @@
         <DelphiCompile Include="$(MainSource)">
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
+        <DCCReference Include="UTBrainMM.pas"/>
         <DCCReference Include="..\sources\BrainMM.pas"/>
         <DCCReference Include="TestUnit.pas"/>
         <BuildConfiguration Include="Release">
@@ -223,6 +225,12 @@
                     </Platform>
                 </DeployFile>
                 <DeployFile LocalName="development.exe" Configuration="Debug" Class="ProjectOutput">
+                    <Platform Name="Win32">
+                        <RemoteName>development.exe</RemoteName>
+                        <Overwrite>true</Overwrite>
+                    </Platform>
+                </DeployFile>
+                <DeployFile LocalName="development.exe" Configuration="PUREPASCAL" Class="ProjectOutput">
                     <Platform Name="Win32">
                         <RemoteName>development.exe</RemoteName>
                         <Overwrite>true</Overwrite>
@@ -551,13 +559,13 @@
                         <Operation>1</Operation>
                     </Platform>
                 </DeployClass>
-                <ProjectRoot Platform="Win64" Name="$(PROJECTNAME)"/>
+                <ProjectRoot Platform="iOSDevice32" Name="$(PROJECTNAME).app"/>
                 <ProjectRoot Platform="Android" Name="$(PROJECTNAME)"/>
                 <ProjectRoot Platform="Win32" Name="$(PROJECTNAME)"/>
                 <ProjectRoot Platform="iOSDevice64" Name="$(PROJECTNAME).app"/>
+                <ProjectRoot Platform="Win64" Name="$(PROJECTNAME)"/>
                 <ProjectRoot Platform="OSX32" Name="$(PROJECTNAME)"/>
                 <ProjectRoot Platform="iOSSimulator" Name="$(PROJECTNAME).app"/>
-                <ProjectRoot Platform="iOSDevice32" Name="$(PROJECTNAME).app"/>
             </Deployment>
             <Platforms>
                 <Platform value="Android">True</Platform>

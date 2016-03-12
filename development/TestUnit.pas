@@ -1,6 +1,6 @@
 unit TestUnit;
 
-{$i crystal_options.inc}
+{$i compiler_directives.inc}
 
 interface
   uses {$ifdef UNITSCOPENAMES}System.SysUtils{$else}SysUtils{$endif},
@@ -19,7 +19,6 @@ implementation
 procedure RUN;
 begin
 
-
   ShowMessage('Test');
 end;
 
@@ -30,7 +29,7 @@ begin
   BreakPoint := S;
 
   {$ifdef MSWINDOWS}
-    {$ifdef UNITSCOPENAMES}Winapi.{$endif}Windows.MessageBox(0, PChar(BreakPoint), 'Сообщение:', 0);
+    {$ifdef UNITSCOPENAMES}Winapi.{$endif}Windows.MessageBox(0, PChar(BreakPoint), 'Message:', 0);
   {$endif}
 
   Halt;
