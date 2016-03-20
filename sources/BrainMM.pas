@@ -55,11 +55,14 @@ unit BrainMM;
     {$if CompilerVersion >= 17}
       {$define INLINESUPPORTSIMPLE}
     {$ifend}
+    {$if CompilerVersion >= 18}
+      {$define MEMORYMANAGEREX}
+    {$ifend}
     {$if CompilerVersion < 23}
       {$define CPUX86}
     {$else}
       {$define UNITSCOPENAMES}
-      {$define RETURN_ADDRESS}
+      {$define RETURNADDRESS}
     {$ifend}
     {$if CompilerVersion >= 21}
       {$WEAKLINKRTTI ON}
@@ -98,7 +101,7 @@ unit BrainMM;
   {$define PUREPASCAL}
 {$endif}
 
-{$ifNdef BRAINMM_NO_REDIRECT}
+{$ifNdef BRAINMM_NOREDIRECT}
   {$ifNdef PUREPASCAL}
     {$ifdef CONDITIONALEXPRESSIONS}
       {$if Defined(CPUINTEL) and not Defined(FPC)}
@@ -111,6 +114,9 @@ unit BrainMM;
 {$endif}
 
 interface
+  uses {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
+       {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif}
+       {$ifdef POSIX}Posix.String_, Posix.SysStat, Posix.Unistd{$endif};
 
 type
   // standard types
@@ -165,6 +171,9 @@ type
   // additional memory functions
   procedure GetMemAligned(var P: Pointer; Align: TMemoryAlign; Size: NativeInt);
   procedure RegetMem(var P: Pointer; NewSize: NativeInt);
+  {$ifNdef MEMORYMANAGEREX}
+  function AllocMem(Size: NativeInt): Pointer;
+  {$endif}
 
   // block routine
   procedure GetMemoryBlock(var Block: MemoryBlock; BlockSize: TMemoryBlockSize);
@@ -209,21 +218,42 @@ type
     function GetMemory(Size: NativeInt): Pointer;
     procedure FreeMemory(P: Pointer);
 
-    // multy-thread: spin lock + memory management
-    function MTGetMemory(Size: NativeInt): Pointer;
-    procedure MTFreeMemory(P: Pointer);
+    // synchronization (spin lock) + memory management
+    function SyncGetMemory(Size: NativeInt): Pointer;
+    procedure SyncFreeMemory(P: Pointer);
   end;
 
+{$ifNdef BRAINMM_UNITTEST}
 implementation
-  uses {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
-       {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif}
-       {$ifdef POSIX}Posix.String_, Posix.SysStat, Posix.Unistd{$endif};
+{$endif}
 
 
  (* Header types and contants *)
 
 const
-  PTR_INVALID = Pointer(1);
+  SIZE_16 = 16;
+  MASK_16_CLEAR = -SIZE_16;
+  MASK_16_TEST = SIZE_16 - 1;
+  SIZE_64 = 64;
+  MASK_64_CLEAR = -SIZE_64;
+  MASK_64_TEST = SIZE_64 - 1;
+  SIZE_K1 = 1024;
+  MASK_K1_CLEAR = -SIZE_K1;
+  MASK_K1_TEST = SIZE_K1 - 1;
+  SIZE_K4 = 4 * 1024;
+  MASK_K4_CLEAR = -SIZE_K4;
+  MASK_K4_TEST = SIZE_K4 - 1;
+  SIZE_K16 = 16 * 1024;
+  MASK_K16_CLEAR = -SIZE_K16;
+  MASK_K16_TEST = SIZE_K16 - 1;
+  SIZE_K32 = 32 * 1024;
+  MASK_K32_CLEAR = -SIZE_K32;
+  MASK_K32_TEST = SIZE_K32 - 1;
+  SIZE_K64 = 64 * 1024;
+  MASK_K64_CLEAR = -SIZE_K64;
+  MASK_K64_TEST = SIZE_K64 - 1;
+
+  B16_PER_PAGE = SIZE_K4 div SIZE_16;
 
   MAX_SMALL_SIZE = 128;
   MAX_SMALL_B16COUNT = MAX_SMALL_SIZE div 16;
@@ -235,6 +265,50 @@ const
   PAGESMODE_USER = 0;
   PAGESMODE_SYSTEM = 1;
   PAGESMODE_JIT = 2;
+
+  PTR_INVALID = Pointer(1);
+  FREEMEM_INVALID = Integer({$ifdef FPC}0{$else}-1{$endif});
+  FREEMEM_DONE = Integer({$ifdef FPC}-1{$else}0{$endif});
+  JITHEAP_MARKER = {PThreadHeap}Pointer(NativeInt(-1));
+
+  {$ifdef LARGEINT}
+    HIGH_NATIVE_BIT = 63;
+  {$else}
+    HIGH_NATIVE_BIT = 31;
+  {$endif}
+  MASK_HIGH_NATIVE_BIT = NativeInt(1) shl HIGH_NATIVE_BIT;
+  MASK_HIGH_NATIVE_TEST = NativeInt(-1) shr 1;
+
+  DEFAULT_BITSETS_SMALL: array[0..15] of Int64 = (
+    {16}   Int64($FFFFFFFFFFFFFFFE),
+    {32}   $5555555555555554,
+    {48}   $2492492492492492,
+    {64}   $1111111111111110,
+    {80}   $0842108421084210,
+    {96}   $0410410410410410,
+    {112}  $0204081020408102,
+    {128}  $0101010101010100,
+    {16-}  Int64($FFFFFFFFFFFFFFF8),
+    {32-}  $5555555555555550,
+    {48-}  $2492492492492490,
+    {64-}  $1111111111111110,
+    {80-}  $0842108421084210,
+    {96-}  $0410410410410410,
+    {112-} $0204081020408100,
+    {128-} $0101010101010100
+  );
+
+  OFFSET_MEDIUM_ALIGN = 16;
+  MASK_MEDIUM_ALIGN = {7}NativeUInt(High(TMemoryAlign)) shl OFFSET_MEDIUM_ALIGN;
+  MASK_MEDIUM_ALLOCATED = NativeUInt(1 shl 24);
+
+  MASK_MEDIUM_SIZE_TEST = not NativeUInt((MAX_MEDIUM_SIZE) and -16);
+  MASK_MEDIUM_SIZE_VALUE = 0;
+  MASK_MEDIUM_EMPTY_TEST = not NativeUInt(MAX_MEDIUM_B16COUNT);
+  MASK_MEDIUM_EMPTY_VALUE = 0;
+  MASK_MEDIUM_ALLOCATED_TEST = MASK_MEDIUM_EMPTY_TEST and not NativeUInt(MASK_MEDIUM_ALIGN or MASK_MEDIUM_ALLOCATED);
+  MASK_MEDIUM_ALLOCATED_VALUE = MASK_MEDIUM_ALLOCATED;
+
 
 type
   PThreadHeap = ^TThreadHeap;
@@ -369,13 +443,13 @@ type
   PSyncStack64 = ^TSyncStack64;
 
   TThreadHeap = {$ifdef OPERATORSUPPORT}packed record{$else}object{$endif}
-  private
+  public
     FNextHeap: PThreadHeap;
     FK1LineSmalls: array[1..8] of PK1LineSmall;
     FMarkerNotSelf: SupposedPtr;
 
     function GetPagesMode: NativeUInt;
-  private
+  public
     // 1kb-lines (small) + 64kb pool (small) routine
     QK1LineFull: PK1LineSmall;
     QK64PoolSmall: PK64PoolSmall;
@@ -389,7 +463,7 @@ type
     function PenaltyGetSmall(B16Count: NativeUInt): Pointer;
     function PenaltyFreeSmall(P: Pointer): Integer;
     {$ifNdef PUREPASCAL}function PenaltyGrowSmallToSmall(P: Pointer; Dest: Pointer): Pointer;{$endif}
-  private
+  public
     // 64kb pool (medium) routine
     QK64PoolMedium: PK64PoolMedium;
     FReserved: Pointer;
@@ -479,6 +553,13 @@ type
 var
   MemoryManager: TBrainMemoryManager;
 
+{$ifdef BRAINMM_UNITTEST}
+
+  function ActualThreadHeap: PThreadHeap;
+implementation
+{$endif}
+
+
 procedure GetMemAligned(var P: Pointer; Align: TMemoryAlign; Size: NativeInt);
 var
   Value: Pointer;
@@ -550,6 +631,21 @@ begin
     RecallFreeMem(Value, 0, P);
   end;
 end;
+
+{$ifNdef MEMORYMANAGEREX}
+function AllocMem(Size: NativeInt): Pointer;
+begin
+  if (Size > 0) then
+  begin
+    Result := MemoryManager.Standard.AllocMem(Size);
+    if (Result = nil) then
+      System.Error(reOutOfMemory);
+  end else
+  begin
+    Result := nil;
+  end;
+end;
+{$endif}
 
 procedure GetMemoryBlock(var Block: MemoryBlock; BlockSize: TMemoryBlockSize);
 var
@@ -726,63 +822,6 @@ function mremap(address: Pointer; length, new_length: NativeUInt;
 
 
  (* Helpfull routine *)
-
-const
-  SIZE_16 = 16;
-  MASK_16_CLEAR = -SIZE_16;
-  MASK_16_TEST = SIZE_16 - 1;
-  SIZE_64 = 64;
-  MASK_64_CLEAR = -SIZE_64;
-  MASK_64_TEST = SIZE_64 - 1;
-  SIZE_K1 = 1024;
-  MASK_K1_CLEAR = -SIZE_K1;
-  MASK_K1_TEST = SIZE_K1 - 1;
-  SIZE_K4 = 4 * 1024;
-  MASK_K4_CLEAR = -SIZE_K4;
-  MASK_K4_TEST = SIZE_K4 - 1;
-  SIZE_K16 = 16 * 1024;
-  MASK_K16_CLEAR = -SIZE_K16;
-  MASK_K16_TEST = SIZE_K16 - 1;
-  SIZE_K32 = 32 * 1024;
-  MASK_K32_CLEAR = -SIZE_K32;
-  MASK_K32_TEST = SIZE_K32 - 1;
-  SIZE_K64 = 64 * 1024;
-  MASK_K64_CLEAR = -SIZE_K64;
-  MASK_K64_TEST = SIZE_K64 - 1;
-
-  B16_PER_PAGE = SIZE_K4 div SizeOf(B16);
-
-  FREEMEM_INVALID = Integer({$ifdef FPC}0{$else}-1{$endif});
-  FREEMEM_DONE = Integer({$ifdef FPC}-1{$else}0{$endif});
-  JITHEAP_MARKER = PThreadHeap(NativeInt(-1));
-
-  {$ifdef LARGEINT}
-    HIGH_NATIVE_BIT = 63;
-  {$else}
-    HIGH_NATIVE_BIT = 31;
-  {$endif}
-  MASK_HIGH_NATIVE_BIT = NativeInt(1) shl HIGH_NATIVE_BIT;
-  MASK_HIGH_NATIVE_TEST = NativeInt(-1) shr 1;
-
-  DEFAULT_BITSETS_SMALL: array[0..15] of Int64 = (
-    {16}   Int64($FFFFFFFFFFFFFFFE),
-    {32}   $5555555555555554,
-    {48}   $2492492492492492,
-    {64}   $1111111111111110,
-    {80}   $0842108421084210,
-    {96}   $0410410410410410,
-    {112}  $0204081020408102,
-    {128}  $0101010101010100,
-    {16-}  Int64($FFFFFFFFFFFFFFF8),
-    {32-}  $5555555555555550,
-    {48-}  $2492492492492490,
-    {64-}  $1111111111111110,
-    {80-}  $0842108421084210,
-    {96-}  $0410410410410410,
-    {112-} $0204081020408100,
-    {128-} $0101010101010100
-  );
-
 
 {$ifdef CONDITIONALEXPRESSIONS}
 {$if Defined(FPC) or (CompilerVersion < 24)}
@@ -1502,7 +1541,7 @@ asm
 end;
 {$endif}
 
-function BitClear(var BitSet: TBitSet8; const Index: NativeUInt): Boolean;
+function BitUnreserve(var BitSet: TBitSet8; const Index: NativeUInt): Boolean;
 {$ifdef PUREPASCAL}
 var
   Mask: NativeInt;
@@ -1520,9 +1559,9 @@ begin
     PVInteger := @BitSet.VIntegers[Byte(Index > 31)];
     Value := PVInteger^;
   {$endif}
-  if (Value and Mask <> 0) then
+  if (Value and Mask = 0) then
   begin
-    Dec(Value, Mask);
+    Inc(Value, Mask);
     {$ifdef LARGEINT}
       BitSet.V64 := Value;
     {$else .SMALLINT}
@@ -1543,14 +1582,14 @@ asm
     cmovnz eax, ecx
     and edx, 31
     mov ecx, [eax]
-    btr ecx, edx
+    bts ecx, edx
     mov [eax], ecx
-    setc al
+    setnc al
   {$else .CPUX64}
     mov rax, [rcx]
-    btr rax, rdx
+    bts rax, rdx
     mov [rcx], rax
-    setc al
+    setnc al
   {$endif}
 end;
 {$endif}
@@ -1594,17 +1633,16 @@ begin
   begin
     // first
     Queue := Next;
-    Right.Prev := {nil} Right.Prev and MASK_K1_TEST;
   end else
   begin
     // break left contact
     Left.Next := NativeUInt(Next) + (Left.Next and MASK_K1_TEST);
+  end;
 
-    // break right contact
-    if (Next <> nil) then
-    begin
-      Right.Prev := NativeUInt(Prev) + (Right.Prev and MASK_K1_TEST);
-    end;
+  // break right contact
+  if (Next <> nil) then
+  begin
+    Right.Prev := NativeUInt(Prev) + (Right.Prev and MASK_K1_TEST);
   end;
 end;
 
@@ -1818,7 +1856,7 @@ begin
   end;
 
   {$ifdef MSWINDOWS}
-    Result := VirtualFree(Block, SIZE_K64, MEM_RELEASE);
+    Result := VirtualFree(Block, 0, MEM_RELEASE);
   {$else .POSIX}
     free(Block);
     Result := True;
@@ -2033,6 +2071,16 @@ asm
 end;
 {$endif}
 
+function ActualThreadHeap: PThreadHeap;
+begin
+  Result := ThreadHeapInstance;
+
+  {$ifdef PUREPASCAL}
+  if (Result = nil) then
+    Result := CreateThreadHeap;
+  {$endif}
+end;
+
 
 { TThreadHeap }
 
@@ -2079,7 +2127,7 @@ asm
   jmp TThreadHeap.ErrorOutOfMemory
 end;
 {$else}
-{$ifNdef RETURN_ADDRESS}
+{$ifNdef RETURNADDRESS}
 const
   ReturnAddress: Pointer = @TThreadHeap.RaiseOutOfMemory;
 {$endif}
@@ -2106,7 +2154,7 @@ asm
   jmp TThreadHeap.ErrorInvalidPtr
 end;
 {$else}
-{$ifNdef RETURN_ADDRESS}
+{$ifNdef RETURNADDRESS}
 const
   ReturnAddress: Pointer = @TThreadHeap.RaiseInvalidPtr;
 {$endif}
@@ -2375,11 +2423,11 @@ asm
   {$ifdef CPUX86}
     mov edx, [ECX].TK1LineSmall.ItemSet.VLow32
     test edx, 1
-    jz TThreadHeap.RaiseInvalidPtr
+    jnz TThreadHeap.RaiseInvalidPtr
   {$else .CPUX64}
     mov r9, [R8].TK1LineSmall.ItemSet.V64
     test r9, 1
-    jz TThreadHeap.RaiseInvalidPtr
+    jnz TThreadHeap.RaiseInvalidPtr
   {$endif}
 
   // if (Line.ItemSet.VInt64 = 0{deferred Full}) then Exit Self.PenaltyGetSmall(B16Count)
@@ -2684,7 +2732,7 @@ end;
 
 function BrainMMFreeMem(P: Pointer): Integer;
 {$ifdef PUREPASCAL}
-{$ifNdef RETURN_ADDRESS}
+{$ifNdef RETURNADDRESS}
 const
   ReturnAddress: Pointer = @BrainMMFreeMem;
 {$endif}
@@ -2916,7 +2964,7 @@ begin
 
   if (Line.ItemSet.VLow32 and 1 = 0{not FullQueue}) then
   begin
-    if (BitClear(Line.ItemSet, Index)) then
+    if (BitUnreserve(Line.ItemSet, Index)) then
     begin
       if (Line.ItemSet.V64 <> DEFAULT_BITSETS_SMALL[Line.Flags and 15]) then
       begin
@@ -2954,7 +3002,7 @@ asm
   {$endif}
 
   // if (Line.FullQueue) then Exit Self.PenaltyFreeSmall(@Line.Items[Index])
-  // if (not BitClear(Index)) then Exit Self.ErrorInvalidPtr
+  // if (not BitUnreserve(Index)) then Exit Self.ErrorInvalidPtr
   {$ifdef CPUX86}
     test [EDX].TK1LineSmall.ItemSet.VLow32, 1
     jnz @penalty_free_mem
@@ -2963,16 +3011,16 @@ asm
     cmovnz edx, eax
     and ecx, 31
     mov eax, [edx]
-    btr eax, ecx
+    bts eax, ecx
     mov [edx], eax
-    jnc @penalty_error
+    jc @penalty_error
   {$else .CPUX64}
     mov r8, [RDX].TK1LineSmall.ItemSet.V64
     test r8, 1
     jnz @penalty_free_mem
-    btr r8, rax
+    bts r8, rax
     mov [RDX].TK1LineSmall.ItemSet.V64, r8
-    jnc @penalty_error
+    jc @penalty_error
   {$endif}
 
   // if (Line.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
@@ -3050,7 +3098,7 @@ end;
 
 function BrainMMRegetMem(P: Pointer; NewSize: NativeUInt): Pointer;
 {$ifdef PUREPASCAL}
-{$ifNdef RETURN_ADDRESS}
+{$ifNdef RETURNADDRESS}
 const
   ReturnAddress: Pointer = @BrainMMRegetMem;
 {$endif}
@@ -3449,7 +3497,7 @@ end;
 
 function BrainMMReallocMem(P: Pointer; NewSize: NativeUInt): Pointer;
 {$ifdef PUREPASCAL}
-{$ifNdef RETURN_ADDRESS}
+{$ifNdef RETURNADDRESS}
 const
   ReturnAddress: Pointer = @BrainMMReallocMem;
 {$endif}
@@ -3637,7 +3685,7 @@ asm
   {$endif}
   jne @not_fast
 
-  // if (PK1LineSmall(P).ModeSize <= {NewSize}NewB16Count * 16) then Exit P (return made none)
+  // if (PK1LineSmall(P).ModeSize >= {NewSize}NewB16Count * 16) then Exit P (return made none)
   {$ifdef CPUX86}
     mov ebx, edx
     and ebx, MASK_K1_CLEAR
@@ -3651,7 +3699,7 @@ asm
     movzx r9, byte ptr TK1LineSmall[R9].ModeSize
     cmp r9, r8
   {$endif}
-  ja @small_grow
+  jb @small_grow
 @return_made_none:
   // Result := const P (v2)
   {$ifdef CPUX86}
@@ -3859,7 +3907,7 @@ asm
   {$endif}
 
   // if (Line.FullQueue) then Exit Self.PenaltyGrowSmallToSmall(mode FullQueue)
-  // if (not BitClear(Index)) then Exit Self.ErrorInvalidPtr
+  // if (not BitUnreserve(Index)) then Exit Self.ErrorInvalidPtr
   {$ifdef CPUX86}
     test [EDX].TK1LineSmall.ItemSet.VLow32, 1
     jnz @penalty_copy_freemem
@@ -3868,16 +3916,16 @@ asm
     cmovnz edx, eax
     and ecx, 31
     mov eax, [edx]
-    btr eax, ecx
+    bts eax, ecx
     mov [edx], eax
-    jnc @penalty_error
+    jc @penalty_error
   {$else .CPUX64}
     mov r8, [RDX].TK1LineSmall.ItemSet.V64
     test r8, 1
     jnz @penalty_copy_freemem
-    btr r8, rax
+    bts r8, rax
     mov [RDX].TK1LineSmall.ItemSet.V64, r8
-    jnc @penalty_error
+    jc @penalty_error
   {$endif}
 
   // if (Line.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
@@ -4004,18 +4052,6 @@ begin
 end;
 {$endif}
 
-
-const
-  OFFSET_MEDIUM_ALIGN = 16;
-  MASK_MEDIUM_ALIGN = {7}NativeUInt(High(TMemoryAlign)) shl OFFSET_MEDIUM_ALIGN;
-  MASK_MEDIUM_ALLOCATED = NativeUInt(1 shl 24);
-
-  MASK_MEDIUM_SIZE_TEST = not NativeUInt((MAX_MEDIUM_SIZE) and -16);
-  MASK_MEDIUM_SIZE_VALUE = 0;
-  MASK_MEDIUM_EMPTY_TEST = not NativeUInt(MAX_MEDIUM_B16COUNT);
-  MASK_MEDIUM_EMPTY_VALUE = 0;
-  MASK_MEDIUM_ALLOCATED_TEST = MASK_MEDIUM_EMPTY_TEST and not NativeUInt(MASK_MEDIUM_ALIGN or MASK_MEDIUM_ALLOCATED);
-  MASK_MEDIUM_ALLOCATED_VALUE = MASK_MEDIUM_ALLOCATED;
 
 type
   TMediumAlignOffsets = packed record
@@ -4932,7 +4968,7 @@ begin
   end;
 
   Result.ThreadHeap := @Self;
-  Result.LineSet.V64 := -1;
+  Result.LineSet.V64 := -1{Empty};
   Result.PrevNext.Prev := 0{not FullQueue};
   SupposedEnqueue(Pointer(QK64PoolSmall), Result, Result.PrevNext);
 end;
@@ -4940,7 +4976,7 @@ end;
 function TThreadHeap.DisposeK64PoolSmall(PoolSmall: PK64PoolSmall): Integer;
 begin
   SupposedDequeue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
-  PoolSmall.LineSet.V64 := 0{non available lines};
+  PoolSmall.LineSet.V64 := 0{none available lines};
   PoolSmall.ThreadHeap := nil;
   PK64PoolMedium(PoolSmall).ThreadHeap := nil;
 
@@ -4963,7 +4999,7 @@ begin
     PoolSmall := QK64PoolSmall;
     if (PoolSmall <> nil) then
     begin
-      if ({has avaialibale lines}PoolSmall.LineSet.V64 <> 0) then Break;
+      if ({has available lines}PoolSmall.LineSet.V64 <> 0) then Break;
       // Full not FullQueue --> FullQueue
       PoolSmall.PrevNext.Prev := PoolSmall.PrevNext.Prev or 1;
       SupposedDequeue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
@@ -5011,7 +5047,7 @@ begin
     SupposedEnqueue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
   end;
 
-  if (not BitClear(PoolSmall.LineSet, Index)) then
+  if (not BitUnreserve(PoolSmall.LineSet, Index)) then
   begin
     Result := Self.ErrorInvalidPtr;
     Exit;
@@ -5019,7 +5055,7 @@ begin
 
   if (PoolSmall.LineSet.V64 = -1{Empty}) then
   begin
-    REsult := DisposeK64PoolSmall(PoolSmall);
+    Result := DisposeK64PoolSmall(PoolSmall);
   end else
   begin
     Result := FREEMEM_DONE;
@@ -5419,7 +5455,7 @@ begin
   end;
 end;
 
-function TJITHeap.MTGetMemory(Size: NativeInt): Pointer;
+function TJITHeap.SyncGetMemory(Size: NativeInt): Pointer;
 begin
   if (Size > 0) then
   begin
@@ -5435,7 +5471,7 @@ begin
   end;
 end;
 
-procedure TJITHeap.MTFreeMemory(P: Pointer);
+procedure TJITHeap.SyncFreeMemory(P: Pointer);
 begin
   if (P <> nil) then
   begin
@@ -5564,10 +5600,18 @@ end;
 
 function AddrAllocMem: Pointer;
 asm
-  {$ifdef CPUX86}
-    lea eax, System.AllocMem
-  {$else .CPUX64}
-    lea rax, System.AllocMem
+  {$ifdef MEMORYMANAGEREX}
+    {$ifdef CPUX86}
+      lea eax, System.AllocMem
+    {$else .CPUX64}
+      lea rax, System.AllocMem
+    {$endif}
+  {$else}
+    {$ifdef CPUX86}
+      lea eax, BrainMM.AllocMem
+    {$else .CPUX64}
+      lea rax, BrainMM.AllocMem
+    {$endif}
   {$endif}
 end;
 
@@ -5664,11 +5708,7 @@ end;
 
 procedure BrainMMInitialize;
 type
-  {$ifdef CONDITIONALEXPRESSIONS}
-    PMemoryMgr = ^{$if Defined(FPC) or (CompilerVersion < 18)}TMemoryManager{$else}TMemoryManagerEx{$ifend};
-  {$else}
-    PMemoryMgr = ^TMemoryManager;
-  {$endif}
+  PMemoryMgr = {$ifdef MEMORYMANAGEREX}^TMemoryManagerEx{$else}^TMemoryManager{$endif};
 begin
   MemoryManager.BrainMM.GetMemoryBlock := BrainMMGetMemoryBlock;
   MemoryManager.BrainMM.FreeMemoryBlock := BrainMMFreeMemoryBlock;
