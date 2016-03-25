@@ -302,13 +302,14 @@ const
   MASK_MEDIUM_ALIGN = {7}NativeUInt(High(TMemoryAlign)) shl OFFSET_MEDIUM_ALIGN;
   MASK_MEDIUM_ALLOCATED = NativeUInt(1 shl 24);
 
-  MASK_MEDIUM_SIZE_TEST = not NativeUInt((MAX_MEDIUM_SIZE) and -16);
+  MASK_MEDIUM_SIZE_TEST = not NativeUInt(High(Word) and -16);
   MASK_MEDIUM_SIZE_VALUE = 0;
-  MASK_MEDIUM_EMPTY_TEST = not NativeUInt(MAX_MEDIUM_B16COUNT);
+  MASK_MEDIUM_EMPTY_TEST = not NativeUInt(High(Word) div 16);
   MASK_MEDIUM_EMPTY_VALUE = 0;
-  MASK_MEDIUM_ALLOCATED_TEST = MASK_MEDIUM_EMPTY_TEST and not NativeUInt(MASK_MEDIUM_ALIGN or MASK_MEDIUM_ALLOCATED);
+  MASK_MEDIUM_ALLOCATED_TEST = (not NativeUInt(MAX_MEDIUM_B16COUNT or MASK_MEDIUM_ALIGN)) or MASK_MEDIUM_ALLOCATED;
   MASK_MEDIUM_ALLOCATED_VALUE = MASK_MEDIUM_ALLOCATED;
-
+  MASK_MEDIUM_TEST = MASK_MEDIUM_EMPTY_TEST xor MASK_MEDIUM_ALLOCATED xor MASK_MEDIUM_ALIGN;
+  MASK_MEDIUM_VALUE = 0;
 
 type
   PThreadHeap = ^TThreadHeap;
@@ -392,7 +393,7 @@ type
   end;
   PHeaderMediumEmptyEx = ^THeaderMediumEmptyEx;
 
-  THeaderMediumList = array[-1..(64 * 1024) div 16 - 7] of THeaderMedium;
+  THeaderMediumList = array[-1..(64 * 1024) div 16 - 8] of THeaderMedium;
   PHeaderMediumList = ^THeaderMediumList;
 
   TK64PoolMedium = packed record
@@ -406,6 +407,7 @@ type
       First: THeaderMediumEmpty;
       Last: THeaderMediumEmpty;
     end;
+    Reserved: B16;
     Items: {Start + }THeaderMediumList;
     Finish: THeaderMedium;
   end;
@@ -553,9 +555,14 @@ type
 var
   MemoryManager: TBrainMemoryManager;
 
+var
+  ThreadHeapList: PThreadHeap;
+  // todo
+  // ALIGNED_PAGES_HASH: array[0..1023] of SupposedPtr{PK4PagesOptions};
+
 {$ifdef BRAINMM_UNITTEST}
 
-  function ActualThreadHeap: PThreadHeap;
+  function CurrentThreadHeap: PThreadHeap;
 implementation
 {$endif}
 
@@ -1822,10 +1829,6 @@ end;
 
  (* Global pages/blocks routine *)
 
-{ ToDo!!! }
-// var
-// ALIGNED_PAGES_HASH: array[0..1023] of SupposedPtr{PK4PagesOptions};
-
 function BrainMMGetMemoryBlock(BlockSize: TMemoryBlockSize;
   PagesMode: NativeUInt): MemoryBlock;
 begin
@@ -1939,9 +1942,7 @@ begin
   Dec(NativeInt(Pages), SIZE_K4);
 
   {$ifdef MSWINDOWS}
-    Result := VirtualFree(Pages,
-      (PNativeUInt(NativeInt(Pages) + SIZE_K4 - SizeOf(NativeUInt))^ + 1) * SIZE_K4,
-      MEM_RELEASE);
+    Result := VirtualFree(Pages, 0, MEM_RELEASE);
   {$else .POSIX}
     free(Pages);
     Result := True;
@@ -1950,9 +1951,6 @@ end;
 
 
  (* Local thread heap memory routine *)
-
-var
-  ThreadHeapList: PThreadHeap;
 
 threadvar
   {$ifdef PUREPASCAL}ThreadHeapInstance: PThreadHeap;{$endif}
@@ -2071,7 +2069,7 @@ asm
 end;
 {$endif}
 
-function ActualThreadHeap: PThreadHeap;
+function CurrentThreadHeap: PThreadHeap;
 begin
   Result := ThreadHeapInstance;
 
@@ -4092,7 +4090,7 @@ begin
       Value := (X + 1) shl 4;
       Value := (Value + AlignMaskTest) and AlignMaskClear;
       Value := (Value + Byte(Value and MASK_K4_TEST = 0) + AlignMaskTest) and AlignMaskClear;
-      AlignOffsets.Values[X] := Value shr 4;
+      AlignOffsets.Values[X] := (Value shr 4) - X - 1;
     end;
   end;
 end;
@@ -4341,22 +4339,29 @@ begin
 
   // previous
   Size := Header.PreviousSize;
-  Dec(Header);
-  Dec(NativeUInt(Header), Size);
-  if (Size and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then goto ptr_invalid;
-  Flags := Header.Flags;
-  if (Flags and (MASK_MEDIUM_ALLOCATED_TEST xor MASK_MEDIUM_ALLOCATED) <> 0) then goto ptr_invalid;
-  if (Word(Flags) = Word(Size shr 4)) then
+  if (Size <> 0) then
   begin
-    if (Flags and MASK_MEDIUM_ALLOCATED = 0) then
+    Dec(Header);
+    Dec(NativeUInt(Header), Size);
+    if (Size and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then goto ptr_invalid;
+    Flags := Header.Flags;
+    if (Flags and (MASK_MEDIUM_ALLOCATED_TEST xor MASK_MEDIUM_ALLOCATED) <> 0) then goto ptr_invalid;
+    if (Word(Flags) = Word(Size shr 4)) then
     begin
-      Result := Result + Cardinal((Flags + 1) shl OFFSET_MEDIUM_LEFT_B16COUNT);
+      if (Flags and MASK_MEDIUM_ALLOCATED = 0) then
+      begin
+        Result := Result + Cardinal((Flags + 1) shl OFFSET_MEDIUM_LEFT_B16COUNT);
+      end;
+    end else
+    begin
+    ptr_invalid:
+      Result := High(NativeUInt);
+      Exit;
     end;
   end else
   begin
-  ptr_invalid:
-    Result := High(NativeUInt);
-    Exit;
+    if (Header <> Pointer(@PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).Items)) then
+      goto ptr_invalid;
   end;
 
   // right
@@ -4366,7 +4371,7 @@ begin
   if (Size <> Header.PreviousSize) then goto ptr_invalid;
   StoredP := Pointer(@PHeaderMediumList(Header)[0]);
   Flags := Header.Flags;
-  if (Flags and (MASK_MEDIUM_ALLOCATED_TEST xor MASK_MEDIUM_ALLOCATED) <> 0) then goto ptr_invalid;
+  if (Flags and MASK_MEDIUM_TEST <> MASK_MEDIUM_VALUE) then goto ptr_invalid;
   if (Flags and MASK_MEDIUM_ALLOCATED = 0) then
   begin
     Size := {B16Count}Word(Flags);
@@ -4389,7 +4394,7 @@ begin
   // inspect
   Empty := P;
   Information := InspectAllocatedMedium(P);
-  if (Information > (OFFSET_MEDIUM_LEFT_B16COUNT - 1)) then
+  if (Information > ((1 shl OFFSET_MEDIUM_LEFT_B16COUNT) - 1)) then
   begin
     if (Information = High(NativeUInt)) then
     begin
@@ -4414,7 +4419,7 @@ begin
   Inc(NativeUInt(Empty), Size);
   Inc(Size, (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4);
   PHeaderMediumEmptyEx(Empty).Size := Size;
-  if (Size <> SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMediumList)) then
+  if (Size <> SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium)) then
   begin
     Dec(NativeUInt(Empty), Size);
     PHeaderMedium(Empty).Flags := Size shr 4;
@@ -5032,9 +5037,26 @@ end;
 
 function TThreadHeap.DisposeK1LineSmall(Line: PK1LineSmall): Integer;
 var
+  Current, Next: PK1LineSmall;
   Index: NativeUInt;
   PoolSmall: PK64PoolSmall;
 begin
+  Current := Self.FK1LineSmalls[(Line.Flags and 7) + 1];
+  if (Current = Line) then
+  begin
+    Self.FK1LineSmalls[(Line.Flags and 7) + 1] := Pointer(Line.Next and MASK_K1_CLEAR);
+  end else
+  begin
+    Next := Pointer(Current.Next and MASK_K1_CLEAR);
+    if (Next <> Line) then
+    repeat
+      Current := Next;
+      Next := Pointer(Current.Next and MASK_K1_CLEAR);
+    until (Next = Line);
+
+    Current.Next := (Current.Next and MASK_K1_TEST) + (Line.Next and MASK_K1_CLEAR);
+  end;
+
   Line.ItemSet.V64 := 0{non available items};
   Line.Flags := 0;
   PoolSmall := Pointer(NativeUInt(Line) and MASK_K64_CLEAR);
@@ -5079,9 +5101,9 @@ begin
 
   Start := @Result.Items[Low(Result.Items)];
   Start.PreviousSize := 0;
-  Start.Flags := {B16Count}High(Result.Items) + {Align: ma16Bytes, Allocated: False}0;
-  Result.Finish.PreviousSize := High(Result.Items) * SizeOf(THeaderMedium);
-  Result.Finish.Flags := {failure B16Count}High(Result.Items) + (Ord(ma16Bytes) shl 16) + ({Allocated}1 shl 24);
+  Start.Flags := {B16Count}(High(Result.Items) + 1) + {Align: ma16Bytes, Allocated: False}0;
+  Result.Finish.PreviousSize := (High(Result.Items) + 1) * SizeOf(THeaderMedium);
+  Result.Finish.Flags := {failure B16Count}0 + (Ord(ma16Bytes) shl 16) + ({Allocated}1 shl 24);
 
   Empty := Pointer(@Result.Items[High(Result.Items)]);
   Result.Empties.First.Prev := nil;

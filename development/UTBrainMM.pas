@@ -9,7 +9,6 @@ unit UTBrainMM;
 interface
   uses BrainMM,
        {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
-       // {$ifdef UNITSCOPENAMES}System.SysUtils{$else}SysUtils{$endif},
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif};
 
 const
@@ -188,7 +187,7 @@ type
   TPointerInfo = object
     Value: Pointer;
     Align: TPointerAlign;
-    Size: NativeUInt;
+    Size: Integer;
     AsSmall: PPointerSmallInfo;
     AsMedium: PPointerMediumInfo;
     AsBig: PPointerBigInfo;
@@ -211,14 +210,17 @@ type
 implementation
 
 
-procedure TEST_NEXT;
+procedure INC_TEST;
 begin
   Inc(TEST_NUMBER);
 
   // breakpoint
-  if (TEST_NUMBER = TEST_NUMBER) then
+  if (TEST_NUMBER = BREAKPOINT) then
     TEST_NUMBER := TEST_NUMBER;
 end;
+
+const
+  PTR_FAILURE = Pointer(High(NativeInt));
 
 type
   TFormatBuffer = array[0..1024] of Char;
@@ -263,75 +265,174 @@ begin
 end;
 
 // make console?
-function Log(const Text: PChar; ModeError: Boolean = False;
+function Log(const Text: PChar; ModeException: Boolean = False;
   CancelAvailable: Boolean = False): Boolean;
 const
   DLG_MODES: array[Boolean] of Integer = (MB_ICONINFORMATION, MB_ICONERROR);
-  DLG_CAPTIONS: array[Boolean] of PChar = ('Information:', 'Error:');
+  DLG_CAPTIONS: array[Boolean] of PChar = ('Information:', 'Exception:');
   DLG_BUTTONS: array[Boolean] of Integer = (MB_OK, MB_OKCANCEL);
 begin
   Result := (ID_OK = MessageBox(GetForegroundWindow, Text,
-    DLG_CAPTIONS[ModeError], DLG_MODES[ModeError] or DLG_BUTTONS[CancelAvailable]));
+    DLG_CAPTIONS[ModeException], DLG_MODES[ModeException] or DLG_BUTTONS[CancelAvailable]));
 end;
 
-procedure ShowError(const Text: PChar);
+procedure ErrorHandler(ErrorCode: TRuntimeError; ErrorAddr: Pointer);
 var
-  Buffer: TFormatBuffer;
-begin
-  // mark as error, append TEST_NUMBER
-  Done := False;
-  Buffer := FormatBuffer('TEST_NEMBER: %d'#13'%s', [TEST_NUMBER, Text]);
-
-  // Ok/Cancel dialog
-  if (not Log(Buffer, True, True)) then Halt;
-end;
-
-procedure ShowErrorFmt(const FmtStr: PChar; const Args: array of const);
-var
-  Buffer: TFormatBuffer;
-begin
-  Buffer := FormatBuffer(FmtStr, Args);
-  ShowError(Buffer);
-end;
-
-procedure ErrorHandler(ErrorCode: Byte; ErrorAddr: Pointer);
-var
-  Error: PChar;
+  Error, S: PChar;
   TextBuffer: TFormatBuffer;
 begin
   // error code to string
-  case TRuntimeError(ErrorCode) of
-    reOutOfMemory: Error := ' (reOutOfMemory)';
-     reInvalidPtr: Error := ' (reInvalidPtr)';
-      reDivByZero: Error := ' (reDivByZero)';
-     reRangeError: Error := ' (reRangeError)';
-    reIntOverflow: Error := ' (reIntOverflow)';
-      reInvalidOp: Error := ' (reInvalidOp)';
-     reZeroDivide: Error := ' (reZeroDivide)';
-       reOverflow: Error := ' (reOverflow)';
-    reInvalidCast: Error := ' (reInvalidCast)';
-reAccessViolation: Error := ' (reAccessViolation)';
-rePrivInstruction: Error := ' (rePrivInstruction)';
-  reStackOverflow: Error := ' (reStackOverflow)';
+  case (ErrorCode) of
+    reOutOfMemory: Error := 'reOutOfMemory';
+     reInvalidPtr: Error := 'reInvalidPtr';
+      reDivByZero: Error := 'reDivByZero';
+     reRangeError: Error := 'reRangeError';
+    reIntOverflow: Error := 'reIntOverflow';
+      reInvalidOp: Error := 'reInvalidOp';
+     reZeroDivide: Error := 'reZeroDivide';
+       reOverflow: Error := 'reOverflow';
+    reInvalidCast: Error := 'reInvalidCast';
+reAccessViolation: Error := 'reAccessViolation';
+rePrivInstruction: Error := 'rePrivInstruction';
+  reStackOverflow: Error := 'reStackOverflow';
   else
-    Error := '';
+    Error := @TextBuffer[High(TextBuffer) - 4 - 5];
+    Error[0] := 'c';
+    Error[1] := 'o';
+    Error[2] := 'd';
+    Error[3] := 'e';
+    Error[4] := ' ';
+    S := Pointer(@Error[5]);
+
+    if (Byte(ErrorCode) > 99) then
+    begin
+      S^ := Char(Ord('0') + Byte(ErrorCode) div 100);
+      Inc(S);
+    end;
+    if (Byte(ErrorCode) > 9) then
+    begin
+      S^ := Char(Ord('0') + (Byte(ErrorCode) div 10) mod 10);
+      Inc(S);
+    end;
+
+    S^ := Char(Ord('0') + Byte(ErrorCode) mod 10);
+    Inc(S);
+    S^ := #0;
   end;
 
-  TextBuffer := FormatBuffer('TEST_NEMBER: %d'#13'Error code %d%s at 0x%p',
-    [TEST_NUMBER, ErrorCode, Error, ErrorAddr]);
+  TextBuffer := FormatBuffer('TEST_NUMBER: %d'#13'Exception %s at 0x%p',
+    [TEST_NUMBER, Error, ErrorAddr]);
 
   // show exception message
   Log(TextBuffer, True);
   Halt;
 end;
 
+procedure ExceptionHandler(P: PExceptionRecord);
+const
+  STATUS_ACCESS_VIOLATION         = $C0000005;
+  STATUS_ARRAY_BOUNDS_EXCEEDED    = $C000008C;
+  STATUS_FLOAT_DENORMAL_OPERAND   = $C000008D;
+  STATUS_FLOAT_DIVIDE_BY_ZERO     = $C000008E;
+  STATUS_FLOAT_INEXACT_RESULT     = $C000008F;
+  STATUS_FLOAT_INVALID_OPERATION  = $C0000090;
+  STATUS_FLOAT_OVERFLOW           = $C0000091;
+  STATUS_FLOAT_STACK_CHECK        = $C0000092;
+  STATUS_FLOAT_UNDERFLOW          = $C0000093;
+  STATUS_INTEGER_DIVIDE_BY_ZERO   = $C0000094;
+  STATUS_INTEGER_OVERFLOW         = $C0000095;
+  STATUS_PRIVILEGED_INSTRUCTION   = $C0000096;
+  STATUS_STACK_OVERFLOW           = $C00000FD;
+  STATUS_CONTROL_C_EXIT           = $C000013A;
+var
+  ErrorCode: TRuntimeError;
+begin
+  case P.ExceptionCode of
+    STATUS_INTEGER_DIVIDE_BY_ZERO:  ErrorCode := reDivByZero;
+    STATUS_ARRAY_BOUNDS_EXCEEDED:   ErrorCode := reRangeError;
+    STATUS_FLOAT_OVERFLOW:          ErrorCode := reOverflow;
+    STATUS_FLOAT_INEXACT_RESULT,
+    STATUS_FLOAT_INVALID_OPERATION,
+    STATUS_FLOAT_STACK_CHECK:       ErrorCode := reInvalidOp;
+    STATUS_FLOAT_DIVIDE_BY_ZERO:    ErrorCode := reZeroDivide;
+    STATUS_INTEGER_OVERFLOW:        ErrorCode := reIntOverflow;
+    STATUS_FLOAT_UNDERFLOW,
+    STATUS_FLOAT_DENORMAL_OPERAND:  ErrorCode := reUnderflow;
+    STATUS_ACCESS_VIOLATION:        ErrorCode := reAccessViolation;
+    STATUS_PRIVILEGED_INSTRUCTION:  ErrorCode := rePrivInstruction;
+    STATUS_CONTROL_C_EXIT:          ErrorCode := reControlBreak;
+    STATUS_STACK_OVERFLOW:          ErrorCode := reStackOverflow;
+  else
+    ErrorCode := TRuntimeError(255);
+  end;
+
+  ErrorHandler(ErrorCode, P.ExceptionAddress);
+end;
+
+procedure SystemError; {$ifNdef CPUINTEL} inline;
+begin
+  System.Error(reInvalidCast);
+end;
+{$else .CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    mov al, reInvalidCast
+  {$else .CPUX64}
+    mov cl, reInvalidCast
+  {$endif}
+  jmp System.Error
+end;
+{$endif}
+
+procedure Check(const CorrectValue: Pointer; var Value: Pointer); overload;
+begin
+  if (CorrectValue <> Value) then
+    SystemError;
+end;
+
+procedure Check(const CorrectValue: Integer; var Value: Integer); overload;
+begin
+  if (CorrectValue <> Value) then
+    SystemError;
+end;
+
+procedure Check(const CorrectValue: Boolean; var Value: Boolean); overload;
+begin
+  if (CorrectValue <> Value) then
+    SystemError;
+end;
+
+procedure Check(const CorrectValue: TMemoryAlign; var Value: TMemoryAlign); overload;
+begin
+  if (CorrectValue <> Value) then
+    SystemError;
+end;
+
+procedure CheckEmptyHeap;
+var
+  ThreadHeap: PThreadHeap;
+  Info: TThreadHeapInfo;
+begin
+  ThreadHeap := ThreadHeapList;
+  while (ThreadHeap <> nil) do
+  begin
+    Info.Init(ThreadHeap);
+
+    Check(0, Info.PoolSmalls.Count);
+    Check(0, Info.PoolMediums.Count);
+
+    ThreadHeap := ThreadHeap.FNextHeap;
+  end;
+
+  // todo
+end;
+
 
 procedure TestSizes;
 
-  procedure CheckSize(const Size, Value: NativeUInt);
+  procedure CheckSize(const Size, Value: Integer);
   begin
-    if (Size <> Value) then
-      System.Error(reInvalidCast);
+    if (Size <> Value) then SystemError;
   end;
 begin
   CheckSize(SizeOf(TBitSet8), 8);
@@ -346,10 +447,315 @@ begin
   CheckSize(SizeOf(TK4Page), 4 * 1024);
 end;
 
+const
+  BASIC_SMALL_SIZES: array[0..11] of Integer = (1, 2, 15, 16, 17, 31, 32, 33,
+    48, 64, 127, 128);
+  BASIC_MEDIUM_SIZES: array[0..6] of Integer = (129, 130, 1024, 4 * 1024,
+    MAX_MEDIUM_SIZE - 16, MAX_MEDIUM_SIZE - 1, MAX_MEDIUM_SIZE);
+  // todo big/large
+  BASIC_BIG_SIZES: array[0..4] of Integer = (MAX_MEDIUM_SIZE + 1,
+    MAX_MEDIUM_SIZE + 16, MAX_MEDIUM_SIZE + 17, MAX_MEDIUM_SIZE + 32, MAX_BIG_SIZE);
+
+procedure TestGetMem;
+var
+  P: Pointer;
+  P2: Pointer;
+
+  i, Size: Integer;
+  Info: TPointerInfo;
+begin
+  INC_TEST;
+  P := PTR_FAILURE;
+  GetMem(P, 0);
+  Check(nil, P);
+
+  INC_TEST;
+  P := PTR_FAILURE;
+  GetMem(P, -1);
+  Check(nil, P);
+
+  INC_TEST;
+  P := PTR_FAILURE;
+  GetMem(P, -100500);
+  Check(nil, P);
+
+  // small
+  for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
+  begin
+    INC_TEST;
+    Size := BASIC_SMALL_SIZES[i];
+
+    P := PTR_FAILURE;
+    GetMem(P, Size);
+    Info.Init(P);
+
+    if (Info.AsSmall = nil) then SystemError;
+    if (Info.Size <> ((Size + 15) and -16)) then SystemError;
+
+    FreeMem(P);
+    CheckEmptyHeap;
+  end;
+
+  // medium
+  for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
+  begin
+    INC_TEST;
+    Size := BASIC_MEDIUM_SIZES[i];
+
+    P := PTR_FAILURE;
+    GetMem(P, Size);
+    Info.Init(P);
+
+    if (Info.AsMedium = nil) then SystemError;
+    if (Info.Size <> ((Size + 15) and -16)) then SystemError;
+
+    FreeMem(P);
+    CheckEmptyHeap;
+  end;
+
+  // 4kb-aligned medium
+  begin
+    GetMem(P, (4 * 1024) - 6 * 16 - SizeOf(THeaderMedium));
+    GetMem(P2, MAX_SMALL_SIZE + 1);
+    if (NativeInt(P2) and MASK_K4_TEST = 0) then SystemError;
+    Info.Init(P);
+    if (Info.AsMedium = nil) or (Info.Size <> (4 * 1024) - 6 * 16) then SystemError;
+    FreeMem(P);
+    FreeMem(P2);
+    CheckEmptyHeap;
+  end;
+
+  // todo big/large
+
+  for i := Low(BASIC_BIG_SIZES) to High(BASIC_BIG_SIZES) do
+  begin
+    INC_TEST;
+    Size := BASIC_BIG_SIZES[i];
+
+    P := PTR_FAILURE;
+    GetMem(P, Size);
+    Info.Init(P);
+
+    if (Info.AsSmall <> nil) or (Info.AsMedium <> nil) then
+      SystemError;
+
+    FreeMem(P);
+    CheckEmptyHeap;
+  end;
+end;
+
+procedure TestGetMemAligned;
+var
+  P: Pointer;
+
+  i, Size: Integer;
+  Align: TMemoryAlign;
+  Info: TPointerInfo;
+begin
+  INC_TEST;
+  P := PTR_FAILURE;
+  GetMemAligned(P, ma16Bytes, 0);
+  Check(nil, P);
+
+  INC_TEST;
+  P := PTR_FAILURE;
+  GetMemAligned(P, ma512Bytes,  -1);
+  Check(nil, P);
+
+  INC_TEST;
+  P := PTR_FAILURE;
+  GetMemAligned(P, ma1024Bytes, -100500);
+  Check(nil, P);
+
+  // small
+  for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
+  for Align := Low(TMemoryAlign) to High(TMemoryAlign) do
+  begin
+    INC_TEST;
+    Size := BASIC_SMALL_SIZES[i];
+
+    P := PTR_FAILURE;
+    GetMemAligned(P, Align, Size);
+    Info.Init(P);
+
+    if (Align = ma16Bytes) then
+    begin
+      if (Info.AsSmall = nil) then SystemError;
+    end else
+    begin
+      if (Info.AsMedium = nil) then SystemError;
+    end;
+    if (Info.Size <> ((Size + 15) and -16)) then SystemError;
+    if (Info.Align < TPointerAlign(Align)) then SystemError;
+
+    FreeMem(P);
+    CheckEmptyHeap;
+  end;
+
+  // medium
+  for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
+  for Align := Low(TMemoryAlign) to High(TMemoryAlign) do
+  begin
+    INC_TEST;
+    Size := BASIC_MEDIUM_SIZES[i];
+
+    P := PTR_FAILURE;
+    GetMemAligned(P, Align, Size);
+    Info.Init(P);
+
+    if (Info.AsMedium = nil) then SystemError;
+    if (Info.Size <> ((Size + 15) and -16)) then SystemError;
+    if (Info.Align < TPointerAlign(Align)) then SystemError;
+
+    FreeMem(P);
+    CheckEmptyHeap;
+  end;
+
+  // todo big/large
+
+  for i := Low(BASIC_BIG_SIZES) to High(BASIC_BIG_SIZES) do
+  for Align := Low(TMemoryAlign) to High(TMemoryAlign) do
+  begin
+    INC_TEST;
+    Size := BASIC_BIG_SIZES[i];
+
+    P := PTR_FAILURE;
+    GetMemAligned(P, Align, Size);
+    Info.Init(P);
+
+    if (Info.AsSmall <> nil) or (Info.AsMedium <> nil) then
+      SystemError;
+    if (Info.Align < TPointerAlign(Align)) then SystemError;
+
+    FreeMem(P);
+    CheckEmptyHeap;
+  end;
+end;
+
+procedure TestAllocMem;
+type
+  TSmallBytes = array[0..127 + 1] of Byte;
+  PSmallBytes = ^TSmallBytes;
+var
+  P: Pointer;
+  PN, P2: Pointer;
+
+  i, j, Size: Integer;
+  Info: TPointerInfo;
+begin
+  INC_TEST;
+  P := AllocMem(0);
+  Check(nil, P);
+
+  INC_TEST;
+  {$if (not Defined(PUREPASCAL)) and (not Defined(BRAINMM_NOREDIRECT))}
+  P := AllocMem(-1);
+  Check(nil, P);
+  {$ifend}
+
+  INC_TEST;
+  {$if (not Defined(PUREPASCAL)) and (not Defined(BRAINMM_NOREDIRECT))}
+  P := AllocMem(-100500);
+  Check(nil, P);
+  {$ifend}
+
+  // small(zero)
+  for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
+  begin
+    INC_TEST;
+    Size := BASIC_SMALL_SIZES[i];
+
+    P := AllocMem(Size);
+    Info.Init(P);
+    if (Info.AsSmall = nil) then SystemError;
+    if (Info.Size <> ((Size + 15) and -16)) then SystemError;
+
+    PN := Pointer(NativeInt(P) + ((Size + 15) and -16));
+    FillChar(PN^, 200, $ff);
+    P2 := AllocMem(Size);
+    if (P2 <> PN) then SystemError;
+    Info.Init(P2);
+    if (Info.AsSmall = nil) then SystemError;
+    if (Info.Size <> ((Size + 15) and -16)) then SystemError;
+
+    for j := 0 to Size - 1 do
+    if (PSmallBytes(P2)[i] <> 0) then SystemError;
+
+    if (PSmallBytes(P2)[(Size + 15) and -16] <> $ff) then SystemError;
+
+    FreeMem(P);
+    FreeMem(P2);
+    CheckEmptyHeap;
+  end;
+end;
+
+procedure TestFreeMem;
+var
+  P: Pointer;
+  ThreadHeap: PThreadHeap;
+
+  SmallPtrs: array[Low(BASIC_SMALL_SIZES)..High(BASIC_SMALL_SIZES)] of Pointer;
+  MediumPtrs: array[Low(BASIC_MEDIUM_SIZES)..High(BASIC_MEDIUM_SIZES)] of Pointer;
+  i, Size: Integer;
+begin
+  INC_TEST;
+  P := nil;
+  FreeMem(P);
+  CheckEmptyHeap;
+
+  INC_TEST;
+  ThreadHeap := CurrentThreadHeap;
+  if (ThreadHeap = nil) then SystemError;
+
+  // small
+  for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
+  begin
+    INC_TEST;
+    Size := BASIC_SMALL_SIZES[i];
+    GetMem(SmallPtrs[i], Size);
+  end;
+
+  // medium
+  for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
+  begin
+    INC_TEST;
+    Size := BASIC_MEDIUM_SIZES[i];
+    GetMem(MediumPtrs[i], Size);
+  end;
+
+  // big
+  INC_TEST;
+  Size := BASIC_BIG_SIZES[Low(BASIC_BIG_SIZES)];
+  GetMem(P, Size);
+
+  // small deferred
+  for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
+  begin
+    INC_TEST;
+    ThreadHeap.PushThreadDeferred(SmallPtrs[i], @TestFreeMem, True);
+  end;
+
+  // medium deferred
+  for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
+  begin
+    INC_TEST;
+    ThreadHeap.PushThreadDeferred(MediumPtrs[i], @TestFreeMem, False);
+  end;
+
+  // each free
+  INC_TEST;
+  FreeMem(P);
+  CheckEmptyHeap;
+end;
+
 procedure RUN_TESTS;
 begin
-  // sizes
+  // basic
   TestSizes;
+  TestGetMem;
+  TestGetMemAligned;
+  TestAllocMem;
+  TestFreeMem;
 
   // todo
 
@@ -365,7 +771,7 @@ procedure TBitSetInfo.Init(const V: TBitSet8);
 var
   i: Integer;
 begin
-  TEST_NEXT;
+  INC_TEST;
   Value := V;
 
   Empty := (V.V64 = -1);
@@ -393,22 +799,22 @@ var
   i: Integer;
   ItemSet: TBitSet8;
 begin
-  TEST_NEXT;
+  INC_TEST;
   Value := V;
   ValueIndex := Integer((NativeUInt(V) div 1024) and 63);
   if (V = nil) or (NativeInt(V) and MASK_K1_TEST <> 0) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   ValuePool := Pointer(NativeInt(V) and MASK_K64_CLEAR);
   if (ValuePool = nil) or (ValuePool.ThreadHeap = nil) or
     (Pointer(not ValuePool.ThreadHeap.FMarkerNotSelf) <> ValuePool.ThreadHeap) or
     (ValuePool.LineSet.V64 and (Int64(1) shl ValueIndex) <> 0) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   Size := V.ModeSize and $f0;
   Index := V.ModeSize and 15;
-  if (Size <> (1 shl (Index and 7 + 1))) then
-    System.Error(reInvalidCast);
+  if (Size <> (16 * (Index and 7 + 1))) then
+    SystemError;
 
   ItemSet := V.ItemSet;
   InFullQueue := (ItemSet.V64 and 1 <> 0);
@@ -418,7 +824,7 @@ begin
   end else
   begin
     if (ItemSet.V64 and (not DEFAULT_BITSETS_SMALL[Index]) <> 0) then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
   Items.Init(ItemSet);
 
@@ -457,7 +863,7 @@ begin
     Right := ValuePool.ThreadHeap.FK1LineSmalls[(Self.Index and 7) + 1];
     repeat
       if (Right = nil) then
-        System.Error(reInvalidCast);
+        SystemError;
 
       if (Right = V) then
         Break;
@@ -495,11 +901,11 @@ var
   i: Integer;
   LineInfo: TK1LineCompactInfo;
 begin
-  TEST_NEXT;
+  INC_TEST;
   Value := V;
   ValueThreadHeap := V.ThreadHeap;
   if (ValueThreadHeap = nil) or (Pointer(not ValueThreadHeap.FMarkerNotSelf) <> ValueThreadHeap) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   InFullQueue := (V.PrevNext.Prev and 1 <> 0);
   Lines.Init(V.LineSet);
@@ -541,7 +947,7 @@ begin
 
     if (Prev.InFullQueue <> Self.InFullQueue) or
       (Prev.ValueThreadHeap <> Self.ValueThreadHeap)  then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
 
   if (Right = nil) then
@@ -554,7 +960,7 @@ begin
 
     if (Next.InFullQueue <> Self.InFullQueue) or
       (Next.ValueThreadHeap <> Self.ValueThreadHeap)  then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
 end;
 
@@ -566,12 +972,12 @@ var
   Count: Integer;
   Empty: PHeaderMediumEmpty;
 begin
-  TEST_NEXT;
+  INC_TEST;
   Value := V;
   ValueThreadHeap := V.ThreadHeap;
   if (V.MarkerNil <> nil) or (ValueThreadHeap = nil) or
     (Pointer(not ValueThreadHeap.FMarkerNotSelf) <> ValueThreadHeap) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   EmptiesCount := 0;
   EmptiesSize := 0;
@@ -580,24 +986,24 @@ begin
 
   Header := @Value.Items[Low(Value.Items)];
   if (Header.PreviousSize <> 0) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   if (not Value.Finish.Allocated) or (Value.Finish.B16Count <> 0) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   while (Header <> @Value.Finish) do
   begin
     if (Header.Allocated) then
     begin
       if (Header.Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then
-        System.Error(reInvalidCast);
+        SystemError;
 
       Inc(AllocatedCount);
       Inc(AllocatedSize, Header.B16Count shl 4);
     end else
     begin
       if (Header.Flags and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then
-        System.Error(reInvalidCast);
+        SystemError;
 
       Inc(EmptiesCount);
       Inc(EmptiesSize, Header.B16Count shl 4);
@@ -606,7 +1012,8 @@ begin
 
     Next := @PHeaderMediumList(Header)[Header.B16Count];
     if (Next.PreviousSize <> Header.B16Count shl 4) then
-      System.Error(reInvalidCast);
+      SystemError;
+    Header := Next;
   end;
 
   Count := 0;
@@ -618,7 +1025,7 @@ begin
   end;
 
   if (Count <> EmptiesCount) then
-    System.Error(reInvalidCast);
+    SystemError;
 end;
 
 procedure TPoolMediumCompactInfo.CheckEmpty(const VEmpty: PHeaderMediumEmpty);
@@ -627,12 +1034,12 @@ var
   S: NativeUInt;
   Current, Next: PHeaderMediumEmpty;
 begin
-  TEST_NEXT;
+  INC_TEST;
 
   if (Value.Empties.First.Prev <> nil) then
-    System.Error(reInvalidCast);
+    SystemError;
   if (Value.Empties.Last.Next <> nil) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   Found := False;
   Current := Value.Empties.First.Next;
@@ -640,24 +1047,24 @@ begin
   begin
     S := PHeaderMediumEmptyEx(Current).Size;
     if (S and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then
-      System.Error(reInvalidCast);
+      SystemError;
 
     if (PHeaderMedium(NativeUInt(Current) - S).Flags and MASK_MEDIUM_EMPTY_TEST
       <> MASK_MEDIUM_EMPTY_VALUE) then
-      System.Error(reInvalidCast);
+      SystemError;
 
     if (Current = VEmpty) then
       Found := True;
 
     Next := Current.Next;
     if (Next.Prev <> Current) then
-      System.Error(reInvalidCast);
+      SystemError;
 
     Current := Next;
   end;
 
   if (not Found) then
-    System.Error(reInvalidCast);
+    SystemError;
 end;
 
 { TPoolMediumInfo }
@@ -680,7 +1087,7 @@ begin
     Prev.Init(Left);
 
     if (Prev.ValueThreadHeap <> Self.ValueThreadHeap)  then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
 
   if (Right = nil) then
@@ -692,7 +1099,7 @@ begin
     Next.Init(Right);
 
     if (Next.ValueThreadHeap <> Self.ValueThreadHeap)  then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
 end;
 
@@ -710,11 +1117,11 @@ var
   PoolMedium: PK64PoolMedium;
   PoolMediumInfo: TPoolMediumInfo;
 begin
-  TEST_NEXT;
-  FillCHar(Self, SizeOf(Self), #0);
+  INC_TEST;
+  FillChar(Self, SizeOf(Self), #0);
   Value := V;
   if (PThreadHeap(not V.FMarkerNotSelf) <> V) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   for i := Low(V.FK1LineSmalls) to High(V.FK1LineSmalls) do
   begin
@@ -727,7 +1134,7 @@ begin
       Inc(LineCounts.Count);
 
       if (LineCompactInfo.InFullQueue) then
-        System.Error(reInvalidCast);
+        SystemError;
 
       if (LineCompactInfo.Items.Full) then
       begin
@@ -747,7 +1154,7 @@ begin
     LineInfo.Init(Line);
 
     if (not LineInfo.InFullQueue) then
-      System.Error(reInvalidCast);
+      SystemError;
 
     Index := (LineInfo.Index and 7) + 1;
     Inc(Self.K1LineSmalls[Index].Count);
@@ -765,10 +1172,10 @@ begin
   for i := Low(Self.K1LineSmalls) to High(Self.K1LineSmalls) do
   with Self.K1LineSmalls[i] do
   begin
-    TEST_NEXT;
+    INC_TEST;
 
     if (Count <> AvailableNonFull + AvailableFull + FullQueue) then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
 
   PoolSmall := V.QK64PoolSmall;
@@ -776,7 +1183,7 @@ begin
   begin
     PoolSmallInfo.Init(PoolSmall);
     if (PoolSmallInfo.InFullQueue) then
-      System.Error(reInvalidCast);
+      SystemError;
 
     Inc(Self.PoolSmalls.Count);
     if (PoolSmallInfo.Lines.Full) then
@@ -806,7 +1213,7 @@ begin
   begin
     PoolSmallInfo.Init(PoolSmall);
     if (not PoolSmallInfo.InFullQueue) then
-      System.Error(reInvalidCast);
+      SystemError;
 
     Inc(Self.PoolSmalls.Count);
     Inc(Self.PoolSmalls.FullQueue);
@@ -828,10 +1235,10 @@ begin
   with Self.PoolSmalls do
   begin
     if (Count <> AvailableNonFull + AvailableFull + FullQueue) then
-      System.Error(reInvalidCast);
+      SystemError;
 
     if (EmptiesSize + AllocatedSize > Count * SizeOf(TK64PoolSmall)) then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
 
   PoolMedium := V.QK64PoolMedium;
@@ -864,23 +1271,23 @@ begin
 
   with Self.PoolMediums do
   if (EmptiesSize + AllocatedSize > Count * SizeOf(THeaderMediumList)) then
-    System.Error(reInvalidCast);
+    SystemError;
 end;
 
 { TPointerSmallInfo }
 
 procedure TPointerSmallInfo.Init(const V: Pointer);
 begin
-  TEST_NEXT;
-  Pool.Init(Pointer(NativeInt(V) and MASK_64_CLEAR));
+  INC_TEST;
+  Pool.Init(Pointer(NativeInt(V) and MASK_K64_CLEAR));
 
   Line.Init(Pointer(NativeInt(V) and MASK_K1_CLEAR));
-  Index := (NativeInt(V) and MASK_64_TEST) shr 4;
+  Index := (NativeInt(V) and MASK_K1_TEST) shr 4;
   if (Line.Items.Bits[Index]) then
-    System.Error(reInvalidCast);
+    SystemError;
 
   if (DEFAULT_BITSETS_SMALL[Line.Index] and (Int64(1) shl Index) = 0) then
-    System.Error(reInvalidCast);
+    SystemError;
 end;
 
 { THeaderMediumInfo }
@@ -898,7 +1305,7 @@ const
     {ma2048Bytes} 2048 - 1
   );
 begin
-  TEST_NEXT;
+  INC_TEST;
   Value := V;
 
   Size := V.B16Count * 16;
@@ -909,27 +1316,29 @@ begin
   begin
     ValueEmpty := nil;
     if (V.Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then
-      System.Error(reInvalidCast);
+      SystemError;
 
-    if (NativeInt(V) and MASK_MEDIUM_ALIGNS[Align] <> 0) then
-      System.Error(reInvalidCast);
+    if ((NativeInt(V) + SizeOf(THeaderMedium)) and MASK_MEDIUM_ALIGNS[Align] <> 0) then
+      SystemError;
   end else
   begin
     ValueEmpty := Pointer(@PHeaderMediumList(V)[Size shr 4 - 1]);
     if (V.Flags and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then
-      System.Error(reInvalidCast);
+      SystemError;
   end;
 
   if (PHeaderMediumList(V)[Size shr 4].PreviousSize <> Size) then
-    System.Error(reInvalidCast);
+    SystemError;
 end;
 
 { TPointerMediumInfo }
 
 procedure TPointerMediumInfo.Init(const V: Pointer);
+var
+  RightHeader: PHeaderMedium;
 begin
-  TEST_NEXT;
-  Pool.Init(Pointer(NativeInt(V) and MASK_64_CLEAR));
+  INC_TEST;
+  Pool.Init(Pointer(NativeInt(V) and MASK_K64_CLEAR));
   inherited Init(PHeaderMedium(NativeInt(V) - SizeOf(THeaderMedium)));
 
   // left
@@ -938,22 +1347,23 @@ begin
     FillChar(Left, SizeOf(Left), #0);
   end else
   begin
-    Left.Init(PHeaderMedium(NativeUInt(Value) - Size - SizeOf(THeaderMedium)));
+    Left.Init(PHeaderMedium(NativeUInt(Value) - Value.PreviousSize - SizeOf(THeaderMedium)));
 
-    if (not Allocated)  and (not Left.Allocated) then
-      System.Error(reInvalidCast);
+    if (not Allocated) and (not Left.Allocated) then
+      SystemError;
   end;
 
   // right
-  if (V = @Pool.Value.Finish) then
+  RightHeader := @PHeaderMediumList(Value)[Size shr 4];
+  if (RightHeader = @Pool.Value.Finish) then
   begin
     FillChar(Right, SizeOf(Right), #0);
   end else
   begin
-    Right.Init(@PHeaderMediumList(Value)[Size shr 4]);
+    Right.Init(RightHeader);
 
-    if (not Allocated)  and (not Right.Allocated) then
-      System.Error(reInvalidCast);
+    if (not Allocated) and (not Right.Allocated) then
+      SystemError;
   end;
 
   // empties
@@ -966,7 +1376,7 @@ end;
 
 procedure TPointerBigInfo.Init(const V: Pointer);
 begin
-  TEST_NEXT;
+  INC_TEST;
 
   // todo
 end;
@@ -975,7 +1385,7 @@ end;
 
 procedure TPointerLargeInfo.Init(const V: Pointer);
 begin
-  TEST_NEXT;
+  INC_TEST;
 
   // todo
 end;
@@ -989,43 +1399,43 @@ const
 var
   X: NativeInt;
 begin
-  TEST_NEXT;
+  INC_TEST;
   Value := V;
   X := NativeInt(V);
   if (V = nil) or (X and 15 <> 0) then
-    System.Error(reInvalidCast);
+    SystemError;
 
-  if (X and 256 * M - 1 = 0) then Align := align256M
+  if (X and (256 * M - 1) = 0) then Align := align256M
   else
-  if (X and 64 * M - 1 = 0) then Align := align64M
+  if (X and (64 * M - 1) = 0) then Align := align64M
   else
-  if (X and 16 * M - 1 = 0) then Align := align16M
+  if (X and (16 * M - 1) = 0) then Align := align16M
   else
-  if (X and 4 * M - 1 = 0) then Align := align4M
+  if (X and (4 * M - 1) = 0) then Align := align4M
   else
-  if (X and 1 * M - 1 = 0) then Align := align1M
+  if (X and (1 * M - 1) = 0) then Align := align1M
   else
-  if (X and 256 * K - 1 = 0) then Align := align256K
+  if (X and (256 * K - 1) = 0) then Align := align256K
   else
-  if (X and 64 * K - 1 = 0) then Align := align64K
+  if (X and (64 * K - 1) = 0) then Align := align64K
   else
-  if (X and 16 * K - 1 = 0) then Align := align16K
+  if (X and (16 * K - 1) = 0) then Align := align16K
   else
-  if (X and 4 * K - 1 = 0) then Align := align4K
+  if (X and (4 * K - 1) = 0) then Align := align4K
   else
-  if (X and 2 * K - 1 = 0) then Align := align2K
+  if (X and (2 * K - 1) = 0) then Align := align2K
   else
-  if (X and 1 * K - 1 = 0) then Align := align1K
+  if (X and (1 * K - 1) = 0) then Align := align1K
   else
-  if (X and 512 - 1 = 0) then Align := align512B
+  if (X and (512 - 1) = 0) then Align := align512B
   else
-  if (X and 256 - 1 = 0) then Align := align256B
+  if (X and (256 - 1) = 0) then Align := align256B
   else
-  if (X and 128 - 1 = 0) then Align := align128B
+  if (X and (128 - 1) = 0) then Align := align128B
   else
-  if (X and 64 - 1 = 0) then Align := align64B
+  if (X and (64 - 1) = 0) then Align := align64B
   else
-  if (X and 32 - 1 = 0) then Align := align32B
+  if (X and (32 - 1) = 0) then Align := align32B
   else
   Align := align16B;
 
@@ -1041,10 +1451,12 @@ begin
     begin
       AsSmall := Pointer(@_[0]);
       AsSmall.Init(V);
+      Size := AsSmall.Line.Size;
     end else
     begin
       AsMedium := Pointer(@_[0]);
       AsMedium.Init(V);
+      Size := AsMedium.Size;
     end;
   end else
   begin
@@ -1060,20 +1472,16 @@ end;
 
 procedure TJitHeapInfo.Init(const V: TJitHeap);
 begin
-  TEST_NEXT;
+  INC_TEST;
   Value := V;
 
   // todo
 end;
 
 
-
-
-
-
-
 initialization
-  System.ErrorProc := ErrorHandler;
+  System.ErrorProc := Pointer(@ErrorHandler);
+  System.ExceptObjProc := Pointer(@ExceptionHandler);
   RUN_TESTS;
 
 end.
