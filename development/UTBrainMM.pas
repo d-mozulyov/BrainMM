@@ -12,7 +12,7 @@ interface
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif};
 
 const
-  BREAKPOINT = 0;
+  BREAKPOINT = 5411;
 
 var
   Done: Boolean = True;
@@ -207,6 +207,13 @@ type
   PJitHeapInfo = ^TJitHeapInfo;
 
 
+type
+  PPointerList = ^TPointerList;
+  TPointerList = array[0..(Maxint div 16) - 1] of Pointer;
+
+  TSmallBytes = array[0..127 + 1] of Byte;
+  PSmallBytes = ^TSmallBytes;
+
 implementation
 
 
@@ -384,6 +391,55 @@ asm
 end;
 {$endif}
 
+procedure Mix2kPtrs(const List: PPointerList; const Count: Integer);
+type
+  TPointerIndex = record
+    Index: Integer;
+    Value: Pointer;
+  end;
+var
+  Buffer: array[0..2000 - 1] of TPointerIndex;
+  Temp: TPointerIndex;
+  i, j: Integer;
+begin
+  for i := 0 to Count - 1 do
+  with Buffer[i] do
+  begin
+    Index := Random(High(Integer));
+    Value := List[i];
+  end;
+
+  for i := 0 to Count - 2 do
+  for j := i + 1 to Count - 1 do
+  if (Buffer[i].Index > Buffer[j].Index) then
+  begin
+    Temp := Buffer[i];
+    Buffer[i] := Buffer[j];
+    Buffer[j] := Temp;
+  end;
+
+  for i := 0 to Count - 1 do
+    List[i] := Buffer[i].Value;
+end;
+
+procedure MixPointers(var Pointers: array of Pointer);
+var
+  Current: PPointer;
+  Count: Integer;
+begin
+  Current := @Pointers[Low(Pointers)];
+  Count := Length(Pointers);
+
+  while (Count > 2000) do
+  begin
+    Mix2kPtrs(PPointerList(Current), 2000);
+    Inc(Current, 2000);
+    Dec(Count, 2000);
+  end;
+
+  Mix2kPtrs(PPointerList(Current), Count);
+end;
+
 procedure Check(const CorrectValue: Pointer; var Value: Pointer); overload;
 begin
   if (CorrectValue <> Value) then
@@ -420,6 +476,9 @@ begin
 
     Check(0, Info.PoolSmalls.Count);
     Check(0, Info.PoolMediums.Count);
+
+    if (ThreadHeap.Deferreds.Assigned)
+      then SystemError;
 
     ThreadHeap := ThreadHeap.FNextHeap;
   end;
@@ -633,9 +692,6 @@ begin
 end;
 
 procedure TestAllocMem;
-type
-  TSmallBytes = array[0..127 + 1] of Byte;
-  PSmallBytes = ^TSmallBytes;
 var
   P: Pointer;
   PN, P2: Pointer;
@@ -748,6 +804,194 @@ begin
   CheckEmptyHeap;
 end;
 
+procedure TestSmall;
+var
+  i: Integer;
+  ThreadHeap: PThreadHeap;
+  HeapInfo: TThreadHeapInfo;
+
+  P: Pointer;
+  PTRS_16_FIRST: array[3..63] of Pointer;
+  PTRS_16_SECOND: array[1..63] of Pointer;
+  PTRS_128: array[1..7] of Pointer;
+  PTRS_128_MANY: array[0..7 * 64 - 1] of Pointer;
+
+  Index, Size, j: Integer;
+  Info: TPointerInfo;
+  PTRS: array[0..2000 - 1] of Pointer;
+begin
+  INC_TEST;
+  ThreadHeap := CurrentThreadHeap;
+  if (ThreadHeap = nil) then SystemError;
+
+  // first line
+  for i := Low(PTRS_16_FIRST) to High(PTRS_16_FIRST) do
+  begin
+    INC_TEST;
+    GetMem(PTRS_16_FIRST[i], 16);
+    if ((NativeInt(PTRS_16_FIRST[i]) shr 4) and 63 <> i) then
+      SystemError;
+  end;
+
+  INC_TEST;
+  HeapInfo.Init(ThreadHeap);
+  Check(1, HeapInfo.K1LineSmalls[1].Count);
+  Check(1, HeapInfo.K1LineSmalls[1].AvailableFull);
+
+  INC_TEST;
+  i := Low(PTRS_16_SECOND);
+  GetMem(PTRS_16_SECOND[i], 16);
+  HeapInfo.Init(ThreadHeap);
+  Check(2, HeapInfo.K1LineSmalls[1].Count);
+  Check(1, HeapInfo.K1LineSmalls[1].AvailableNonFull);
+  Check(0, HeapInfo.K1LineSmalls[1].AvailableFull);
+  Check(1, HeapInfo.K1LineSmalls[1].FullQueue);
+
+  // second line
+  for i := Low(PTRS_16_SECOND) + 1 to High(PTRS_16_SECOND) do
+  begin
+    INC_TEST;
+    GetMem(PTRS_16_SECOND[i], 16);
+    if ((NativeInt(PTRS_16_SECOND[i]) shr 4) and 63 <> i) then
+      SystemError;
+  end;
+
+  INC_TEST;
+  HeapInfo.Init(ThreadHeap);
+  Check(2, HeapInfo.K1LineSmalls[1].Count);
+  Check(1, HeapInfo.K1LineSmalls[1].AvailableFull);
+  Check(1, HeapInfo.K1LineSmalls[1].FullQueue);
+
+  // free: available full
+  INC_TEST;
+  FreeMem(PTRS_16_SECOND[Low(PTRS_16_SECOND)]);
+  HeapInfo.Init(ThreadHeap);
+  Check(2, HeapInfo.K1LineSmalls[1].Count);
+  Check(1, HeapInfo.K1LineSmalls[1].AvailableNonFull);
+  Check(0, HeapInfo.K1LineSmalls[1].AvailableFull);
+  Check(1, HeapInfo.K1LineSmalls[1].FullQueue);
+
+  // free: full queue
+  INC_TEST;
+  FreeMem(PTRS_16_FIRST[Low(PTRS_16_FIRST)]);
+  HeapInfo.Init(ThreadHeap);
+  Check(2, HeapInfo.K1LineSmalls[1].Count);
+  Check(2, HeapInfo.K1LineSmalls[1].AvailableNonFull);
+  Check(0, HeapInfo.K1LineSmalls[1].AvailableFull);
+  Check(0, HeapInfo.K1LineSmalls[1].FullQueue);
+
+  // free: 2 lines
+  INC_TEST;
+  for i := Low(PTRS_16_FIRST) + 1 to High(PTRS_16_FIRST) do
+    FreeMem(PTRS_16_FIRST[i]);
+  for i := Low(PTRS_16_SECOND) + 1 to High(PTRS_16_SECOND) do
+    FreeMem(PTRS_16_SECOND[i]);
+  CheckEmptyHeap;
+
+  // another size: 128 bytes
+  for i := Low(PTRS_128) to High(PTRS_128) do
+  begin
+    INC_TEST;
+    GetMem(PTRS_128[i], 128);
+    if ((NativeInt(PTRS_128[i]) shr 7) and 7 <> i) then
+      SystemError;
+  end;
+
+  INC_TEST;
+  HeapInfo.Init(ThreadHeap);
+  Check(1, HeapInfo.K1LineSmalls[8].Count);
+  Check(1, HeapInfo.K1LineSmalls[8].AvailableFull);
+
+  INC_TEST;
+  GetMem(P, 128);
+  HeapInfo.Init(ThreadHeap);
+  Check(2, HeapInfo.K1LineSmalls[8].Count);
+  Check(1, HeapInfo.K1LineSmalls[8].AvailableNonFull);
+  Check(0, HeapInfo.K1LineSmalls[8].AvailableFull);
+  Check(1, HeapInfo.K1LineSmalls[8].FullQueue);
+
+  // free 128
+  INC_TEST;
+  FreeMem(P);
+  for i := Low(PTRS_128) to High(PTRS_128) do FreeMem(PTRS_128[i]);
+  CheckEmptyHeap;
+
+  // small pool check (128)
+  begin
+    for i := Low(PTRS_128_MANY) to High(PTRS_128_MANY) do
+    begin
+      INC_TEST;
+      GetMem(PTRS_128_MANY[i], 128);
+    end;
+    HeapInfo.Init(ThreadHeap);
+    Check(1, HeapInfo.PoolSmalls.Count);
+    Check(1, HeapInfo.PoolSmalls.AvailableFull);
+    Check(64, HeapInfo.K1LineSmalls[8].Count);
+    Check(1, HeapInfo.K1LineSmalls[8].AvailableFull);
+    Check(63, HeapInfo.K1LineSmalls[8].FullQueue);
+
+    INC_TEST;
+    GetMem(P, 128);
+    HeapInfo.Init(ThreadHeap);
+    Check(2, HeapInfo.PoolSmalls.Count);
+    Check(1, HeapInfo.PoolSmalls.AvailableNonFull);
+    Check(1, HeapInfo.PoolSmalls.FullQueue);
+    Check(64 + 1, HeapInfo.K1LineSmalls[8].Count);
+    Check(1, HeapInfo.K1LineSmalls[8].AvailableNonFull);
+    Check(64, HeapInfo.K1LineSmalls[8].FullQueue);
+
+    INC_TEST;
+    FreeMem(P);
+    for i := Low(PTRS_128_MANY) to High(PTRS_128_MANY) do FreeMem(PTRS_128_MANY[i]);
+    CheckEmptyHeap;
+  end;
+
+  // allocate random
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+
+    Index := Random(8);
+    Size := (Index + 1) shl 4;
+    GetMem(P, Size);
+    PTRS[i] := P;
+
+    Index := Index + (i and (255 and -8));
+    FillChar(P^, Size, Byte(Index));
+  end;
+
+  // try heap analize
+  INC_TEST;
+  HeapInfo.Init(ThreadHeap);
+
+  // mixup
+  MixPointers(PTRS);
+
+  // free random
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+    P := PTRS[i];
+    Info.Init(P);
+    Index := PByte(P)^;
+    Size := ((Index and 7) + 1) shl 4;
+
+    if (Info.AsSmall = nil) or (Info.Size <> Size) then
+      SystemError;
+
+    for j := 0 to Size - 1 do
+    if (PSmallBytes(P)[j] <> Byte(Index)) then
+      SystemError;
+
+    FreeMem(P);
+  end;
+
+  // check empty
+  INC_TEST;
+  CheckEmptyHeap;
+end;
+
+
 procedure RUN_TESTS;
 begin
   // basic
@@ -756,6 +1000,9 @@ begin
   TestGetMemAligned;
   TestAllocMem;
   TestFreeMem;
+
+  // small
+  TestSmall;
 
   // todo
 

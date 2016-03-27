@@ -3078,16 +3078,16 @@ var
 begin
   // dequeue
   Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-  SupposedDequeue(Pointer(QK64PoolSmallFull), Line, Line.FullPrevNext);
+  SupposedDequeue(Pointer(QK1LineFull), Line, Line.FullPrevNext);
 
-  // retrieve bitset
-  Flags := Line.Flags;
-  Line.ItemSet.V64 := DEFAULT_BITSETS_SMALL[{Index}Flags and 15];
+  // full bitset
+  Line.ItemSet.V64 := 0;
 
   // move to line smalls list
+  Flags := Line.Flags;
   B16Count := (Flags and $ff) shr 4;
   Next := FK1LineSmalls[B16Count];
-  Line.Next := NativeUInt(Next) + (Flags and MASK_K1_CLEAR);
+  Line.Next := NativeUInt(Next) + (Flags and MASK_K1_TEST);
   FK1LineSmalls[B16Count] := Line;
 
   // free small memory
