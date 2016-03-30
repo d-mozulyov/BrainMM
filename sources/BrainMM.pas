@@ -4310,15 +4310,14 @@ end;
     SelfRightB16Count: Word:12;
     Reserved: Byte:4;
     Align: TMemoryAlign:3;
-    Reserved: Byte:1;
     RightEmpty: Boolean:1;
-    LeftEmptyB16Count: Word:11;
+    LeftEmptyB16Count: Word:12;
   end;
 }
 
 const
-  OFFSET_MEDIUM_LEFT_B16COUNT = (32 - 11);
-  FLAG_MEDIUM_RIGHT_EMPTY = NativeUInt(1 shl (OFFSET_MEDIUM_ALIGN + 3 + 1));
+  OFFSET_MEDIUM_LEFT_B16COUNT = (32 - 12);
+  FLAG_MEDIUM_RIGHT_EMPTY = NativeUInt(1 shl (OFFSET_MEDIUM_ALIGN + 3));
 
 function InspectAllocatedMedium(P: Pointer): NativeUInt;
 label
@@ -4345,7 +4344,7 @@ begin
     Dec(NativeUInt(Header), Size);
     if (Size and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then goto ptr_invalid;
     Flags := Header.Flags;
-    if (Flags and (MASK_MEDIUM_ALLOCATED_TEST xor MASK_MEDIUM_ALLOCATED) <> 0) then goto ptr_invalid;
+    if (Flags and MASK_MEDIUM_TEST <> MASK_MEDIUM_VALUE) then goto ptr_invalid;
     if (Word(Flags) = Word(Size shr 4)) then
     begin
       if (Flags and MASK_MEDIUM_ALLOCATED = 0) then
@@ -4404,8 +4403,8 @@ begin
     begin
       // left empty: remove from pool
       Dec(Empty, 2);
-      Left := PHeaderMediumEmpty(Empty).Prev;
-      Right := PHeaderMediumEmpty(Empty).Next;
+      Left := Empty.Prev;
+      Right := Empty.Next;
       Left.Next := Right;
       Right.Prev := Left;
       Inc(Empty, 2);
