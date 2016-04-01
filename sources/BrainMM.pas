@@ -60,7 +60,8 @@ unit BrainMM;
     {$ifend}
     {$if CompilerVersion < 23}
       {$define CPUX86}
-    {$else}
+    {$ifend}
+    {$if CompilerVersion >= 23}
       {$define UNITSCOPENAMES}
       {$define RETURNADDRESS}
     {$ifend}
@@ -75,7 +76,8 @@ unit BrainMM;
     {$define CPUX86}
   {$endif}
 {$endif}
-{$U-}{$V+}{$B-}{$X+}{$T+}{$P+}{$H+}{$J-}{$Z1}{$A4}
+{$U-}{$V+}{$B-}{$X+}{$T+}{$P+}{$H+}{$J-}{$Z1}
+{$ifdef CONDITIONALEXPRESSIONS}{$A4}{$else}{$A+}{$endif}
 {$O+}{$R-}{$I-}{$Q-}{$W-}
 {$ifdef CONDITIONALEXPRESSIONS}
   {$if Defined(CPUX86) or Defined(CPUX64)}
@@ -83,7 +85,8 @@ unit BrainMM;
   {$ifend}
   {$if Defined(CPUX64) or Defined(CPUARM64)}
     {$define LARGEINT}
-  {$else}
+  {$ifend}
+  {$if (not Defined(CPUX64)) and (not Defined(CPUARM64))}
     {$define SMALLINT}
   {$ifend}
   {$if Defined(FPC) or (CompilerVersion >= 18)}
@@ -92,6 +95,7 @@ unit BrainMM;
 {$else}
   {$define CPUINTEL}
   {$define SMALLINT}
+  {$define MSWINDOWS}
 {$endif}
 {$ifdef KOL_MCK}
   {$define KOL}
@@ -114,9 +118,13 @@ unit BrainMM;
 {$endif}
 
 interface
-  uses {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
-       {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif}
-       {$ifdef POSIX}Posix.String_, Posix.SysStat, Posix.Unistd{$endif};
+  uses {$ifdef CONDITIONALEXPRESSIONS}
+         {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
+         {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif}
+         {$ifdef POSIX}Posix.String_, Posix.SysStat, Posix.Unistd{$endif};
+       {$else}
+         Windows;
+       {$endif}
 
 type
   // standard types
@@ -586,14 +594,14 @@ begin
       Value := MemoryManager.BrainMM.GetMemAligned(Align, NativeUInt(Size));
       P := Value;
       if (Value = nil) then
-        System.Error(reOutOfMemory);
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
     end else
     begin
       P := nil;
     end;
   end else
   begin
-    System.Error(reInvalidCast);
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
   end;
 end;
 
@@ -603,7 +611,7 @@ begin
   begin
     Result := MemoryManager.Standard.GetMem(NativeUInt(Size));
     if (Result = nil) then
-      System.Error(reOutOfMemory);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
   end else
   begin
     Result := nil;
@@ -617,7 +625,7 @@ begin
   if (Value <> nil) then
   begin
     if (MemoryManager.Standard.FreeMem(Value) {$ifdef FPC}={$else}<>{$endif} 0) then
-      System.Error(reInvalidPtr);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
   end;
 
   P := nil;
@@ -636,7 +644,7 @@ begin
       Value := MemoryManager.BrainMM.RegetMem(Value, NativeUInt(NewSize));
       P := Value;
       if (Value = nil) then
-        System.Error(reOutOfMemory);
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
     end else
     begin
       RecallGetMem(nil, NewSize, P);
@@ -654,7 +662,7 @@ begin
   begin
     Result := MemoryManager.Standard.AllocMem(Size);
     if (Result = nil) then
-      System.Error(reOutOfMemory);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
   end else
   begin
     Result := nil;
@@ -671,10 +679,10 @@ begin
     Value := MemoryManager.BrainMM.GetMemoryBlock(BlockSize, PAGESMODE_USER);
     Block := Value;
     if (Value = nil) then
-      System.Error(reOutOfMemory);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
   end else
   begin
-    System.Error(reInvalidCast);
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
   end;
 end;
 
@@ -683,7 +691,7 @@ begin
   if (Block <> nil) then
   begin
     if (not MemoryManager.BrainMM.FreeMemoryBlock(Block, PAGESMODE_USER)) then
-      System.Error(reInvalidPtr);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
   end;
 end;
 
@@ -696,7 +704,7 @@ begin
     Value := MemoryManager.BrainMM.GetMemoryPages(NativeUInt(Count), PAGESMODE_USER);
     Pages := Value;
     if (Value = nil) then
-      System.Error(reOutOfMemory);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
   end else
   begin
     Pages := nil;
@@ -714,10 +722,10 @@ begin
     begin
       Value := MemoryManager.BrainMM.RegetMemoryPages(Value, NativeUInt(NewCount), PAGESMODE_USER);
       if (Value = PTR_INVALID) then
-        System.Error(reInvalidPtr)
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif}
       else
       if (Value = nil) then
-        System.Error(reOutOfMemory)
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif}
       else
         Pages := Value;
     end else
@@ -742,10 +750,10 @@ begin
     begin
       Value := MemoryManager.BrainMM.ReallocMemoryPages(Value, NativeUInt(NewCount), PAGESMODE_USER);
       if (Value = PTR_INVALID) then
-        System.Error(reInvalidPtr)
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif}
       else
       if (Value = nil) then
-        System.Error(reOutOfMemory)
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif}
       else
         Pages := Value;
     end else
@@ -765,7 +773,7 @@ begin
   begin
     if (NativeInt(Pages) and (4 * 1024 - 1) <> 0) or
       (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PAGESMODE_USER)) then
-      System.Error(reInvalidPtr);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
   end;
 end;
 
@@ -916,7 +924,7 @@ begin
       begin
         {$ifdef MSWINDOWS}
           if (not VirtualProtect(Pages, SIZE_K4 * Count, ACCESS_RIGHTS[Byte(Rights)], Protect)) then
-            System.Error(reInvalidPtr);
+            {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
         {$else .POSIX}
           // Prot = Byte(Rights)
           {$MESSAGE 'ToDo'}
@@ -924,11 +932,11 @@ begin
       end;
     end else
     begin
-      System.Error(reInvalidPtr);
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
     end;
   end else
   begin
-    System.Error(reInvalidCast);
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
   end;
 end;
 
@@ -972,7 +980,7 @@ end;
 procedure ThreadPause;
 {$ifdef CPUINTEL}
 asm
-  pause
+  DB $F3, $90 // pause
 end;
 {$else}
 begin
@@ -1089,7 +1097,7 @@ procedure CheckSSESupport;
 asm
   push ebx
   mov eax, 1
-  cpuid
+  DB $0F, $A2 // cpuid
   test edx, 02000000h
   setnz byte ptr [SSE_SUPPORT]
   pop ebx
@@ -1149,24 +1157,24 @@ asm
   {$endif}
 
   {$ifdef CPUX86}
-    movaps xmm7, [eax + 7*16]
-    movaps [edx + 7*16], xmm7
-    movaps xmm6, [eax + 6*16]
-    movaps [edx + 6*16], xmm6
-    movaps xmm5, [eax + 5*16]
-    movaps [edx + 5*16], xmm5
-    movaps xmm4, [eax + 4*16]
-    movaps [edx + 4*16], xmm4
-    movaps xmm3, [eax + 3*16]
-    movaps [edx + 3*16], xmm3
-    movaps xmm2, [eax + 2*16]
-    movaps [edx + 2*16], xmm2
-    movaps xmm1, [eax + 1*16]
-    movaps [edx + 1*16], xmm1
-    movaps xmm0, [eax]
-    nop
-    movaps [edx], xmm0
-    nop
+    DB $0F, $28, $78, $70 // movaps xmm7, [eax + 7*16]
+    DB $0F, $29, $7A, $70 // movaps [edx + 7*16], xmm7
+    DB $0F, $28, $70, $60 // movaps xmm6, [eax + 6*16]
+    DB $0F, $29, $72, $60 // movaps [edx + 6*16], xmm6
+    DB $0F, $28, $68, $50 // movaps xmm5, [eax + 5*16]
+    DB $0F, $29, $6A, $50 // movaps [edx + 5*16], xmm5
+    DB $0F, $28, $60, $40 // movaps xmm4, [eax + 4*16]
+    DB $0F, $29, $62, $40 // movaps [edx + 4*16], xmm4
+    DB $0F, $28, $58, $30 // movaps xmm3, [eax + 3*16]
+    DB $0F, $29, $5A, $30 // movaps [edx + 3*16], xmm3
+    DB $0F, $28, $50, $20 // movaps xmm2, [eax + 2*16]
+    DB $0F, $29, $52, $20 // movaps [edx + 2*16], xmm2
+    DB $0F, $28, $48, $10 // movaps xmm1, [eax + 1*16]
+    DB $0F, $29, $4A, $10 // movaps [edx + 1*16], xmm1
+    DB $0F, $28, $00      // movaps xmm0, [eax]
+    DB $90                // nop
+    DB $0F, $29, $02      // movaps [edx], xmm0
+    DB $90                // nop
   {$else .CPUX64}
     movaps xmm7, [rax + 7*16]
     movaps [rdx + 7*16], xmm7
@@ -1302,22 +1310,22 @@ asm
   {$endif}
 
   {$ifdef CPUX86}
-    movaps xmm7, [eax - 7*16 - 16]
-    movaps [edx - 7*16 - 16], xmm7
-    movaps xmm6, [eax - 6*16 - 16]
-    movaps [edx - 6*16 - 16], xmm6
-    movaps xmm5, [eax - 5*16 - 16]
-    movaps [edx - 5*16 - 16], xmm5
-    movaps xmm4, [eax - 4*16 - 16]
-    movaps [edx - 4*16 - 16], xmm4
-    movaps xmm3, [eax - 3*16 - 16]
-    movaps [edx - 3*16 - 16], xmm3
-    movaps xmm2, [eax - 2*16 - 16]
-    movaps [edx - 2*16 - 16], xmm2
-    movaps xmm1, [eax - 1*16 - 16]
-    movaps [edx - 1*16 - 16], xmm1
-    movaps xmm0, [eax - 0*16 - 16]
-    movaps [edx - 0*16 - 16], xmm0
+    DB $0F, $28, $78, $80 // movaps xmm7, [eax - 7*16 - 16]
+    DB $0F, $29, $7A, $80 // movaps [edx - 7*16 - 16], xmm7
+    DB $0F, $28, $70, $90 // movaps xmm6, [eax - 6*16 - 16]
+    DB $0F, $29, $72, $90 // movaps [edx - 6*16 - 16], xmm6
+    DB $0F, $28, $68, $A0 // movaps xmm5, [eax - 5*16 - 16]
+    DB $0F, $29, $6A, $A0 // movaps [edx - 5*16 - 16], xmm5
+    DB $0F, $28, $60, $B0 // movaps xmm4, [eax - 4*16 - 16]
+    DB $0F, $29, $62, $B0 // movaps [edx - 4*16 - 16], xmm4
+    DB $0F, $28, $58, $C0 // movaps xmm3, [eax - 3*16 - 16]
+    DB $0F, $29, $5A, $C0 // movaps [edx - 3*16 - 16], xmm3
+    DB $0F, $28, $50, $D0 // movaps xmm2, [eax - 2*16 - 16]
+    DB $0F, $29, $52, $D0 // movaps [edx - 2*16 - 16], xmm2
+    DB $0F, $28, $48, $E0 // movaps xmm1, [eax - 1*16 - 16]
+    DB $0F, $29, $4A, $E0 // movaps [edx - 1*16 - 16], xmm1
+    DB $0F, $28, $40, $F0 // movaps xmm0, [eax - 0*16 - 16]
+    DB $0F, $29, $42, $F0 // movaps [edx - 0*16 - 16], xmm0
   {$else .CPUX64}
     movaps xmm7, [rax - 7*16 - 16]
     movaps [rdx - 7*16 - 16], xmm7
@@ -1390,22 +1398,22 @@ asm
   {$endif}
 
   {$ifdef CPUX86}
-    movaps xmm7, [eax - 7*16 - 16]
-    movaps [edx - 7*16 - 16], xmm7
-    movaps xmm6, [eax - 6*16 - 16]
-    movaps [edx - 6*16 - 16], xmm6
-    movaps xmm5, [eax - 5*16 - 16]
-    movaps [edx - 5*16 - 16], xmm5
-    movaps xmm4, [eax - 4*16 - 16]
-    movaps [edx - 4*16 - 16], xmm4
-    movaps xmm3, [eax - 3*16 - 16]
-    movaps [edx - 3*16 - 16], xmm3
-    movaps xmm2, [eax - 2*16 - 16]
-    movaps [edx - 2*16 - 16], xmm2
-    movaps xmm1, [eax - 1*16 - 16]
-    movaps [edx - 1*16 - 16], xmm1
-    movaps xmm0, [eax - 0*16 - 16]
-    movaps [edx - 0*16 - 16], xmm0
+    DB $0F, $28, $78, $80 // movaps xmm7, [eax - 7*16 - 16]
+    DB $0F, $29, $7A, $80 // movaps [edx - 7*16 - 16], xmm7
+    DB $0F, $28, $70, $90 // movaps xmm6, [eax - 6*16 - 16]
+    DB $0F, $29, $72, $90 // movaps [edx - 6*16 - 16], xmm6
+    DB $0F, $28, $68, $A0 // movaps xmm5, [eax - 5*16 - 16]
+    DB $0F, $29, $6A, $A0 // movaps [edx - 5*16 - 16], xmm5
+    DB $0F, $28, $60, $B0 // movaps xmm4, [eax - 4*16 - 16]
+    DB $0F, $29, $62, $B0 // movaps [edx - 4*16 - 16], xmm4
+    DB $0F, $28, $58, $C0 // movaps xmm3, [eax - 3*16 - 16]
+    DB $0F, $29, $5A, $C0 // movaps [edx - 3*16 - 16], xmm3
+    DB $0F, $28, $50, $D0 // movaps xmm2, [eax - 2*16 - 16]
+    DB $0F, $29, $52, $D0 // movaps [edx - 2*16 - 16], xmm2
+    DB $0F, $28, $48, $E0 // movaps xmm1, [eax - 1*16 - 16]
+    DB $0F, $29, $4A, $E0 // movaps [edx - 1*16 - 16], xmm1
+    DB $0F, $28, $40, $F0 // movaps xmm0, [eax - 0*16 - 16]
+    DB $0F, $29, $42, $F0 // movaps [edx - 0*16 - 16], xmm0
   {$else .CPUX64}
     movaps xmm7, [rax - 7*16 - 16]
     movaps [rdx - 7*16 - 16], xmm7
@@ -1479,7 +1487,7 @@ asm
     mov edx, [eax]
     lea ecx, [eax + 4]
     test edx, edx
-    cmovz eax, ecx
+    DB $0F, $44, $C1 // cmovz eax, ecx
     lea ecx, [ecx - 4]
     mov edx, [eax]
     sub ecx, eax
@@ -1525,7 +1533,7 @@ asm
     mov edx, [eax]
     lea ecx, [eax + 4]
     test edx, edx
-    cmovz eax, ecx
+    DB $0F, $44, $C1 // cmovz eax, ecx
     lea ecx, [ecx - 4]
     mov edx, [eax]
     push ecx
@@ -1594,7 +1602,7 @@ asm
   {$ifdef CPUX86}
     lea ecx, [eax + 4]
     test edx, 32
-    cmovnz eax, ecx
+    DB $0F, $45, $C1 // cmovnz eax, ecx
     and edx, 31
     mov ecx, [eax]
     bts ecx, edx
@@ -1731,7 +1739,7 @@ asm
     lea ecx, [edx + 1]
 
     // Item := AtomicCmpExchangeInt64(F.Handle, NewItem, Item)
-    lock cmpxchg8b [esi]
+    DB $F0, $0F, $C7, $0E // lock cmpxchg8b [esi]
   jnz @repeat
 
 @done:
@@ -1779,7 +1787,7 @@ asm
     lea ecx, [edx + 1]
 
     // Item := AtomicCmpExchangeInt64(F.Handle, NewItem, Item)
-    lock cmpxchg8b [esi]
+    DB $F0, $0F, $C7, $0E // lock cmpxchg8b [esi]
   jnz @repeat
 
 @done:
@@ -1825,7 +1833,7 @@ asm
     lea ecx, [edx + 1]
 
     // Item := AtomicCmpExchangeInt64(F.Handle, NewItem, Item)
-    lock cmpxchg8b [esi]
+    DB $F0, $0F, $C7, $0E // lock cmpxchg8b [esi]
   jnz @repeat
 
 @done:
@@ -1910,7 +1918,7 @@ begin
   end;
 
   if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
-    System.Error(reInvalidPtr);
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
 
   Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
 end;
@@ -1935,7 +1943,7 @@ begin
   end;
 
   if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
-    System.Error(reInvalidPtr);
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
 end;
 
 function BrainMMFreeMemoryPages(Pages: MemoryPages; PagesMode: NativeUInt): Boolean;
@@ -2030,7 +2038,7 @@ asm
     pop ecx
     pop edx
   add esp, 4
-  jmp [esp - 4]
+  jmp dword ptr [esp - 4]
   {$else .CPUX64}
   push rcx
     push rdx
@@ -2091,10 +2099,20 @@ end;
 { TThreadHeap }
 
 function TThreadHeap.ErrorOutOfMemory: Pointer;
+{$ifNdef CONDITIONALEXPRESSIONS}
+type
+  TErrorProc = procedure(ErrorCode: Integer; ErrorAddr: Pointer);
+{$endif}
 begin
   if (ErrorAddr <> nil) then
   begin
-    if Assigned(System.ErrorProc) then System.ErrorProc(Byte(reOutOfMemory), ErrorAddr);
+    if Assigned(System.ErrorProc) then
+    {$ifdef CONDITIONALEXPRESSIONS}
+      System.ErrorProc(Byte(reOutOfMemory), ErrorAddr);
+    {$else}
+      TErrorProc(System.ErrorProc)(1, ErrorAddr);
+    {$endif}
+      
     System.ErrorAddr := ErrorAddr;
     if (System.ExitCode = 0) then System.ExitCode := 203{reOutOfMemory};
     System.Halt;
@@ -2104,10 +2122,20 @@ begin
 end;
 
 function TThreadHeap.ErrorInvalidPtr: Integer;
+{$ifNdef CONDITIONALEXPRESSIONS}
+type
+  TErrorProc = procedure(ErrorCode: Integer; ErrorAddr: Pointer);
+{$endif}
 begin
   if (ErrorAddr <> nil) then
   begin
-    if Assigned(System.ErrorProc) then System.ErrorProc(Byte(reInvalidPtr), ErrorAddr);
+    if Assigned(System.ErrorProc) then
+    {$ifdef CONDITIONALEXPRESSIONS}
+      System.ErrorProc(Byte(reInvalidPtr), ErrorAddr);
+    {$else}
+      TErrorProc(System.ErrorProc)(2, ErrorAddr);
+    {$endif}      
+
     System.ErrorAddr := ErrorAddr;
     if (System.ExitCode = 0) then System.ExitCode := 204{reInvalidPtr};
     System.Halt;
@@ -2441,7 +2469,7 @@ asm
   {$ifdef CPUX86}
     lea eax, [ECX].TK1LineSmall.ItemSet.VHigh32
     test edx, edx
-    cmovz ecx, eax
+    DB $0F, $44, $C8 // cmovz ecx, eax
     mov edx, [ecx]
     bsf eax, edx
     jz @retrieve_penalty
@@ -2449,7 +2477,7 @@ asm
     mov [ecx], edx
     lea edx, [eax + 32]
     test ecx, MASK_K1_TEST
-    cmovnz eax, edx
+    DB $0F, $45, $C2 // cmovnz eax, edx
   {$else .CPUX64}
     bsf rax, r9
     jz TThreadHeap.PenaltyGetSmall
@@ -3024,7 +3052,7 @@ asm
     jnz @penalty_free_mem
     lea eax, [EDX].TK1LineSmall.ItemSet.VHigh32
     test ecx, 32
-    cmovnz edx, eax
+    DB $0F, $45, $D0 // cmovnz edx, eax
     and ecx, 31
     mov eax, [edx]
     bts eax, ecx
@@ -3929,7 +3957,7 @@ asm
     jnz @penalty_copy_freemem
     lea eax, [EDX].TK1LineSmall.ItemSet.VHigh32
     test ecx, 32
-    cmovnz edx, eax
+    DB $0F, $45, $D0 // cmovnz edx, eax
     and ecx, 31
     mov eax, [edx]
     bts eax, ecx
