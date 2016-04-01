@@ -193,11 +193,19 @@ type
 
 
 type
-  (*
-     Local (non-synchronized) Just-In-Time memory heap
-     READ | WRITE | EXECUTE
-  *)
-  TJITHeap = class(TInterfacedObject)
+
+{ TJITHeap class }
+{ Just-In-Time memory heap: READ | WRITE | EXECUTE }
+
+  IJITHeap = interface
+    procedure Clear;
+    function GetMemory(Size: NativeInt): Pointer;
+    procedure FreeMemory(P: Pointer);
+    function SyncGetMemory(Size: NativeInt): Pointer;
+    procedure SyncFreeMemory(P: Pointer);
+  end;
+
+  TJITHeap = class(TInterfacedObject, IJITHeap)
   protected
     FSpin: NativeUInt;
     FHeapBuffer: array[0..64 * {$ifdef LARGEINT}3{$else}2{$endif} - 1 + 64] of Byte;
@@ -2473,6 +2481,8 @@ end;
 {$endif}
 
 function TThreadHeap.PenaltyGetSmall(B16Count: NativeUInt): Pointer;
+label
+  new_k1line;
 var
   Line, Next: PK1LineSmall;
 begin
@@ -2480,6 +2490,7 @@ begin
   repeat
     if (Line = nil) then
     begin
+    new_k1line:
       Line := Self.NewK1LineSmall(B16Count);
       if (Line = nil) then
       begin
@@ -2495,8 +2506,15 @@ begin
 
       FK1LineSmalls[B16Count] := Next;
       Line := Next;
+      if (Next = nil) then goto new_k1line;
     end;
-  until (False);
+  until (
+    {$ifdef SMALLINT}
+      Line.ItemSet.VLow32 or Line.ItemSet.VHigh32 <> 0
+    {$else .LARGEINT}
+      Line.ItemSet.V64 <> 0
+    {$endif}
+    );
 
   // get small memory
   Result := Self.GetSmall(B16Count);
@@ -3139,7 +3157,7 @@ begin
             end else
             begin
               NewB16Count := {retrieve}NewB16Count shr 4;
-              if (NewB16Count < MAX_SMALL_B16COUNT) then
+              if (NewB16Count <= MAX_SMALL_B16COUNT) then
               begin
                 Result := ThreadHeap.RegrowSmallToSmall(P, NewB16Count);
                 Exit;
@@ -3219,7 +3237,7 @@ asm
   {$else .CPUX64}
     // v5 := var P
     mov r10, r8
-    lea r8, [rcx + 15]
+    lea r8, [rdx + 15]
     xchg rdx, rcx
     shr r8, 4
   {$endif}
@@ -3284,7 +3302,7 @@ asm
   {$endif}
   jne @not_fast
 
-  // if (PK1LineSmall(P).ModeSize <= {NewSize}NewB16Count * 16) then Exit P (return made none)
+  // if (PK1LineSmall(P).ModeSize >= {NewSize}NewB16Count * 16) then Exit P (return made none)
   {$ifdef CPUX86}
     mov ebx, edx
     and ebx, MASK_K1_CLEAR
@@ -3298,7 +3316,7 @@ asm
     movzx r9, byte ptr TK1LineSmall[R9].ModeSize
     cmp r9, r8
   {$endif}
-  ja @small_grow
+  jb @small_grow
 @return_made_none:
   // Result := const P (v2)
   {$ifdef CPUX86}
@@ -3314,13 +3332,13 @@ asm
   // retrieve NewB16Count
   // if (NewSize > MAX_SMALL_SIZE) then Exit ThreadHeap.RegetDifficult
   {$ifdef CPUX86}
-    lea ebx, [ecx + ecx]
-    cmp ecx, MAX_SMALL_SIZE
-    lea ecx, [ebx * 8]
+    mov ebx, ecx
+    shr ecx, 4
+    cmp ebx, MAX_SMALL_SIZE
   {$else .CPUX64}
-    lea r9, [r8 + r8]
-    cmp r8, MAX_SMALL_SIZE
-    lea r8, [r9 * 8]
+    mov r9, r8
+    shr r8, 4
+    cmp r9, MAX_SMALL_SIZE
   {$endif}
   ja @reget_difficult
 
@@ -3538,7 +3556,7 @@ begin
             end else
             begin
               NewB16Count := {retrieve}NewB16Count shr 4;
-              if (NewB16Count < MAX_SMALL_B16COUNT) then
+              if (NewB16Count <= MAX_SMALL_B16COUNT) then
               begin
                 Result := ThreadHeap.GrowSmallToSmall(P, NewB16Count);
                 Exit;
@@ -3618,7 +3636,7 @@ asm
   {$else .CPUX64}
     // v5 := var P
     mov r10, r8
-    lea r8, [rcx + 15]
+    lea r8, [rdx + 15]
     xchg rdx, rcx
     shr r8, 4
   {$endif}
@@ -3713,13 +3731,13 @@ asm
   // retrieve NewB16Count
   // if (NewSize > MAX_SMALL_SIZE) then Exit ThreadHeap.ReallocDifficult
   {$ifdef CPUX86}
-    lea ebx, [ecx + ecx]
-    cmp ecx, MAX_SMALL_SIZE
-    lea ecx, [ebx * 8]
+    mov ebx, ecx
+    shr ecx, 4
+    cmp ebx, MAX_SMALL_SIZE
   {$else .CPUX64}
-    lea r9, [r8 + r8]
-    cmp r8, MAX_SMALL_SIZE
-    lea r8, [r9 * 8]
+    mov r9, r8
+    shr r8, 4
+    cmp r9, MAX_SMALL_SIZE
   {$endif}
   ja @realloc_difficult
 

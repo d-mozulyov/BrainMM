@@ -12,7 +12,7 @@ interface
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif};
 
 const
-  BREAKPOINT = 459716;
+  BREAKPOINT = 0;
 
 var
   Done: Boolean = True;
@@ -220,6 +220,7 @@ type
 implementation
 
 
+
 procedure INC_TEST;
 begin
   Inc(TEST_NUMBER);
@@ -393,6 +394,21 @@ asm
   jmp System.Error
 end;
 {$endif}
+
+procedure SystemReallocMem(var P: Pointer; NewSize: NativeInt);
+begin
+  System.ReallocMem(P, NewSize);
+end;
+
+type
+  TResizeMem = procedure(var P: Pointer; NewSize: NativeInt);
+  PResizeMem = ^TResizeMem;
+
+var
+  RESIZEMEM_PROCS: array[Boolean{Realloc}] of TResizeMem = (
+    BrainMM.RegetMem,
+    SystemReallocMem
+  );
 
 procedure Mix2kPtrs(const List: PPointerList; const Count: Integer);
 type
@@ -1187,6 +1203,140 @@ begin
   CheckEmptyHeap;
 end;
 
+procedure TestSmallResize(const Realloc: Boolean);
+var
+  ResizeMem: TResizeMem;
+  ThreadHeap: PThreadHeap;
+  HeapInfo: TThreadHeapInfo;
+
+  i, j, k, Size: Integer;
+  P, LastP: Pointer;
+
+  Info: TPointerInfo;
+  LineP, LineLastP: Integer;
+  PTRS: array[0..2000 - 1] of Pointer;
+begin
+  INC_TEST;
+  ThreadHeap := CurrentThreadHeap;
+  if (ThreadHeap = nil) then SystemError;
+
+  // initialize
+  ResizeMem := RESIZEMEM_PROCS[Realloc];
+  INC_TEST;
+  GetMem(P, MAX_SMALL_SIZE);
+  Info.Init(P);
+  Check(MAX_SMALL_SIZE, Info.Size);
+  LastP := P;
+  for j := 0 to MAX_SMALL_SIZE - 1 do PSmallBytes(P)[j] := j;
+
+  // reduce
+  for i := MAX_SMALL_SIZE downto 1 do
+  begin
+    INC_TEST;
+    ResizeMem(P, i);
+    Info.Init(P);
+    Check(MAX_SMALL_SIZE, Info.Size);
+    Check(LastP, P);
+
+    for j := 0 to MAX_SMALL_SIZE - 1 do
+    if (PSmallBytes(P)[j] <> j) then SystemError;
+  end;
+
+  // grow (maximum)
+  for i := 1 to MAX_SMALL_SIZE do
+  begin
+    INC_TEST;
+    ResizeMem(P, i);
+    Info.Init(P);
+    Check(MAX_SMALL_SIZE, Info.Size);
+    Check(LastP, P);
+
+    for j := 0 to MAX_SMALL_SIZE - 1 do
+    if (PSmallBytes(P)[j] <> j) then SystemError;
+  end;
+
+  // clear
+  INC_TEST;
+  FreeMem(P);
+  CheckEmptyHeap;
+
+  // grow
+  for k := 1 to MAX_SMALL_B16COUNT do
+  begin
+    INC_TEST;
+    Size := k shl 4;
+    GetMem(P, Size);
+    LineLastP := (NativeInt(P) and MASK_K64_TEST) shr 10;
+    for j := 0 to Size - 1 do PSmallBytes(P)[j] := j;
+
+    for i := Size + 1 to MAX_SMALL_SIZE do
+    begin
+      INC_TEST;
+      ResizeMem(P, i);
+      Info.Init(P);
+      Check((i + 15) and -16, Info.Size);
+      LineP := (NativeInt(P) and MASK_K64_TEST) shr 10;
+
+      if (Realloc) then
+      begin
+        for j := 0 to Size - 1 do
+        if (PSmallBytes(P)[j] <> j) then SystemError;
+
+        if (((i - 1 - Size) shr 4) and 1 = 0) then
+        begin
+          Check(LineLastP + 1, LineP);
+        end else
+        begin
+          Check(LineLastP, LineP);
+        end;
+      end else
+      begin
+        Check(LineLastP, LineP);
+      end;
+    end;
+
+    INC_TEST;
+    FreeMem(P);
+    CheckEmptyHeap;
+  end;
+
+  // allocate random
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+    GetMem(PTRS[i], Random(MAX_SMALL_SIZE) + 1);
+  end;
+
+  // try heap analize
+  INC_TEST;
+  HeapInfo.Init(ThreadHeap);
+
+  // mixup, realloc random
+  MixPointers(PTRS);
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+    ResizeMem(PTRS[i], Random(MAX_SMALL_SIZE) + 1);
+  end;
+
+  // try heap analize
+  INC_TEST;
+  HeapInfo.Init(ThreadHeap);
+
+  // mixup, free random
+  MixPointers(PTRS);
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+    FreeMem(PTRS[i]);
+  end;
+
+  // check empty
+  INC_TEST;
+  CheckEmptyHeap;
+end;
+
+
 procedure RUN_TESTS;
 begin
   // basic
@@ -1201,6 +1351,10 @@ begin
 
   // medium
   TestMedium;
+
+  // small realloc/reget
+  TestSmallResize(True);
+  TestSmallResize(False);
 
   // todo
 
