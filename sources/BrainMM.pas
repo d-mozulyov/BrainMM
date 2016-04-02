@@ -5707,12 +5707,21 @@ type
     JumpOffset: Cardinal;
   end;
 
+procedure PatchCode(const AddrProc: Pointer; const CodeSize: NativeUInt;
+  const Code: Pointer);
+var
+  OldProtect: Cardinal;
+begin
+  VirtualProtect(AddrProc, CodeSize, PAGE_EXECUTE_READWRITE, OldProtect);
+  Move(Code^, AddrProc^, CodeSize);
+  VirtualProtect(AddrProc, CodeSize, OldProtect, OldProtect);
+end;
+
 procedure PatchRedirect(const AddrProc: Pointer; const CodeSize: NativeUInt;
   const Code: Pointer; const Jumps: array of TJumpInfo);
 var
   i: Integer;
   Buffer: array[0..33] of Byte;
-  Protect: Cardinal;
 begin
   Move(Code^, Buffer, CodeSize);
 
@@ -5723,10 +5732,7 @@ begin
       (NativeInt(AddrProc) + NativeInt(CodeOffset) + 4) + NativeInt(JumpOffset);
   end;
 
-  VirtualProtect(AddrProc, CodeSize, PAGE_EXECUTE_READWRITE, Protect);
-    Move(Buffer, AddrProc^, CodeSize);
-  VirtualProtect(AddrProc, CodeSize, Protect, Protect);
-  FlushInstructionCache(GetCurrentProcess, AddrProc, CodeSize);
+  PatchCode(AddrProc, CodeSize, @Buffer);
 end;
 
 procedure BrainMMRedirectInitialize;
@@ -5774,9 +5780,15 @@ end;
 {$endif}
 
 procedure BrainMMInitialize;
+{$if Defined(BRAINMM_REDIRECT) and Defined(CPUX86)}
+const
+  NOP_9BYTES: array[1..9] of Byte = ($66, $0F, $1F, $84, $00, $00, $00, $00, $00);
+{$ifend}
 type
   PMemoryMgr = {$ifdef MEMORYMANAGEREX}^TMemoryManagerEx{$else}^TMemoryManager{$endif};
 begin
+  InitializeOffsetsMedium;
+
   MemoryManager.BrainMM.GetMemoryBlock := BrainMMGetMemoryBlock;
   MemoryManager.BrainMM.FreeMemoryBlock := BrainMMFreeMemoryBlock;
   MemoryManager.BrainMM.GetMemoryPages := BrainMMGetMemoryPages;
@@ -5794,12 +5806,20 @@ begin
 
   // todo
 
-  InitializeOffsetsMedium;
 
   {$ifdef BRAINMM_REDIRECT}
     if (not System.IsLibrary) then
       BrainMMRedirectInitialize;
   {$endif}
+
+  {$if Defined(BRAINMM_REDIRECT) and Defined(CPUX86)}
+  if (SSE_SUPPORT <> 0) then
+  begin
+    PatchCode(@BackwardSSEMove, SizeOf(NOP_9BYTES), @NOP_9BYTES);
+    PatchCode(@NcMoveB16, SizeOf(NOP_9BYTES), @NOP_9BYTES);
+    PatchCode(@NcMoveB16Small, SizeOf(NOP_9BYTES), @NOP_9BYTES);
+  end;
+  {$ifend}
 
   SetMemoryManager(PMemoryMgr(@MemoryManager.Standard)^);
 end;
