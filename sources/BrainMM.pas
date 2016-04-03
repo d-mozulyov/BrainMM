@@ -3419,8 +3419,8 @@ asm
   
   // Compare: PHeaderMedium(P).B16Count ~ NewB16Count
   // if = then Exit P (return made none)
-  // if > then Exit ThreadHeap.RegetMediumToMedium
-  // if < then Exit ThreadHeap.ReduceMedium
+  // if < then Exit ThreadHeap.RegetMediumToMedium
+  // if > then Exit ThreadHeap.ReduceMedium
   {$ifdef CPUX86}
     cmp [EDX - 16].THeaderMedium.B16Count, cx
   {$else .CPUX64}
@@ -3428,13 +3428,13 @@ asm
   {$endif}
   je @return_made_none
   {$ifdef CPUX86}
-    push offset @return_var_p	
+    push offset @return_var_p
   {$else .CPUX64}
     push r10
     lea r9, @return_var_p
-    push r9	
+    push r9
   {$endif}
-  ja TThreadHeap.RegetMediumToMedium
+  jb TThreadHeap.RegetMediumToMedium
   jmp TThreadHeap.ReduceMedium
 
 @not_small:
@@ -3818,8 +3818,8 @@ asm
   
   // Compare: PHeaderMedium(P).B16Count ~ NewB16Count
   // if = then Exit P (return made none)
-  // if > then Exit ThreadHeap.ReallocMediumToMedium
-  // if < then Exit ThreadHeap.ReduceMedium
+  // if < then Exit ThreadHeap.ReallocMediumToMedium
+  // if > then Exit ThreadHeap.ReduceMedium
   {$ifdef CPUX86}
     cmp [EDX - 16].THeaderMedium.B16Count, cx
   {$else .CPUX64}
@@ -3827,13 +3827,13 @@ asm
   {$endif}
   je @return_made_none
   {$ifdef CPUX86}
-    push offset @return_var_p	
+    push offset @return_var_p
   {$else .CPUX64}
     push r10
     lea r9, @return_var_p
-    push r9	
+    push r9
   {$endif}
-  ja TThreadHeap.ReallocMediumToMedium
+  jb TThreadHeap.ReallocMediumToMedium
   jmp TThreadHeap.ReduceMedium
 
 @not_small:
@@ -4169,7 +4169,7 @@ begin
     EmptySize := NativeUInt(Word(Flags)) shl 4;
     Inc(NextHeader);
     Inc(NativeUInt(NextHeader), EmptySize);
-    if (Header.PreviousSize <> EmptySize) then goto ptr_invalid;
+    if (NextHeader.PreviousSize <> EmptySize) then goto ptr_invalid;
     EmptySize := EmptySize + (CurrentB16Count - NewB16Count) shl 4;
     NextHeader.PreviousSize := EmptySize;
     Dec(NextHeader);
@@ -4198,7 +4198,7 @@ begin
   end else
   begin
   ptr_invalid:
-    Result := Pointer({Self}PK64PoolSmall(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.RaiseInvalidPtr);
+    Result := Pointer({Self}PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.RaiseInvalidPtr);
     Exit;
   end;
 
@@ -4443,7 +4443,7 @@ begin
   begin
     if (Information = High(NativeUInt)) then
     begin
-      Result := {Self}PK64PoolSmall(NativeInt(Empty) and MASK_K64_CLEAR).ThreadHeap.ErrorInvalidPtr;
+      Result := {Self}PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR).ThreadHeap.ErrorInvalidPtr;
       Exit;
     end else
     begin

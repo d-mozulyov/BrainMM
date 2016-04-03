@@ -331,7 +331,7 @@ rePrivInstruction: Error := 'rePrivInstruction';
     S^ := #0;
   end;
 
-  TextBuffer := FormatBuffer('TEST_NUMBER: %d'#13'Exception %s at 0x%p',
+  TextBuffer := FormatBuffer('TEST_NUMBER: %d'#13'Exception %s at %p',
     [TEST_NUMBER, Error, ErrorAddr]);
 
   // show exception message
@@ -1337,6 +1337,92 @@ begin
 end;
 
 
+procedure TestMediumResize(const Realloc: Boolean);
+const
+  TEST_SIZE = 256;
+var
+  ResizeMem: TResizeMem;
+  ThreadHeap: PThreadHeap;
+  HeapInfo: TThreadHeapInfo;
+
+  i, j, k, Size: Integer;
+  P, LastP: Pointer;
+
+  Info: TPointerInfo;
+{  LineP, LineLastP: Integer;
+  PTRS: array[0..2000 - 1] of Pointer;   }
+begin
+  INC_TEST;
+  ThreadHeap := CurrentThreadHeap;
+  if (ThreadHeap = nil) then SystemError;
+
+  // initialize
+  ResizeMem := RESIZEMEM_PROCS[Realloc];
+  INC_TEST;
+  GetMem(P, TEST_SIZE);
+  Info.Init(P);
+  Check(TEST_SIZE, Info.Size);
+  LastP := P;
+  for j := 0 to TEST_SIZE - 1 do PMediumBytes(P)[j] := j;
+
+  // reduce
+  for i := TEST_SIZE downto 1 do
+  begin
+    INC_TEST;
+    ResizeMem(P, i);
+    Info.Init(P);
+    Check((i + 15) and -16, Info.Size);
+    Check(LastP, P);
+    HeapInfo.Init(ThreadHeap);
+
+    for j := 0 to Info.Size - 1 do
+    if (PMediumBytes(P)[j] <> j) then SystemError;
+  end;
+
+  // grow
+  for i := 1 to TEST_SIZE do
+  begin
+    INC_TEST;
+    ResizeMem(P, i);
+    Info.Init(P);
+    Check((i + 15) and -16, Info.Size);
+    Check(LastP, P);
+    HeapInfo.Init(ThreadHeap);
+
+    for j := 0 to 15 do
+    if (PMediumBytes(P)[j] <> j) then SystemError;
+  end;
+
+  // clear
+  INC_TEST;
+  FreeMem(P);
+  CheckEmptyHeap;
+
+  // non-resized
+  INC_TEST;
+  GetMem(P, TEST_SIZE);
+  GetMem(LastP, TEST_SIZE);
+  ResizeMem(P, TEST_SIZE - 16);
+  Info.Init(P);
+  Check(TEST_SIZE, Info.Size);
+  HeapInfo.Init(ThreadHeap);
+
+  // clear
+  INC_TEST;
+  FreeMem(P);
+  FreeMem(LastP);
+  CheckEmptyHeap;
+
+  // reduce
+  // todo
+
+
+  // check empty
+  INC_TEST;
+  CheckEmptyHeap;
+end;
+
+
 procedure RUN_TESTS;
 begin
   // basic
@@ -1355,6 +1441,10 @@ begin
   // small realloc/reget
   TestSmallResize(True);
   TestSmallResize(False);
+
+  // medium realloc/reget
+  TestMediumResize(True);
+  TestMediumResize(False);
 
   // todo
 
