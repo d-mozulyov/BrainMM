@@ -395,6 +395,12 @@ asm
 end;
 {$endif}
 
+procedure FreeMemNil(var P: Pointer);
+begin
+  FreeMem(P);
+  P := nil;
+end;
+
 procedure SystemReallocMem(var P: Pointer; NewSize: NativeInt);
 begin
   System.ReallocMem(P, NewSize);
@@ -1346,11 +1352,70 @@ var
   HeapInfo: TThreadHeapInfo;
 
   i, j, k, Size: Integer;
-  P, LastP: Pointer;
+  P, LastP, P2, P3: Pointer;
 
   Info: TPointerInfo;
-{  LineP, LineLastP: Integer;
-  PTRS: array[0..2000 - 1] of Pointer;   }
+  Align: TMemoryAlign;
+  PTRS: array[0..2000 - 1] of Pointer;
+
+  procedure InitPBytes(P: Pointer; Size: Integer; XorByte: Byte);
+  var
+    j: Integer;
+  begin
+    for j := 0 to Size - 1 do
+     PMediumBytes(P)[j] := Byte(j) xor XorByte;
+  end;
+
+  procedure CheckPBytes(P: Pointer; Size: Integer; XorByte: Byte);
+  var
+    j: Integer;
+  begin
+    if (Realloc) then
+    begin
+      for j := 0 to Size - 1 do
+      if (PMediumBytes(P)[j] <> Byte(j) xor XorByte) then SystemError;
+    end;
+  end;
+
+  procedure GetThreeP;
+  begin
+    GetMemAligned(P, ma32Bytes, TEST_SIZE - 16);
+    GetMemAligned(P2, ma32Bytes, TEST_SIZE - 16);
+    GetMemAligned(P3, ma32Bytes, TEST_SIZE - 16);
+
+    LastP := P;
+    InitPBytes(P, TEST_SIZE - 16, 1);
+    InitPBytes(P2, TEST_SIZE - 16, 2);
+    InitPBytes(P3, TEST_SIZE - 16, 3);
+  end;
+
+  procedure FreeThreeP;
+  begin
+    FreeMem(P);
+    FreeMem(P2);
+    FreeMem(P3);
+    CheckEmptyHeap;
+  end;
+
+  function ResizeOneP(var P: Pointer; const NewSize: NativeInt): Integer;
+  begin
+    INC_TEST;
+    ResizeMem(P, NewSize);
+    Info.Init(P);
+    HeapInfo.Init(ThreadHeap);
+    Result := HeapInfo.PoolMediums.EmptiesCount;
+  end;
+
+  function FreeOneP(var P: Pointer): Integer;
+  begin
+    INC_TEST;
+    Info.Init(P);
+    FreeMem(P);
+    P := nil;
+    HeapInfo.Init(ThreadHeap);
+    Result := HeapInfo.PoolMediums.EmptiesCount;
+  end;
+
 begin
   INC_TEST;
   ThreadHeap := CurrentThreadHeap;
@@ -1401,7 +1466,7 @@ begin
   // non-resized
   INC_TEST;
   GetMem(P, TEST_SIZE);
-  GetMem(LastP, TEST_SIZE);
+  GetMem(P2, TEST_SIZE);
   ResizeMem(P, TEST_SIZE - 16);
   Info.Init(P);
   Check(TEST_SIZE, Info.Size);
@@ -1410,12 +1475,288 @@ begin
   // clear
   INC_TEST;
   FreeMem(P);
-  FreeMem(LastP);
+  FreeMem(P2);
   CheckEmptyHeap;
 
-  // reduce
-  // todo
+  // grow right (reduce/remove empty)
+  begin
+    INC_TEST;
+    GetMem(P, TEST_SIZE);
+    LastP := P;
+    GetMem(P2, TEST_SIZE);
+    HeapInfo.Init(ThreadHeap);
+    Check(1, HeapInfo.PoolMediums.EmptiesCount);
+    ResizeMem(P, TEST_SIZE - 64);
+    Info.Init(P);
+    Check(TEST_SIZE - 64, Info.Size);
+    Check(LastP, P);
+    HeapInfo.Init(ThreadHeap);
+    Check(2, HeapInfo.PoolMediums.EmptiesCount);
 
+    INC_TEST;
+    ResizeMem(P, TEST_SIZE - 48);
+    Info.Init(P);
+    Check(TEST_SIZE - 48, Info.Size);
+    Check(LastP, P);
+    HeapInfo.Init(ThreadHeap);
+    Check(2, HeapInfo.PoolMediums.EmptiesCount);
+
+    INC_TEST;
+    ResizeMem(P, TEST_SIZE);
+    Info.Init(P);
+    Check(TEST_SIZE, Info.Size);
+    Check(LastP, P);
+    HeapInfo.Init(ThreadHeap);
+    Check(1, HeapInfo.PoolMediums.EmptiesCount);
+
+    INC_TEST;
+    ResizeMem(P, TEST_SIZE - 48);
+    Check(LastP, P);
+    HeapInfo.Init(ThreadHeap);
+    Check(2, HeapInfo.PoolMediums.EmptiesCount);
+    ResizeMem(P, TEST_SIZE - 16);
+    Info.Init(P);
+    Check(TEST_SIZE, Info.Size);
+    Check(LastP, P);
+    HeapInfo.Init(ThreadHeap);
+    Check(1, HeapInfo.PoolMediums.EmptiesCount);
+
+    // clear
+    INC_TEST;
+    FreeMem(P);
+    FreeMem(P2);
+    CheckEmptyHeap;
+  end;
+
+  // grow left: full left + current
+  begin
+    INC_TEST;
+    GetThreeP;
+    HeapInfo.Init(ThreadHeap);
+    Check(1, HeapInfo.PoolMediums.EmptiesCount);
+
+    k := FreeOneP(P);
+    Check(2, k);
+
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16);
+    Check(1, k);
+    Check(LastP, P2);
+    Check(TEST_SIZE + TEST_SIZE - 16, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left: full - 16 left + current --> full
+  begin
+    GetThreeP;
+    FreeOneP(P);
+
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 - 16);
+    Check(1, k);
+    Check(LastP, P2);
+    Check(TEST_SIZE + TEST_SIZE - 16, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left: full - 32 left + current --> full - 32
+  begin
+    GetThreeP;
+    FreeOneP(P);
+
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 - 32);
+    Check(2, k);
+    Check(LastP, P2);
+    Check(TEST_SIZE + TEST_SIZE - 16 - 32, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left: offset = 1, realign right
+  begin
+    GetThreeP;
+
+    k := ResizeOneP(P, 32);
+    Check(2, k);
+    CheckPBytes(P, 32, 1);
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 64 - 32);
+    Check(1, k);
+    Check(TEST_SIZE + TEST_SIZE - 64 - 16, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    Info.Init(P);
+    Check(48, Info.Size);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left: offset = 1, store align
+  begin
+    // GetThreeP (align64 P2)
+    GetMemAligned(P, ma32Bytes, TEST_SIZE + 16);
+    GetMemAligned(P2, ma64Bytes, TEST_SIZE - 16);
+    GetMemAligned(P3, ma32Bytes, TEST_SIZE - 16);
+    InitPBytes(P2, TEST_SIZE - 16, 2);
+
+    k := ResizeOneP(P, TEST_SIZE + 16 - 64 - 16);
+    Check(2, k);
+    Info.Init(P);
+    Check(TEST_SIZE + 16 - 64 - 16, Info.Size);
+
+    k := ResizeOneP(P2, TEST_SIZE - 16 + 64);
+    Check(1, k);
+    if (Info.AsMedium.Align <> ma64Bytes) then SystemError;
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    Info.Init(P);
+    Check(TEST_SIZE + 16 - 64{ - 16}, Info.Size);
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left-right: full
+  begin
+    // make P2, left-right empty
+    GetThreeP;
+    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
+    FreeMemNil(P3);
+    P3 := LastP;
+    LastP := P;
+    FreeMemNil(P);
+
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE);
+    Check(1, k);
+    Check(LastP, P2);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left-right: full - 16 --> full
+  begin
+    // make P2, left-right empty
+    GetThreeP;
+    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
+    FreeMemNil(P3);
+    P3 := LastP;
+    LastP := P;
+    FreeMemNil(P);
+
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE - 16);
+    Check(1, k);
+    Check(LastP, P2);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left-right: full - 32
+  begin
+    // make P2, left-right empty
+    GetThreeP;
+    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
+    FreeMemNil(P3);
+    P3 := LastP;
+    LastP := P;
+    FreeMemNil(P);
+
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE - 32);
+    Check(2, k);
+    Check(LastP, P2);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE - 32, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // grow left-right: full + 16 --> new
+  begin
+    // make P2, left-right empty
+    GetThreeP;
+    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
+    FreeMemNil(P3);
+    P3 := LastP;
+    // LastP := P;
+    FreeMemNil(P);
+
+    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE + 16);
+    Check(2, k);
+    Check(Pointer(NativeUInt(LastP) + TEST_SIZE), P2);
+    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE + 16, Info.Size);
+    CheckPBytes(P2, TEST_SIZE - 16, 2);
+
+    // clear
+    FreeThreeP;
+  end;
+
+  // allocate random
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+
+    repeat
+      Align := TMemoryAlign(Random(Ord(High(TMemoryAlign)) + 1));
+      Size := Random(MAX_MEDIUM_SIZE) + 1;
+    until (Align <> ma16Bytes) or (Size > MAX_SMALL_SIZE);
+
+    GetMemAligned(PTRS[i], Align, Size);
+  end;
+
+  // realloc random
+  MixPointers(PTRS);
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+
+    Size := Random(MAX_MEDIUM_SIZE) + 1;
+    ResizeMem(PTRS[i], Size);
+
+    P := PTRS[i];
+    FillChar(P^, Size, Byte(i));
+    PInteger(P)^ := Size;
+  end;
+
+  // free random
+  MixPointers(PTRS);
+  for i := Low(PTRS) to High(PTRS) do
+  begin
+    INC_TEST;
+    P := PTRS[i];
+    Info.Init(P);
+
+    Size := PInteger(P)^;
+    if (Info.AsMedium = nil) then SystemError;
+    if (Info.Size <> (Size + 15) and -16) and
+      (Info.Size <> (Size + 15 + 16) and -16) then SystemError;
+
+    if (Realloc) then
+    begin
+      for j := 4 to Size - 1 do
+      if (PMediumBytes(P)[j] <> PMediumBytes(P)[4]) then
+        SystemError;
+    end;
+
+    FreeMem(P);
+  end;
 
   // check empty
   INC_TEST;

@@ -4530,7 +4530,7 @@ begin
     end;
   end else
   begin
-    if (Information > (OFFSET_MEDIUM_LEFT_B16COUNT - 1)) then
+    if (Information > ((1 shl OFFSET_MEDIUM_LEFT_B16COUNT) - 1)) then
     begin
       // try grow left
       ALIGN_OFFSETS := @MEDIUM_ALIGN_OFFSETS[(Information shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign))];
@@ -4549,8 +4549,16 @@ begin
       if (AlignOffset <> 0) then
       begin
         Size := (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4;
+        NextHeader := Header;
         Header := OffsetHeaderMediumEmpty(Pointer(NativeUInt(Header) - Size), AlignOffset);
-        if (Header = nil) then goto ptr_invalid;
+        if (Header = nil) then
+        begin
+          Header := NextHeader;
+          goto ptr_invalid;
+        end;
+      end else
+      begin
+        Dec(NativeUInt(Header), (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4);
       end;
 
       // create, resize of remove right empty piece
@@ -4590,7 +4598,7 @@ begin
     begin
     free_and_get:
       ThreadHeap := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap;
-      if (ThreadHeap.FreeMedium(Header) <> FREEMEM_DONE) then
+      if (ThreadHeap.FreeMedium(@PHeaderMediumList(Header)[0]) <> FREEMEM_DONE) then
       begin
       ptr_invalid:
         ThreadHeap := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap;
@@ -4652,7 +4660,7 @@ begin
     end;
   end else
   begin
-    if (Information > (OFFSET_MEDIUM_LEFT_B16COUNT - 1)) then
+    if (Information > ((1 shl OFFSET_MEDIUM_LEFT_B16COUNT) - 1)) then
     begin
       // try grow left
       ALIGN_OFFSETS := @MEDIUM_ALIGN_OFFSETS[(Information shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign))];
@@ -4678,8 +4686,16 @@ begin
       if (AlignOffset <> 0) then
       begin
         Size := (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4;
+        NextHeader := Header;
         Header := OffsetHeaderMediumEmpty(Pointer(NativeUInt(Header) - Size), AlignOffset);
-        if (Header = nil) then goto ptr_invalid;
+        if (Header = nil) then
+        begin
+          Header := NextHeader;
+          goto ptr_invalid;
+        end;
+      end else
+      begin
+        Dec(NativeUInt(Header), (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4);
       end;
 
       // create, resize of remove right empty piece
