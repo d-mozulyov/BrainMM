@@ -4775,7 +4775,7 @@ begin
     if (PoolThreadHeap <> nil) then
     begin
       // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_K64_TEST <> 0) or
+      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
         (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
       begin
         Result := Self.ErrorInvalidPtr;
@@ -4801,7 +4801,7 @@ begin
     begin
       // pool medium
       PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_K64_TEST <> 0) or
+      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
         (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
       begin
         Result := Self.ErrorInvalidPtr;
@@ -4812,7 +4812,7 @@ begin
       Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
       B16Count := Word(Flags);
       if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count].PreviousSize <> B16Count shl 4) then
+        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
       begin
         Result := Self.ErrorInvalidPtr;
         Exit;
@@ -4851,7 +4851,7 @@ begin
     if (PoolThreadHeap <> nil) then
     begin
       // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_K64_TEST <> 0) or
+      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
         (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
         Self.RaiseInvalidPtr;
 
@@ -4872,7 +4872,7 @@ begin
     begin
       // pool medium
       PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_K64_TEST <> 0) or
+      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
         (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
         Self.RaiseInvalidPtr;
 
@@ -4880,7 +4880,7 @@ begin
       Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
       B16Count := Word(Flags);
       if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count].PreviousSize <> B16Count shl 4) then
+        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
         Self.RaiseInvalidPtr;
 
       // medium flags
@@ -4941,7 +4941,7 @@ begin
     if (PoolThreadHeap <> nil) then
     begin
       // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_K64_TEST <> 0) or
+      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
         (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
         Self.RaiseInvalidPtr;
 
@@ -4963,7 +4963,7 @@ begin
     begin
       // pool medium
       PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_K64_TEST <> 0) or
+      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
         (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
         Self.RaiseInvalidPtr;
 
@@ -4971,7 +4971,7 @@ begin
       Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
       B16Count := Word(Flags);
       if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count].PreviousSize <> B16Count shl 4) then
+        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
         Self.RaiseInvalidPtr;
 
       // medium size/flags

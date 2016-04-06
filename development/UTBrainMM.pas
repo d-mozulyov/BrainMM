@@ -1442,6 +1442,9 @@ begin
 
     for j := 0 to Info.Size - 1 do
     if (PMediumBytes(P)[j] <> j) then SystemError;
+
+    Check(1, HeapInfo.PoolMediums.EmptiesCount);
+    Check(SizeOf(TK64PoolMedium) - 96 - Info.Size - 16 * 2, HeapInfo.PoolMediums.EmptiesSize);
   end;
 
   // grow
@@ -1456,6 +1459,9 @@ begin
 
     for j := 0 to 15 do
     if (PMediumBytes(P)[j] <> j) then SystemError;
+
+    Check(1, HeapInfo.PoolMediums.EmptiesCount);
+    Check(SizeOf(TK64PoolMedium) - 96 - Info.Size - 16 * 2, HeapInfo.PoolMediums.EmptiesSize);
   end;
 
   // clear
@@ -1764,6 +1770,151 @@ begin
 end;
 
 
+procedure TestDifficults;
+var
+  ThreadHeap: PThreadHeap;
+  HeapInfo: TThreadHeapInfo;
+
+  P: Pointer;
+  Info: TPointerInfo;
+  Realloc: Boolean;
+  ResizeDifficult: function(P: Pointer; NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer of object;
+
+  procedure InitPBytes(P: Pointer; Size: Integer; XorByte: Byte);
+  var
+    j: Integer;
+  begin
+    for j := 0 to Size - 1 do
+     PMediumBytes(P)[j] := Byte(j) xor XorByte;
+  end;
+
+  procedure CheckPBytes(P: Pointer; Size: Integer; XorByte: Byte);
+  var
+    j: Integer;
+  begin
+    if (Realloc) then
+    begin
+      for j := 0 to Size - 1 do
+      if (PMediumBytes(P)[j] <> Byte(j) xor XorByte) then SystemError;
+    end;
+  end;
+
+begin
+  INC_TEST;
+  ThreadHeap := CurrentThreadHeap;
+  if (ThreadHeap = nil) then SystemError;
+  ThreadHeap.ErrorAddr := @TestDifficults;
+
+  // free difficult: small
+  begin
+    INC_TEST;
+    GetMem(P, MAX_SMALL_SIZE);
+
+    if (ThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
+    if (not ThreadHeap.Deferreds.Assigned) then SystemError;
+    ThreadHeap.ProcessThreadDeferred;
+
+    CheckEmptyHeap;
+  end;
+
+  // free difficult: medium
+  begin
+    INC_TEST;
+    GetMem(P, MAX_MEDIUM_SIZE);
+
+    if (ThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
+    if (not ThreadHeap.Deferreds.Assigned) then SystemError;
+    ThreadHeap.ProcessThreadDeferred;
+
+    CheckEmptyHeap;
+  end;
+
+  // free difficult: big/large
+  begin
+    INC_TEST;
+    GetMem(P, MAX_MEDIUM_SIZE + 1);
+
+    if (ThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
+    if (ThreadHeap.Deferreds.Assigned) then SystemError;
+
+    CheckEmptyHeap;
+  end;
+
+  // realloc/reget
+  for Realloc := True downto False do
+  begin
+    if (Realloc) then
+    begin
+      ResizeDifficult := ThreadHeap.ReallocDifficult;
+    end else
+    begin
+      ResizeDifficult := ThreadHeap.RegetDifficult;
+    end;
+
+    // small --> medium
+    begin
+      INC_TEST;
+      GetMem(P, MAX_SMALL_SIZE);
+      InitPBytes(P, MAX_SMALL_SIZE, 1);
+
+      P := ResizeDifficult(P, MAX_SMALL_B16COUNT + 1, @TestDifficults);
+      if (ThreadHeap.Deferreds.Assigned) then SystemError;
+      CheckPBytes(P, MAX_SMALL_SIZE, 1);
+      HeapInfo.Init(ThreadHeap);
+      Check(0, HeapInfo.PoolSmalls.Count);
+      Check(1, HeapInfo.PoolMediums.Count);
+      Info.Init(P);
+      Check(MAX_SMALL_SIZE + 16, Info.Size);
+      if (Info.AsMedium.Align <> ma16Bytes) then SystemError;
+
+      FreeMem(P);
+      CheckEmptyHeap;
+    end;
+
+    // medium --> big/large
+    begin
+      INC_TEST;
+      GetMem(P, MAX_MEDIUM_SIZE);
+      InitPBytes(P, MAX_MEDIUM_SIZE, 2);
+
+      P := ResizeDifficult(P, MAX_MEDIUM_B16COUNT + 1, @TestDifficults);
+      if (ThreadHeap.Deferreds.Assigned) then SystemError;
+      CheckPBytes(P, MAX_MEDIUM_SIZE, 2);
+      HeapInfo.Init(ThreadHeap);
+      Check(0, HeapInfo.PoolSmalls.Count);
+      Check(0, HeapInfo.PoolMediums.Count);
+      Info.Init(P);
+      if (Info.AsSmall <> nil) or (Info.AsMedium <> nil) then SystemError;
+
+      FreeMem(P);
+      CheckEmptyHeap;
+    end;
+
+    // small --> big/large
+    begin
+      INC_TEST;
+      GetMem(P, MAX_SMALL_SIZE);
+      InitPBytes(P, MAX_SMALL_SIZE, 3);
+
+      P := ResizeDifficult(P, MAX_MEDIUM_B16COUNT + 1, @TestDifficults);
+      if (ThreadHeap.Deferreds.Assigned) then SystemError;
+      CheckPBytes(P, MAX_SMALL_SIZE, 3);
+      HeapInfo.Init(ThreadHeap);
+      Check(0, HeapInfo.PoolSmalls.Count);
+      Check(0, HeapInfo.PoolMediums.Count);
+      Info.Init(P);
+      if (Info.AsSmall <> nil) or (Info.AsMedium <> nil) then SystemError;
+
+      FreeMem(P);
+      CheckEmptyHeap;
+    end;
+  end;
+
+  // check empty
+  INC_TEST;
+  CheckEmptyHeap;
+end;
+
 procedure RUN_TESTS;
 begin
   // basic
@@ -1787,7 +1938,10 @@ begin
   TestMediumResize(True);
   TestMediumResize(False);
 
-  // todo
+  // todo big/large
+
+  // free/realloc/reget difficult
+  TestDifficults;
 
   // done
   if (Done) then Log('Done.');
