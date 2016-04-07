@@ -1,34 +1,34 @@
 program SpeedTest;
 
 {
-   Copyright (c) Steve Maughan
+   Copyright (c) Steve Maughan:
    http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/
 
-   Modyfied by Dmitry Mozulyov
-   https://github.com/d-mozulyov/BrainMM
+   Modyfied by Dmitry Mozulyov: https://github.com/d-mozulyov/BrainMM
+   Binaries: http://dmozulyov.ucoz.net/BrainMM/Demo.rar
 }
 
 {$ifdef FASTMM}
-  {$ifdef FASTMM_NEVERSLEEP}
-    {$ifdef CPUX64}
-      {$EXTENSION 'FastMM-NSOT-64.exe'}
-    {$else}
-      {$EXTENSION 'FastMM-NSOT-32.exe'}
-    {$endif}
-  {$else}
+  {$ifNdef FASTMM_NEVERSLEEP}
     {$ifdef CPUX64}
       {$EXTENSION 'FastMM-64.exe'}
     {$else}
       {$EXTENSION 'FastMM-32.exe'}
     {$endif}
+  {$else}
+    {$ifdef CPUX64}
+      {$EXTENSION 'FastMM-NSOT-64.exe'}
+    {$else}
+      {$EXTENSION 'FastMM-NSOT-32.exe'}
+    {$endif}
   {$endif}
 {$endif}
 
-{$ifdef SCALEMM}
+{$ifdef SCALEMM2}
   {$ifdef CPUX64}
-    {$EXTENSION 'ScaleMM-64.exe'}
+    {$EXTENSION 'ScaleMM2-64.exe'}
   {$else}
-    {$EXTENSION 'ScaleMM-32.exe'}
+    {$EXTENSION 'ScaleMM2-32.exe'}
   {$endif}
 {$endif}
 

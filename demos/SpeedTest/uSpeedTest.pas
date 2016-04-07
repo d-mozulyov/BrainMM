@@ -1,7 +1,7 @@
 unit uSpeedTest;
 
 {
-   Copyright (c) Steve Maughan
+   Copyright (c) Steve Maughan:
    http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/
 }
 
@@ -53,7 +53,7 @@ type
 implementation
 
 uses
-  System.Diagnostics;//, System.Threading;
+  System.Diagnostics, System.Threading;
 
 { TSpeedTest }
 

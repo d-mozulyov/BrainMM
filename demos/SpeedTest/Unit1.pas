@@ -1,11 +1,11 @@
 unit Unit1;
 
 {
-   Copyright (c) Steve Maughan
+   Copyright (c) Steve Maughan:
    http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/
 
-   Modyfied by Dmitry Mozulyov
-   https://github.com/d-mozulyov/BrainMM
+   Modyfied by Dmitry Mozulyov: https://github.com/d-mozulyov/BrainMM
+   Binaries: http://dmozulyov.ucoz.net/BrainMM/Demo.rar
 }
 
 interface
