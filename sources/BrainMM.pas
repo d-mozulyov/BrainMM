@@ -535,19 +535,6 @@ type
  (* Extended memory API *)
 
 type
-  TK4Page = array[0..4 * 1024 - 1] of Byte;
-  PK4Page = TK4Page;
-
-  PK4PagesOptions = ^TK4PagesOptions;
-  TK4PagesOptions = packed record
-    Next: PK4PagesOptions;
-    Items: PK4Page;
-    Count: NativeUInt;
-    PagesMode: Byte;
-    BlockSize: TMemoryBlockSize{4kb default};
-    _Padding: array[3..SizeOf(NativeUInt)] of Byte;
-  end;
-
   TBrainMemoryManager = packed record
   case Integer of
     0: (
@@ -575,16 +562,37 @@ type
     1: (POINTERS: array[1..22] of Pointer);
   end;
 
+  TK4Page = array[0..4 * 1024 - 1] of Byte;
+  PK4Page = TK4Page;
+
+  PK4PagesOptions = ^TK4PagesOptions;
+  TK4PagesOptions = packed record
+    Next: PK4PagesOptions;
+    Items: PK4Page;
+    Count: NativeUInt;
+    PagesMode: Byte;
+    BlockSize: TMemoryBlockSize{4kb default};
+    _Padding: array[3..SizeOf(NativeUInt)] of Byte;
+  end;
+
+  // 64 bytes aligned global storage
+  TGlobalStorage = packed record
+    // ToDo PagesHash: array[0..1023] of SupposedPtr{PK4PagesOptions};
+    K64BlockCache: packed record
+      Stack: TSyncStack;
+      Count: NativeUInt;
+      _Padding: array[1..64 - SizeOf(TSyncStack) - SizeOf(NativeUInt)] of Byte;
+    end;
+  end;
+  PGlobalStorage = ^TGlobalStorage;
+
+
 var
   MemoryManager: TBrainMemoryManager;
-
-var
   ThreadHeapList: PThreadHeap;
-  // todo
-  // ALIGNED_PAGES_HASH: array[0..1023] of SupposedPtr{PK4PagesOptions};
+  GLOBAL_STORAGE: array[0..SizeOf(TGlobalStorage) + 63] of Byte;
 
 {$ifdef BRAINMM_UNITTEST}
-
   function CurrentThreadHeap: PThreadHeap;
 implementation
 {$endif}
@@ -1854,6 +1862,8 @@ end;
 
 function BrainMMGetMemoryBlock(BlockSize: TMemoryBlockSize;
   PagesMode: NativeUInt): MemoryBlock;
+var
+  GlobalStorage: PGlobalStorage;
 begin
   // todo
   if (BlockSize <> BLOCK_64K) or (PagesMode = PAGESMODE_USER) then
@@ -1862,17 +1872,27 @@ begin
     Exit;
   end;
 
-  {$ifdef MSWINDOWS}
-    Result := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT, PAGE_READWRITE);
-  {$else .POSIX}
-    Result := memalign(SIZE_K64, SIZE_K64);
-  {$endif}
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  Result := GlobalStorage.K64BlockCache.Stack.Pop;
+  if (Result <> nil) then
+  begin
+    AtomicDecrement(NativeUInt(GlobalStorage.K64BlockCache.Count));
+  end else
+  begin
+    {$ifdef MSWINDOWS}
+      Result := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT, PAGE_READWRITE);
+    {$else .POSIX}
+      Result := memalign(SIZE_K64, SIZE_K64);
+    {$endif}
+  end;
 
   if (Result <> nil) and (PagesMode = PAGESMODE_JIT) then
     ChangeMemoryAccessRights(Result, 64 div 4, [marRead, marWrite, marExecute]);
 end;
 
 function BrainMMFreeMemoryBlock(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
+var
+  GlobalStorage: PGlobalStorage;
 begin
   // todo
   if (PagesMode = PAGESMODE_USER) then
@@ -1881,12 +1901,21 @@ begin
     Exit;
   end;
 
-  {$ifdef MSWINDOWS}
-    Result := VirtualFree(Block, 0, MEM_RELEASE);
-  {$else .POSIX}
-    free(Block);
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  if (GlobalStorage.K64BlockCache.Count < 16) then
+  begin
+    AtomicIncrement(NativeUInt(GlobalStorage.K64BlockCache.Count));
+    GlobalStorage.K64BlockCache.Stack.Push(Block);
     Result := True;
-  {$endif}
+  end else
+  begin
+    {$ifdef MSWINDOWS}
+      Result := VirtualFree(Block, 0, MEM_RELEASE);
+    {$else .POSIX}
+      free(Block);
+      Result := True;
+    {$endif}
+  end;
 end;
 
 function BrainMMGetMemoryPages(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
