@@ -2211,6 +2211,7 @@ type
     Next: PThreadDeferred;
     ReturnAddress: SupposedPtr;
     {
+      Address: Pointer:31/63;
       IsSmall: Boolean:1;
     }
   end;
@@ -2218,7 +2219,8 @@ type
 procedure TThreadHeap.PushThreadDeferred(P: Pointer; ReturnAddress: Pointer;
   IsSmall: Boolean);
 begin
-  PThreadDeferred(P).ReturnAddress := SupposedPtr(ReturnAddress) + Byte(IsSmall);
+  PThreadDeferred(P).ReturnAddress := SupposedPtr(ReturnAddress) +
+    (SupposedPtr(IsSmall) shl HIGH_NATIVE_BIT);
   Deferreds.Push(P);
 end;
 
@@ -2264,7 +2266,7 @@ begin
 
         if (Duplicate <> nil) then
         begin
-          Self.ErrorAddr := Pointer(Duplicate.ReturnAddress and -2);
+          Self.ErrorAddr := Pointer(NativeInt(Duplicate.ReturnAddress) and MASK_HIGH_NATIVE_TEST);
           Self.RaiseInvalidPtr;
         end;
       end;
@@ -2274,8 +2276,8 @@ begin
         Next := ThreadDeferred.Next;
         ReturnAddress := ThreadDeferred.ReturnAddress;
 
-        Self.ErrorAddr := Pointer(ReturnAddress and -2);
-        if (ReturnAddress and 1 <> 0) then
+        Self.ErrorAddr := Pointer(NativeInt(ReturnAddress) and MASK_HIGH_NATIVE_TEST);
+        if (NativeInt(ReturnAddress) < 0) then
         begin
           Self.FreeSmall(ThreadDeferred);
         end else
