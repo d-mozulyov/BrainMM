@@ -92,6 +92,9 @@ unit BrainMM;
   {$if Defined(FPC) or (CompilerVersion >= 18)}
     {$define OPERATORSUPPORT}
   {$ifend}
+  {$ifdef MSWINDOWS}
+    {$SETPEFLAGS $20}
+  {$endif}
 {$else}
   {$define CPUINTEL}
   {$define SMALLINT}
@@ -546,26 +549,30 @@ type
   end;
 
   TBrainMemoryManager = packed record
-    BrainMM: packed record
-      GetMemoryBlock: function(BlockSize: TMemoryBlockSize; PagesMode: NativeUInt): MemoryBlock;
-      FreeMemoryBlock: function(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
-      GetMemoryPages: function(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
-      RegetMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; PagesMode: NativeUInt): MemoryPages;
-      ReallocMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; PagesMode: NativeUInt): MemoryPages;
-      FreeMemoryPages: function(Pages: MemoryPages; PagesMode: NativeUInt): Boolean;
-      Reserved: array[1..4] of Pointer;
-      GetMemAligned: function(Align: TMemoryAlign; Size: NativeUInt): Pointer;
-      RegetMem: function(P: Pointer; NewSize: NativeUInt): Pointer;
-    end;
-    Standard: packed record
-      GetMem: function(Size: NativeUInt): Pointer;
-      FreeMem: function(P: Pointer): Integer;
-      ReallocMem: function(P: Pointer; NewSize: NativeUInt): Pointer;
-      AllocMem: function(Size: NativeUInt): Pointer;
-      RegisterExpectedMemoryLeak: function(P: Pointer): Boolean;
-      UnregisterExpectedMemoryLeak: function(P: Pointer): Boolean;
-      Reserved: array[1..4] of Pointer;
-    end;
+  case Integer of
+    0: (
+        BrainMM: packed record
+          GetMemoryBlock: function(BlockSize: TMemoryBlockSize; PagesMode: NativeUInt): MemoryBlock;
+          FreeMemoryBlock: function(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
+          GetMemoryPages: function(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
+          RegetMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; PagesMode: NativeUInt): MemoryPages;
+          ReallocMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; PagesMode: NativeUInt): MemoryPages;
+          FreeMemoryPages: function(Pages: MemoryPages; PagesMode: NativeUInt): Boolean;
+          Reserved: array[1..4] of Pointer;
+          GetMemAligned: function(Align: TMemoryAlign; Size: NativeUInt): Pointer;
+          RegetMem: function(P: Pointer; NewSize: NativeUInt): Pointer;
+        end;
+        Standard: packed record
+          GetMem: function(Size: NativeUInt): Pointer;
+          FreeMem: function(P: Pointer): Integer;
+          ReallocMem: function(P: Pointer; NewSize: NativeUInt): Pointer;
+          AllocMem: function(Size: NativeUInt): Pointer;
+          RegisterExpectedMemoryLeak: function(P: Pointer): Boolean;
+          UnregisterExpectedMemoryLeak: function(P: Pointer): Boolean;
+          Reserved: array[1..4] of Pointer;
+        end;
+       );
+    1: (POINTERS: array[1..22] of Pointer);
   end;
 
 var
@@ -5802,6 +5809,17 @@ const
 {$ifend}
 type
   PMemoryMgr = {$ifdef MEMORYMANAGEREX}^TMemoryManagerEx{$else}^TMemoryManager{$endif};
+{$ifdef MSWINDOWS}
+const
+  BRAINMM_MARKER: array[1..15] of AnsiChar = 'BrainMM_Marker_';
+  HEX_CHARS: array[0..15] of AnsiChar = '0123456789ABCDEF';
+var
+  i: Integer;
+  ProcessId: Cardinal;
+  Buffer: array[0..SizeOf(BRAINMM_MARKER) + 8] of AnsiChar;
+  Handle: HWND;
+  BrainMMRegistered: ^TBrainMemoryManager;
+{$endif}
 begin
   InitializeOffsetsMedium;
 
@@ -5820,12 +5838,35 @@ begin
   MemoryManager.Standard.RegisterExpectedMemoryLeak := BrainMMRegisterExpectedMemoryLeak;
   MemoryManager.Standard.UnregisterExpectedMemoryLeak := BrainMMUnregisterExpectedMemoryLeak;
 
-  // todo
+  {$ifdef MSWINDOWS}
+  begin
+    Move(BRAINMM_MARKER, Buffer, SizeOf(BRAINMM_MARKER));
+    ProcessId := GetCurrentProcessId;
+    for i := 0 to 7 do
+    begin
+      Buffer[High(Buffer) - 1 - i] := HEX_CHARS[ProcessId and $f];
+      ProcessId := ProcessId shr 4;
+    end;
+    Buffer[High(Buffer)] := #0;
 
+    Handle := FindWindowA('STATIC', Buffer);
+    if (Handle = 0) then
+    begin
+      Handle := CreateWindowA('STATIC', Buffer, WS_POPUP, 0, 0, 0, 0, 0, 0, HInstance, nil);
+      SetWindowLong(Handle, GWL_USERDATA, NativeInt(@MemoryManager));
 
-  {$ifdef BRAINMM_REDIRECT}
-    if (not System.IsLibrary) then
-      BrainMMRedirectInitialize;
+     {$ifdef BRAINMM_REDIRECT}
+       BrainMMRedirectInitialize;
+     {$endif}
+    end else
+    begin
+      BrainMMRegistered := Pointer(GetWindowLong(Handle, GWL_USERDATA));
+
+      for i := Low(BrainMMRegistered.POINTERS) to High(BrainMMRegistered.POINTERS) do
+      if (BrainMMRegistered.POINTERS[i] <> nil) then
+        MemoryManager.POINTERS[i] := BrainMMRegistered.POINTERS[i];
+    end;
+  end;
   {$endif}
 
   {$if Defined(BRAINMM_REDIRECT) and Defined(CPUX86)}
