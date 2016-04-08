@@ -491,6 +491,12 @@ type
 
     function NewK64PoolMedium: PK64PoolMedium;
     function DisposeK64PoolMedium(PoolMedium: PK64PoolMedium): Integer;
+
+    function PenaltyReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
+    function PenaltyGetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
+    function PenaltyFreeMedium(P: Pointer): Integer;
+    function PenaltyRegetMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
+    function PenaltyReallocMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
   public
     // errors
     ErrorAddr: Pointer {address/nil};
@@ -506,7 +512,7 @@ type
     procedure PushThreadDeferred(P: Pointer; ReturnAddress: Pointer; IsSmall: Boolean);
     procedure ProcessThreadDeferred;
   public
-    // most frequently used (assembler optimized)
+    // most frequently used
     function GetSmall(B16Count: NativeUInt): Pointer;
     function FreeSmall(P: Pointer): Integer;
     function RegrowSmallToSmall(P: Pointer; NewB16Count: NativeUInt): Pointer;
@@ -4207,6 +4213,55 @@ begin
 end;
 
 function TThreadHeap.ReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
+var
+  Header: PHeaderMedium;
+  Flags, EmptyFlags: NativeUInt;
+begin
+  // header flags
+  Header := P;
+  Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+
+  // if (Next.Empty) then Grow(Next)
+  EmptyFlags := Flags and MASK_MEDIUM_ALLOCATED_TEST;
+  if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
+  begin
+    Flags := (Flags shl 4) and ($ffff shl 4);
+    Inc(NativeUInt(Header), Flags);
+    EmptyFlags := Header.Flags;
+    if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) and
+      (Header.PreviousSize = Flags) then
+    begin
+      // MediumEmpty.Size := MediumEmpty.Size + (NewSize - LastSize)
+      EmptyFlags := EmptyFlags shl 4;
+      NewB16Count := NewB16Count shl 4;
+      Inc(NativeUInt(Header), EmptyFlags);
+      Dec(Flags, NewB16Count);
+      Inc(Flags, EmptyFlags);
+      PHeaderMediumEmptyEx(Header{Empty}).Size := Flags;
+
+      // new empty flags
+      Dec(NativeUInt(Header), Flags);
+      Flags := Flags shr 4;
+      Header.PreviousSize := NewB16Count;
+      Header.Flags := Flags;
+
+      // result
+      Dec(NativeUInt(Header), NewB16Count);
+      NewB16Count := NewB16Count shr 4;
+      Dec(Header);
+      Header.B16Count := NewB16Count;
+      Result := Pointer(@PHeaderMediumList(Header)[0]);
+      Exit;
+    end else
+    begin
+      Dec(NativeUInt(Header), Flags);
+    end;
+  end;
+
+  Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyReduceMedium(Pointer(Header), NewB16Count);
+end;
+
+function TThreadHeap.PenaltyReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
 label
   ptr_invalid, done;
 var
@@ -4330,6 +4385,73 @@ ptr_invalid:
 end;
 
 function TThreadHeap.GetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
+var
+  Pool: PK64PoolMedium;
+  Header: PHeaderMedium;
+  Flags: NativeUInt;
+begin
+  if (Align = 0) then
+  begin
+    Pool := Self.QK64PoolMedium;
+    if (Pool <> nil) then
+    begin
+      Header{Empty} := Pointer(Pool.Empties.First.Next);
+      if (Header{Empty} <> Pointer(@Pool.Empties.Last)) then
+      begin
+        Flags{Size} := PHeaderMediumEmptyEx(Header{Empty}).Size;
+        Inc(Header);
+        Dec(NativeUInt(Header), Flags{Size});
+        if (Flags{Size} and MASK_MEDIUM_SIZE_TEST = MASK_MEDIUM_SIZE_VALUE) and
+          (NativeInt(Header) and MASK_K4_TEST <> 0) then
+        begin
+          Dec(Header);
+          Flags := Flags{Size} shr 4;
+          Inc(B16Count, 2);
+          if (Flags = Header.Flags) and (Flags >= B16Count{ + 2}) then
+          begin
+            // Flags := Flags - B16Count - 1
+            // (B16Count * 16)
+            Dec(Flags, B16Count);
+            Dec(B16Count, 2);
+            Inc(Flags);
+            B16Count := B16Count shl 4;
+
+            // make empty shorter
+            // (Flags * 16)
+            Inc(Header);
+            Inc(NativeUInt(Header), B16Count);
+            Header.PreviousSize := B16Count;
+            Header.Flags := Flags{Empty B16Count};
+            Flags := Flags shl 4;
+            Inc(Header);
+            Inc(NativeUInt(Header), Flags);
+            Header.PreviousSize := Flags;
+
+            // result
+            Dec(Header, 2);
+            Dec(NativeUInt(Header), B16Count);
+            B16Count := B16Count shr 4;
+            Dec(NativeUInt(Header), Flags);
+            Header.Flags := B16Count + {AllocatedFlags}MASK_MEDIUM_ALLOCATED;
+            Result := Pointer(@PHeaderMediumList(Header)[0]);
+            Exit;
+          end;
+          Dec(B16Count, 2);
+        end;
+      end;
+
+      Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyGetMedium(B16Count, 0);
+    end else
+    begin
+      Result := Self.PenaltyGetMedium(B16Count, 0);
+    end;
+  end else
+  begin
+    Result := Self.PenaltyGetMedium(B16Count, Align);
+  end;
+end;
+
+function TThreadHeap.PenaltyGetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
 label
   done, ptr_invalid;
 var
@@ -4496,6 +4618,73 @@ end;
 
 function TThreadHeap.FreeMedium(P: Pointer): Integer;
 var
+  Header: PHeaderMedium;
+  Flags, EmptyFlags: NativeUInt;
+  Pool: PK64PoolMedium;
+
+  StoreHeader:  PHeaderMedium;
+begin
+  // header flags
+  Header := P;
+  Dec(Header);
+  Flags := Header.Flags;
+
+  // if (Prev.Allocated) and (Next.Empty) then Grow(Next)
+  EmptyFlags := Flags and MASK_MEDIUM_ALLOCATED_TEST;
+  if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
+  begin
+    EmptyFlags := PHeaderMedium(NativeUInt(Header) - Header.PreviousSize).Flags;
+    EmptyFlags := EmptyFlags and MASK_MEDIUM_ALLOCATED_TEST;
+    if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
+    begin
+      StoreHeader := Header;
+      Inc(Header);
+      Flags := (Flags shl 4) and ($ffff shl 4);
+      Inc(NativeUInt(Header), Flags);
+      EmptyFlags := Header.Flags;
+      if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) and
+        (Header.PreviousSize = Flags) then
+      begin
+        // MediumEmpty.Size := MediumEmpty.Size + Size + 16
+        EmptyFlags := EmptyFlags shl 4;
+        Inc(Flags, 16);
+        Inc(NativeUInt(Header{Empty}), EmptyFlags);
+        Inc(Flags, EmptyFlags);
+        if (Flags <> SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium)) then
+        begin
+          PHeaderMediumEmptyEx(Header{Empty}).Size := Flags;
+
+          // new empty flags
+          Dec(NativeUInt(Header), Flags);
+          Flags := Flags shr 4;
+          Header.Flags := Flags;
+
+          if (StoreHeader <> Header) then
+            GLOBAL_STORAGE[0] := 15;
+
+          // result
+          Result := FREEMEM_DONE;
+          Exit;
+        end else
+        begin
+          Pool := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR);
+          Result := Pool.ThreadHeap.DisposeK64PoolMedium(Pool);
+          Exit;
+        end;
+      end else
+      begin
+        Dec(Header);
+        Dec(NativeUInt(Header), Flags);
+      end;
+    end;
+  end;
+
+  Inc(Header);
+  Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyFreeMedium(Pointer(Header));
+end;
+
+function TThreadHeap.PenaltyFreeMedium(P: Pointer): Integer;
+var
   Information: NativeUInt;
   Pool: PK64PoolMedium;
   Empty, Left, Right: PHeaderMediumEmpty;
@@ -4557,6 +4746,13 @@ begin
 end;
 
 function TThreadHeap.RegetMediumToMedium(P: Pointer;
+  NewB16Count: NativeUInt): Pointer;
+begin
+  // todo
+  Result := PenaltyRegetMediumToMedium(P, NewB16Count);
+end;
+
+function TThreadHeap.PenaltyRegetMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
 label
   free_and_get, ptr_invalid;
@@ -4687,6 +4883,13 @@ begin
 end;
 
 function TThreadHeap.ReallocMediumToMedium(P: Pointer;
+  NewB16Count: NativeUInt): Pointer;
+begin
+  // todo
+  Result := PenaltyReallocMediumToMedium(P, NewB16Count);
+end;
+
+function TThreadHeap.PenaltyReallocMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
 label
   get_copy_free, ptr_invalid;
