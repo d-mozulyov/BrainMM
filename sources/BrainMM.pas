@@ -1919,6 +1919,8 @@ begin
 end;
 
 function BrainMMGetMemoryPages(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
+var
+  K64Count: NativeUInt;
 begin
   // todo
   if (PagesMode = PAGESMODE_USER) then
@@ -1927,10 +1929,12 @@ begin
     Exit;
   end;
 
+  K64Count := ((Count + 1) + 15) shr 4;
+
   {$ifdef MSWINDOWS}
-    Result := VirtualAlloc(nil, (Count + 1) * SIZE_K4, MEM_COMMIT, PAGE_READWRITE);
+    Result := VirtualAlloc(nil, K64Count * SIZE_K64, MEM_COMMIT, PAGE_READWRITE);
   {$else .POSIX}
-    Result := memalign(SIZE_K4, (Count + 1) * SIZE_K4);
+    Result := memalign(SIZE_K4, K64Count * SIZE_K64);
   {$endif}
 
   if (Result <> nil) then
@@ -1945,6 +1949,9 @@ end;
 
 function BrainMMRegetMemoryPages(Pages: MemoryPages; NewCount: NativeUInt;
   PagesMode: NativeUInt): MemoryPages;
+var
+  K64Count: NativeUInt;
+  LastCount, LastK64Count: NativeUInt;
 begin
   // todo
   if (PagesMode = PAGESMODE_USER) then
@@ -1953,16 +1960,28 @@ begin
     Exit;
   end;
 
-  if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
-    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+  K64Count := ((NewCount + 1) + 15) shr 4;
+  LastCount := PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^;
+  LastK64Count := ((LastCount + 1) + 15) shr 4;
 
-  Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
+  if (LastK64Count = K64Count) then
+  begin
+    PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^ := NewCount;
+    Result := Pages;
+  end else
+  begin
+    if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+
+    Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
+  end;
 end;
 
 function BrainMMReallocMemoryPages(Pages: MemoryPages; NewCount: NativeUInt;
   PagesMode: NativeUInt): MemoryPages;
 var
-  LastCount: NativeUInt;
+  K64Count: NativeUInt;
+  LastCount, LastK64Count: NativeUInt;
 begin
   // todo
   if (PagesMode = PAGESMODE_USER) then
@@ -1971,15 +1990,23 @@ begin
     Exit;
   end;
 
-  Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
-  if (Result <> nil) then
-  begin
-    LastCount := PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^;
-    NcMoveB16(P16(Pages)^, P16(Result)^, LastCount * B16_PER_PAGE);
-  end;
+  K64Count := ((NewCount + 1) + 15) shr 4;
+  LastCount := PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^;
+  LastK64Count := ((LastCount + 1) + 15) shr 4;
 
-  if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
-    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+  if (LastK64Count = K64Count) then
+  begin
+    PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^ := NewCount;
+    Result := Pages;
+  end else
+  begin
+    Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
+    if (Result <> nil) then
+      NcMoveB16(P16(Pages)^, P16(Result)^, LastCount * B16_PER_PAGE);
+
+    if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+  end;
 end;
 
 function BrainMMFreeMemoryPages(Pages: MemoryPages; PagesMode: NativeUInt): Boolean;

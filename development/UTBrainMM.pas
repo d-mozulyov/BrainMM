@@ -2118,8 +2118,15 @@ var
 begin
   inherited Init(V);
 
-  Left := Pointer(V.PrevNext.Prev and MASK_64_CLEAR);
-  Right := Pointer(V.PrevNext.Next and MASK_64_CLEAR);
+  if (InFullQueue) then
+  begin
+    Left := Pointer(V.PrevNext.Prev and MASK_K64_CLEAR);
+    Right := Pointer(V.PrevNext.Next and MASK_K64_CLEAR);
+  end else
+  begin
+    Left := nil;
+    Right := nil;
+  end;
 
   if (Left = nil) then
   begin
@@ -2259,8 +2266,8 @@ var
 begin
   inherited Init(V);
 
-  Left := Pointer(V.PrevNext.Prev and MASK_64_CLEAR);
-  Right := Pointer(V.PrevNext.Next and MASK_64_CLEAR);
+  Left := Pointer(V.PrevNext.Prev and MASK_K64_CLEAR);
+  Right := Pointer(V.PrevNext.Next and MASK_K64_CLEAR);
 
   if (Left = nil) then
   begin
