@@ -284,6 +284,7 @@ const
   PAGESMODE_USER = 0;
   PAGESMODE_SYSTEM = 1;
   PAGESMODE_JIT = 2;
+  PAGESMODE_CORE = 3;
 
   PTR_INVALID = Pointer(1);
   FREEMEM_INVALID = Integer({$ifdef FPC}0{$else}-1{$endif});
@@ -589,6 +590,7 @@ type
       Count: NativeUInt;
       _Padding: array[1..64 - SizeOf(TSyncStack) - SizeOf(NativeUInt)] of Byte;
     end;
+    CoreThreadHeaps: TSyncStack64;
   end;
   PGlobalStorage = ^TGlobalStorage;
 
@@ -2037,15 +2039,45 @@ end;
 
  (* Local thread heap memory routine *)
 
+{$ifdef PUREPASCAL}
 threadvar
-  {$ifdef PUREPASCAL}ThreadHeapInstance: PThreadHeap;{$endif}
-  ThreadHeapBuffer: array[0..SizeOf(TThreadHeap) - 1 + 64] of Byte;
+  ThreadHeapInstance: PThreadHeap;
+{$endif}
+
+function GrowCoreThreadHeaps(Storage: PGlobalStorage): PThreadHeap;
+type
+  TCoreThreadHeapList = array[0..SIZE_K64 div SizeOf(TThreadHeap) - 1] of TThreadHeap;
+  PCoreThreadHeapList = ^TCoreThreadHeapList;
+var
+  i: Integer;
+  CoreThreadHeapList: PCoreThreadHeapList;
+begin
+  CoreThreadHeapList := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, PAGESMODE_CORE);
+  if (CoreThreadHeapList = nil) then
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+
+  for i := 1 to High(TCoreThreadHeapList) - 1 do
+    CoreThreadHeapList[i].FNextHeap := @CoreThreadHeapList[i + 1];
+
+  Storage.CoreThreadHeaps.PushList(@CoreThreadHeapList[1],
+    @CoreThreadHeapList[High(TCoreThreadHeapList)]);
+
+  Result := @CoreThreadHeapList[0];
+end;
 
 function CreateThreadHeap: PThreadHeap;
 var
+  GlobalStorage: PGlobalStorage;
   NextHeap: PThreadHeap;
 begin
-  Result := PThreadHeap(NativeInt(@ThreadHeapBuffer[63]) and MASK_64_CLEAR);
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  Result := GlobalStorage.CoreThreadHeaps.Pop;
+  if (Result = nil) then
+  begin
+    Result := GrowCoreThreadHeaps(GlobalStorage);
+  end;
+
+  FillChar(Result^, SizeOf(TThreadHeap), #0);
   Result.FMarkerNotSelf := not SupposedPtr(Result);
 
   repeat
