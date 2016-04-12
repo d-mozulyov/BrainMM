@@ -4245,6 +4245,7 @@ begin
 end;
 
 function TThreadHeap.ReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -4292,6 +4293,105 @@ begin
 
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyReduceMedium(Pointer(Header), NewB16Count);
 end;
+{$else}
+asm
+  // if (not Allocated(P)) then PenaltyReduceMedium
+  // Size := SizeOf(P)
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    push ebx
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, eax
+    movzx eax, ax
+    shl eax, 4
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, rcx
+    movzx rcx, cx
+    shl rcx, 4
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @penalty_reducemem
+
+  // if (not Next.Empty) then PenaltyReduceMedium
+  {$ifdef CPUX86}
+    add edx, eax
+    mov ebx, [EDX].THeaderMedium.Flags
+    cmp [EDX].THeaderMedium.PreviousSize, eax
+    jne @penalty_reducemem_restore
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reducemem_restore
+  {$else .CPUX64}
+    add rdx, rcx
+    mov r9, [RDX].THeaderMedium.Flags
+    cmp [RDX].THeaderMedium.PreviousSize, rcx
+    jne @penalty_reducemem_restore
+    test r9, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reducemem_restore
+  {$endif}
+
+  // empty grow routine, result
+  {$ifdef CPUX86}
+    shl ebx, 4
+    shl ecx, 4
+    add edx, ebx
+    sub eax, ecx
+    add eax, ebx
+    mov [EDX].THeaderMediumEmptyEx.Size, eax
+
+    sub edx, eax
+    shr eax, 4
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    mov [EDX].THeaderMedium.Flags, eax
+
+    sub edx, ecx
+    shr ecx, 4
+    pop ebx
+    mov [EDX - 16].THeaderMedium.B16Count, cx
+    xchg eax, edx
+  {$else .CPUX64}
+    shl r9, 4
+    shl r8, 4
+    add rdx, r9
+    sub rcx, r8
+    add rcx, r9
+    mov [RDX].THeaderMediumEmptyEx.Size, rcx
+
+    sub rdx, rcx
+    shr rcx, 4
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    mov [RDX].THeaderMedium.Flags, rcx
+
+    sub rdx, r8
+    shr r8, 4
+    mov [RDX - 16].THeaderMedium.B16Count, r8w
+    xchg rax, rdx
+  {$endif}
+
+  // Exit
+  ret
+@penalty_reducemem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+  {$endif}
+@penalty_reducemem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+    pop ebx
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyReduceMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
 label
@@ -4417,6 +4517,7 @@ ptr_invalid:
 end;
 
 function TThreadHeap.GetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
+{$ifdef PUREPASCAL}
 var
   Pool: PK64PoolMedium;
   Header: PHeaderMedium;
@@ -4482,6 +4583,146 @@ begin
     Result := Self.PenaltyGetMedium(B16Count, Align);
   end;
 end;
+{$else}
+asm
+  // if (Align <> ma16Bytes) then Self.PenaltyGetMedium(..., ...)
+  {$ifdef CPUX86}
+    test ecx, ecx
+  {$else .CPUX64}
+    test r8, r8
+  {$endif}
+  jnz TThreadHeap.PenaltyGetMedium
+
+  // if (Self.QK64PoolMedium = nil) then Self.PenaltyGetMedium(..., 0)
+  {$ifdef CPUX86}
+    mov ecx, [EAX].TThreadHeap.QK64PoolMedium
+    test ecx, ecx
+  {$else .CPUX64}
+    mov r8, [RCX].TThreadHeap.QK64PoolMedium
+    test r8, r8
+  {$endif}
+  jz TThreadHeap.PenaltyGetMedium
+
+  // if (not Contains(Empty)) then Self.PenaltyGetMedium(..., 0)
+  {$ifdef CPUX86}
+    mov eax, [ECX].TK64PoolMedium.Empties.First.Next
+    lea ecx, [ECX].TK64PoolMedium.Empties.Last
+    cmp eax, ecx
+  {$else .CPUX64}
+    mov rcx, [R8].TK64PoolMedium.Empties.First.Next
+    lea r8, [R8].TK64PoolMedium.Empties.Last
+    cmp rcx, r8
+  {$endif}
+  je @penalty_getmem_thread
+
+  // Size := SizeOf(Empty), check bits
+  // Header := HeaderOf(Empty), check 4kb align
+  {$ifdef CPUX86}
+    mov ecx, [EAX].THeaderMediumEmptyEx.Size
+    add eax, 16
+    sub eax, ecx
+    test ecx, MASK_MEDIUM_SIZE_TEST
+    jnz @penalty_getmem_thread
+    test eax, MASK_K4_TEST
+    jz @penalty_getmem_thread
+  {$else .CPUX64}
+    mov r8, [RCX].THeaderMediumEmptyEx.Size
+    add rcx, 16
+    sub rcx, r8
+    test r8, MASK_MEDIUM_SIZE_TEST
+    jnz @penalty_getmem_thread
+    test rcx, MASK_K4_TEST
+    jz @penalty_getmem_thread
+  {$endif}
+
+  // if (Size shr 4 <> Header.Flags) or (Size shr 4 >= B16Count + 2) then
+  //   Self.PenaltyGetMedium(..., 0)
+  {$ifdef CPUX86}
+    shr ecx, 4
+    add edx, 2
+    sub eax, 16
+    cmp ecx, edx
+    jb @penalty_getmem_b16count
+    cmp ecx, [EAX].THeaderMedium.Flags
+    jne @penalty_getmem_b16count
+  {$else .CPUX64}
+    shr r8, 4
+    add rdx, 2
+    sub rcx, 16
+    cmp r8, rdx
+    jb @penalty_getmem_b16count
+    cmp r8, [RCX].THeaderMedium.Flags
+    jne @penalty_getmem_b16count
+  {$endif}
+
+  // allocate and empty reduce routine
+  {$ifdef CPUX86}
+    sub ecx, edx
+    sub edx, 2
+    add ecx, 1
+    shl edx, 4
+
+    add eax, edx
+    mov [EAX + 16].THeaderMedium.PreviousSize, edx
+    mov [EAX + 16].THeaderMedium.Flags, ecx
+    shl ecx, 4
+    add eax, ecx
+    mov [EAX + 32].THeaderMedium.PreviousSize, ecx
+
+    add ecx, edx
+    shr edx, 4
+    sub eax, ecx
+    add edx, MASK_MEDIUM_ALLOCATED
+    mov [EAX].THeaderMedium.Flags, edx
+    lea eax, [EAX + 16]
+  {$else .CPUX64}
+    sub r8, rdx
+    sub rdx, 2
+    add r8, 1
+    shl rdx, 4
+
+    add rcx, rdx
+    mov [RCX + 16].THeaderMedium.PreviousSize, rdx
+    mov [RCX + 16].THeaderMedium.Flags, r8
+    shl r8, 4
+    add rcx, r8
+    mov [RCX + 32].THeaderMedium.PreviousSize, r8
+
+    add r8, rdx
+    shr rdx, 4
+    sub rcx, r8
+    add rdx, MASK_MEDIUM_ALLOCATED
+    mov [RCX].THeaderMedium.Flags, rdx
+    lea rax, [RCX + 16]
+  {$endif}
+
+  // Exit
+  ret
+@penalty_getmem_b16count:
+  // Dec(B16Count, 2)
+  {$ifdef CPUX86}
+    sub edx, 2
+  {$else .CPUX64}
+    sub rdx, 2
+  {$endif}
+@penalty_getmem_thread:
+  // Self := ThreadHeapOf(Header/Empty)
+  {$ifdef CPUX86}
+    and eax, MASK_K64_CLEAR
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+  {$else .CPUX64}
+    and rcx, MASK_K64_CLEAR
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+@penalty_getmem:
+  {$ifdef CPUX86}
+    xor ecx, ecx
+  {$else .CPUX64}
+    xor r8, r8
+  {$endif}
+  jmp TThreadHeap.PenaltyGetMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyGetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
 label
@@ -4649,6 +4890,9 @@ begin
 end;
 
 function TThreadHeap.FreeMedium(P: Pointer): Integer;
+const
+  MAX_MEDIUMEMPTY_SIZE = SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium);
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -4679,7 +4923,7 @@ begin
         Inc(Flags, 16);
         Inc(NativeUInt(Header{Empty}), EmptyFlags);
         Inc(Flags, EmptyFlags);
-        if (Flags <> SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium)) then
+        if (Flags <> MAX_MEDIUMEMPTY_SIZE) then
         begin
           PHeaderMediumEmptyEx(Header{Empty}).Size := Flags;
 
@@ -4708,6 +4952,120 @@ begin
   Inc(Header);
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyFreeMedium(Pointer(Header));
 end;
+{$else}
+asm
+  // if (not Self.Allocated) or (not Prev.Allocated) or
+  //  (not Next.Allocated) then PenaltyFreeMedium
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    mov ecx, MASK_MEDIUM_ALLOCATED_TEST
+    and ecx, eax
+    cmp ecx, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem
+
+    lea ecx, [edx - 32]
+    sub ecx, [EDX - 16].THeaderMedium.PreviousSize
+    movzx eax, ax
+    mov ecx, [ECX].THeaderMedium.Flags
+    shl eax, 4
+    and ecx, MASK_MEDIUM_ALLOCATED_TEST
+    add edx, eax
+    cmp ecx, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem_restore
+
+    mov ecx, [EDX].THeaderMedium.Flags
+    test ecx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_freemem_restore
+    shl ecx, 4
+    cmp eax, [EDX].THeaderMedium.PreviousSize
+    jne @penalty_freemem_restore
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r8, MASK_MEDIUM_ALLOCATED_TEST
+    and r8, rcx
+    cmp r8, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem
+
+    lea r8, [rdx - 32]
+    sub r8, [RDX - 16].THeaderMedium.PreviousSize
+    movzx rcx, cx
+    mov r8, [R8].THeaderMedium.Flags
+    shl rcx, 4
+    and r8, MASK_MEDIUM_ALLOCATED_TEST
+    add rdx, rcx
+    cmp r8, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem_restore
+
+    mov r8, [RDX].THeaderMedium.Flags
+    test r8, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_freemem_restore
+    shl r8, 4
+    cmp rcx, [RDX].THeaderMedium.PreviousSize
+    jne @penalty_freemem_restore
+  {$endif}
+
+  // if (MediumEmpty.Size + Size + 16 = MAX_MEDIUMEMPTY_SIZE) then
+  //   Pool.ThreadHeap.DisposeK64PoolMedium(Pool)
+  {$ifdef CPUX86}
+    add eax, ecx
+    add edx, ecx
+    cmp eax, MAX_MEDIUMEMPTY_SIZE - 16
+    lea eax, [eax + 16]
+  {$else .CPUX64}
+    add rcx, r8
+    add rdx, r8
+    cmp rcx, MAX_MEDIUMEMPTY_SIZE - 16
+    lea rcx, [rcx + 16]
+  {$endif}
+  je @dispose_pool
+
+  // result
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMediumEmptyEx.Size, eax
+    sub edx, eax
+    shr eax, 4
+    mov [EDX].THeaderMedium.Flags, eax
+
+    mov eax, FREEMEM_DONE
+  {$else .CPUX64}
+    mov [RDX].THeaderMediumEmptyEx.Size, rcx
+    sub rdx, rcx
+    shr rcx, 4
+    mov [RDX].THeaderMedium.Flags, rcx
+
+    mov rax, FREEMEM_DONE
+  {$endif}
+
+  // Exit
+  ret
+@dispose_pool:
+  {$ifdef CPUX86}
+    and edx, MASK_K64_CLEAR
+    mov eax, [EDX].TK64PoolMedium.ThreadHeap
+  {$else .CPUX64}
+    and rdx, MASK_K64_CLEAR
+    mov rcx, [RDX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.DisposeK64PoolMedium
+@penalty_freemem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+  {$endif}
+@penalty_freemem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyFreeMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyFreeMedium(P: Pointer): Integer;
 var
@@ -4773,6 +5131,7 @@ end;
 
 function TThreadHeap.RegetMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -4828,6 +5187,125 @@ begin
 
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyRegetMediumToMedium(Pointer(Header), NewB16Count);
 end;
+{$else}
+asm
+  // if (not Allocated(P)) then PenaltyRegetMediumToMedium
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    push ebx
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, eax
+    movzx eax, ax
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, rcx
+    movzx rcx, cx
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @penalty_regetmem
+
+  // GrowCount := NewB16Count - Header(P).P16Count
+  // if (not Next.Empty) then PenaltyRegetMediumToMedium
+  {$ifdef CPUX86}
+    sub ecx, eax
+    shl eax, 4
+    cmp [EDX + eax].THeaderMedium.PreviousSize, eax
+    lea edx, [edx + eax]
+    jne @penalty_regetmem_restore
+    mov ebx, [EDX].THeaderMedium.Flags
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_regetmem_restore
+  {$else .CPUX64}
+    sub r8, rcx
+    shl rcx, 4
+    cmp [RDX + rcx].THeaderMedium.PreviousSize, rcx
+    lea rdx, [rdx + rcx]
+    jne @penalty_regetmem_restore
+    mov r9, [RDX].THeaderMedium.Flags
+    test r9, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_regetmem_restore
+  {$endif}
+
+  // if (EmptyFlags < NewB16Count + 2) then PenaltyRegetMediumToMedium
+  {$ifdef CPUX86}
+    add ecx, 2
+    cmp ebx, ecx
+    lea ecx, [ecx - 2]
+  {$else .CPUX64}
+    add r8, 2
+    cmp r9, r8
+    lea r8, [r8 - 2]
+  {$endif}
+  jb @penalty_regetmem_restore
+
+  // empty reduce routine, result
+  {$ifdef CPUX86}
+    shl ebx, 4
+    shl ecx, 4
+    add edx, ebx
+
+    sub ebx, ecx
+    add ecx, eax
+    mov [EDX].THeaderMediumEmptyEx.Size, ebx
+
+    sub edx, ebx
+    shr ebx, 4
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    mov [EDX].THeaderMedium.Flags, ebx
+
+    sub edx, ecx
+    shr ecx, 4
+    pop ebx
+    mov [EDX - 16].THeaderMedium.B16Count, cx
+    xchg eax, edx
+  {$else .CPUX64}
+    shl r9, 4
+    shl r8, 4
+    add rdx, r9
+
+    sub r9, r8
+    add r8, rcx
+    mov [RDX].THeaderMediumEmptyEx.Size, r9
+
+    sub rdx, r9
+    shr r9, 4
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    mov [RDX].THeaderMedium.Flags, r9
+
+    sub rdx, r8
+    shr r8, 4
+    mov [RDX - 16].THeaderMedium.B16Count, r8w
+    xchg rax, rdx
+  {$endif}
+
+  // Exit
+  ret
+@penalty_regetmem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+    shr eax, 4
+    add ecx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+    shr rcx, 4
+    add r8, rcx
+  {$endif}
+@penalty_regetmem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+    pop ebx
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyRegetMediumToMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyRegetMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
@@ -4961,6 +5439,7 @@ end;
 
 function TThreadHeap.ReallocMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -5016,6 +5495,125 @@ begin
 
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyReallocMediumToMedium(Pointer(Header), NewB16Count);
 end;
+{$else}
+asm
+  // if (not Allocated(P)) then PenaltyReallocMediumToMedium
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    push ebx
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, eax
+    movzx eax, ax
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, rcx
+    movzx rcx, cx
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @penalty_reallocmem
+
+  // GrowCount := NewB16Count - Header(P).P16Count
+  // if (not Next.Empty) then PenaltyReallocMediumToMedium
+  {$ifdef CPUX86}
+    sub ecx, eax
+    shl eax, 4
+    cmp [EDX + eax].THeaderMedium.PreviousSize, eax
+    lea edx, [edx + eax]
+    jne @penalty_reallocmem_restore
+    mov ebx, [EDX].THeaderMedium.Flags
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reallocmem_restore
+  {$else .CPUX64}
+    sub r8, rcx
+    shl rcx, 4
+    cmp [RDX + rcx].THeaderMedium.PreviousSize, rcx
+    lea rdx, [rdx + rcx]
+    jne @penalty_reallocmem_restore
+    mov r9, [RDX].THeaderMedium.Flags
+    test r9, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reallocmem_restore
+  {$endif}
+
+  // if (EmptyFlags < NewB16Count + 2) then PenaltyReallocMediumToMedium
+  {$ifdef CPUX86}
+    add ecx, 2
+    cmp ebx, ecx
+    lea ecx, [ecx - 2]
+  {$else .CPUX64}
+    add r8, 2
+    cmp r9, r8
+    lea r8, [r8 - 2]
+  {$endif}
+  jb @penalty_reallocmem_restore
+
+  // empty reduce routine, result
+  {$ifdef CPUX86}
+    shl ebx, 4
+    shl ecx, 4
+    add edx, ebx
+
+    sub ebx, ecx
+    add ecx, eax
+    mov [EDX].THeaderMediumEmptyEx.Size, ebx
+
+    sub edx, ebx
+    shr ebx, 4
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    mov [EDX].THeaderMedium.Flags, ebx
+
+    sub edx, ecx
+    shr ecx, 4
+    pop ebx
+    mov [EDX - 16].THeaderMedium.B16Count, cx
+    xchg eax, edx
+  {$else .CPUX64}
+    shl r9, 4
+    shl r8, 4
+    add rdx, r9
+
+    sub r9, r8
+    add r8, rcx
+    mov [RDX].THeaderMediumEmptyEx.Size, r9
+
+    sub rdx, r9
+    shr r9, 4
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    mov [RDX].THeaderMedium.Flags, r9
+
+    sub rdx, r8
+    shr r8, 4
+    mov [RDX - 16].THeaderMedium.B16Count, r8w
+    xchg rax, rdx
+  {$endif}
+
+  // Exit
+  ret
+@penalty_reallocmem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+    shr eax, 4
+    add ecx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+    shr rcx, 4
+    add r8, rcx
+  {$endif}
+@penalty_reallocmem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+    pop ebx
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyReallocMediumToMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyReallocMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
