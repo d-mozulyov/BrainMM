@@ -1829,17 +1829,6 @@ begin
     CheckEmptyHeap;
   end;
 
-  // free difficult: big/large
-  begin
-    INC_TEST;
-    GetMem(P, MAX_MEDIUM_SIZE + 1);
-
-    if (ThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
-    if (ThreadHeap.Deferreds.Assigned) then SystemError;
-
-    CheckEmptyHeap;
-  end;
-
   // realloc/reget
   for Realloc := True downto False do
   begin

@@ -273,6 +273,7 @@ const
   MASK_K64_TEST = SIZE_K64 - 1;
 
   B16_PER_PAGE = SIZE_K4 div SIZE_16;
+  B16_PER_PAGE_SHIFT = 12 - 4;
 
   MAX_SMALL_SIZE = 128;
   MAX_SMALL_B16COUNT = MAX_SMALL_SIZE div 16;
@@ -525,12 +526,6 @@ type
     function FreeMedium(P: Pointer): Integer;
     function RegetMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
     function ReallocMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-
-    // big (4kb aligned) or large (64kb aligned) routine
-    function GetBigOrLarge(B16Count: NativeUInt): Pointer;
-    function FreeBigOrLarge(P: Pointer): Integer;
-    function RegetBigOrLarge(P: Pointer; NewB16Count: NativeUInt): Pointer;
-    function ReallocBigOrLarge(P: Pointer; NewB16Count: NativeUInt): Pointer;
 
     // difficult routine
     function FreeDifficult(P: Pointer; ReturnAddress: Pointer): Integer;
@@ -2412,7 +2407,11 @@ begin
         MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
           Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
       else
-        Result := ThreadHeap.GetBigOrLarge(B16Count);
+        Result := MemoryManager.BrainMM.GetMemoryPages(
+          (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+          PAGESMODE_SYSTEM);
+        { if (Result = nil) then
+          Result := ThreadHeap.ErrorOutOfMemory; }
       end;
     end else
     begin
@@ -2476,7 +2475,7 @@ asm
   // case (B16Count) of
   //   Exit ThreadHeap.GetSmall(B16Count)
   //   Exit ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes))
-  //   Exit ThreadHeap.GetBigOrLarge(B16Count)
+  //   Exit MemoryManager.BrainMM.GetMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     xor ecx, ecx
     cmp edx, MAX_SMALL_B16COUNT
@@ -2490,7 +2489,32 @@ asm
     cmp rdx, MAX_MEDIUM_B16COUNT
     jbe TThreadHeap.GetMedium
   {$endif}
-  jmp TThreadHeap.GetBigOrLarge
+
+  {$ifdef CPUX86}
+    lea eax, [edx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr eax, B16_PER_PAGE_SHIFT
+  {$else .CPUX64}
+    lea rcx, [rdx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr rcx, B16_PER_PAGE_SHIFT
+  {$endif}
+  call MemoryManager.BrainMM.GetMemoryPages
+  {$ifdef CPUX86}
+    test eax, eax
+  {$else .CPUX64}
+    test rax, rax
+  {$endif}
+  jz @error_outof_memory
+  ret
+
+@error_outof_memory:
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  jmp TThreadHeap.ErrorOutOfMemory
 
 @penalty_thread_deferreds:
   {$ifdef CPUX86}
@@ -2676,7 +2700,11 @@ begin
         MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
           Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
       else
-        Result := ThreadHeap.GetBigOrLarge(B16Count);
+        Result := MemoryManager.BrainMM.GetMemoryPages(
+          (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+          PAGESMODE_SYSTEM);
+        { if (Result = nil) then
+          Result := ThreadHeap.ErrorOutOfMemory; }
       end;
 
       if (Result <> nil) then
@@ -2744,7 +2772,7 @@ asm
   // case (B16Count) of
   //   call ThreadHeap.GetSmall(B16Count)
   //   call ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes))
-  //   call ThreadHeap.GetBigOrLarge(B16Count)
+  //   call MemoryManager.BrainMM.GetMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     push edx
     push offset @fill_zero
@@ -2763,7 +2791,31 @@ asm
     cmp rdx, MAX_MEDIUM_B16COUNT
     jbe TThreadHeap.GetMedium
   {$endif}
-  jmp TThreadHeap.GetBigOrLarge
+
+  {$ifdef CPUX86}
+    lea eax, [edx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr eax, B16_PER_PAGE_SHIFT
+    pop ecx
+  {$else .CPUX64}
+    lea rcx, [rdx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr rcx, B16_PER_PAGE_SHIFT
+    pop r8
+  {$endif}
+  call MemoryManager.BrainMM.GetMemoryPages
+  {$ifdef CPUX86}
+    test eax, eax
+  {$else .CPUX64}
+    test rax, rax
+  {$endif}
+  jnz @fill_zero
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  call TThreadHeap.ErrorOutOfMemory
 
 @fill_zero:
   // retrieve B16Count
@@ -2863,7 +2915,11 @@ begin
           Result := ThreadHeap.GetMedium(B16Count, Ord(Align));
         end
       else
-        Result := ThreadHeap.GetBigOrLarge(B16Count);
+        Result := MemoryManager.BrainMM.GetMemoryPages(
+          (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+          PAGESMODE_SYSTEM);
+        { if (Result = nil) then
+          Result := ThreadHeap.ErrorOutOfMemory; }
       end;
     end else
     begin
@@ -2930,6 +2986,14 @@ begin
             // medium or invalid pointer
             if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
             goto error_invalid_ptr;
+          end else
+          begin
+            // big or large
+            if (not MemoryManager.BrainMM.FreeMemoryPages(MemoryPages(P), PAGESMODE_SYSTEM)) then
+              goto error_invalid_ptr;
+
+            Result := FREEMEM_DONE;
+            Exit;
           end;
         end;
 
@@ -3053,13 +3117,14 @@ asm
   jmp @free_difficult
 
 @not_small:
-  // if (P(v2) and MASK_K4_TEST = 0) then BigOrLarge
+  // if (P(v2) and MASK_K4_TEST = 0) then
+  //   MemoryManager.BrainMM.FreeMemoryPages(P, PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     test edx, MASK_K4_TEST
   {$else .CPUX64}
     test rdx, MASK_K4_TEST
   {$endif}
-  jz @free_difficult
+  jz @free_big_large
 
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
   // else ThreadHeap.ErrorInvalidPtr
@@ -3069,6 +3134,31 @@ asm
     cmp [R8].TK64PoolSmall.ThreadHeap, 0
   {$endif}
   je @medium
+  jmp TThreadHeap.ErrorInvalidPtr
+
+@free_big_large:
+  {$ifdef CPUX86}
+    mov eax, edx
+  {$else .CPUX64}
+    mov rcx, rdx
+  {$endif}
+  mov edx, PAGESMODE_SYSTEM
+  call MemoryManager.BrainMM.FreeMemoryPages
+  test al, al
+  jz @error_invalid_ptr
+  {$ifdef CPUX86}
+    mov eax, FREEMEM_DONE
+  {$else .CPUX64}
+    mov rax, FREEMEM_DONE
+  {$endif}
+  ret
+
+@error_invalid_ptr:
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
   jmp TThreadHeap.ErrorInvalidPtr
 
 @free_difficult:
@@ -3322,6 +3412,18 @@ begin
             // medium or invalid pointer
             if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
             goto raise_invalid_ptr;
+          end else
+          begin
+            // big or large
+            Result := MemoryManager.BrainMM.RegetMemoryPages(MemoryPages(P),
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+            if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
+            begin
+              if (Result = PTR_INVALID) then goto raise_invalid_ptr;
+              Result := ThreadHeap.ErrorOutOfMemory;
+            end;
+
+            Exit;
           end;
         end;
 
@@ -3547,7 +3649,7 @@ asm
   {$else .CPUX64}
     test rdx, MASK_K4_TEST
   {$endif}
-  jz @reget_difficult
+  jz @reget_big_large
 
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
   // else ThreadHeap.RaiseInvalidPtr
@@ -3558,6 +3660,37 @@ asm
   {$endif}
   je @medium
   jmp @raise_invalid_ptr
+
+@reget_big_large:
+  // Exit MemoryManager.BrainMM.RegetMemoryPages(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  {$ifdef CPUX86}
+    mov eax, edx
+    lea edx, [ecx + B16_PER_PAGE - 1]
+    mov ecx, PAGESMODE_SYSTEM
+    shr edx, B16_PER_PAGE_SHIFT
+  {$else .CPUX64}
+    mov rax, rdx
+    lea rdx, [r8 + B16_PER_PAGE - 1]
+    mov r8d, PAGESMODE_SYSTEM
+    shr rdx, B16_PER_PAGE_SHIFT
+  {$endif}
+  call MemoryManager.BrainMM.RegetMemoryPages
+  {$ifdef CPUX86}
+    cmp eax, 1 // PTR_INVALID
+  {$else .CPUX64}
+    cmp rax, 1 // PTR_INVALID
+  {$endif}
+  ja @return_var_p
+  je @raise_invalid_ptr
+  {$ifdef CPUX86}
+    push offset @return_var_p
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    lea r9, @return_var_p
+    push r9
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  jmp TThreadHeap.ErrorOutOfMemory
 
 @reget_difficult:
   {$ifdef CPUX86}
@@ -3721,6 +3854,18 @@ begin
             // medium or invalid pointer
             if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
             goto raise_invalid_ptr;
+          end else
+          begin
+            // big or large
+            Result := MemoryManager.BrainMM.ReallocMemoryPages(MemoryPages(P),
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+            if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
+            begin
+              if (Result = PTR_INVALID) then goto raise_invalid_ptr;
+              Result := ThreadHeap.ErrorOutOfMemory;
+            end;
+
+            Exit;
           end;
         end;
 
@@ -3946,7 +4091,7 @@ asm
   {$else .CPUX64}
     test rdx, MASK_K4_TEST
   {$endif}
-  jz @realloc_difficult
+  jz @realloc_big_large
 
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
   // else ThreadHeap.RaiseInvalidPtr
@@ -3957,6 +4102,37 @@ asm
   {$endif}
   je @medium
   jmp @raise_invalid_ptr
+
+@realloc_big_large:
+  // Exit MemoryManager.BrainMM.ReallocMemoryPages(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  {$ifdef CPUX86}
+    mov eax, edx
+    lea edx, [ecx + B16_PER_PAGE - 1]
+    mov ecx, PAGESMODE_SYSTEM
+    shr edx, B16_PER_PAGE_SHIFT
+  {$else .CPUX64}
+    mov rax, rdx
+    lea rdx, [r8 + B16_PER_PAGE - 1]
+    mov r8d, PAGESMODE_SYSTEM
+    shr rdx, B16_PER_PAGE_SHIFT
+  {$endif}
+  call MemoryManager.BrainMM.ReallocMemoryPages
+  {$ifdef CPUX86}
+    cmp eax, 1 // PTR_INVALID
+  {$else .CPUX64}
+    cmp rax, 1 // PTR_INVALID
+  {$endif}
+  ja @return_var_p
+  je @raise_invalid_ptr
+  {$ifdef CPUX86}
+    push offset @return_var_p
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    lea r9, @return_var_p
+    push r9
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  jmp TThreadHeap.ErrorOutOfMemory
 
 @realloc_difficult:
   {$ifdef CPUX86}
@@ -5762,67 +5938,60 @@ var
   Index: NativeInt;
   Flags, B16Count: NativeUInt;
 begin
-  if (NativeInt(P) and MASK_K4_TEST <> 0) then
+  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+  PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
+  if (PoolThreadHeap <> nil) then
   begin
-    Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-    PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
-    if (PoolThreadHeap <> nil) then
+    // pool small
+    if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
     begin
-      // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // check pointer
-      Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-      repeat
-        ItemSet := Line.ItemSet;
-      until (ItemSet.V64 = Line.ItemSet.V64);
-      Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-      if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
-        (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // thread deffered
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, True);
-    end else
-    begin
-      // pool medium
-      PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // check pointer
-      Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-      B16Count := Word(Flags);
-      if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // thread deffered
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, False);
+      Result := Self.ErrorInvalidPtr;
+      Exit;
     end;
 
-    // after thread deffered result
-    Result := FREEMEM_DONE;
+    // check pointer
+    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
+    repeat
+      ItemSet := Line.ItemSet;
+    until (ItemSet.V64 = Line.ItemSet.V64);
+    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
+      (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
+    begin
+      Result := Self.ErrorInvalidPtr;
+      Exit;
+    end;
+
+    // thread deffered
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, True);
   end else
   begin
-    // big or large
-    Result := Self.FreeBigOrLarge(P);
+    // pool medium
+    PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
+    if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+    begin
+      Result := Self.ErrorInvalidPtr;
+      Exit;
+    end;
+
+    // check pointer
+    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+    B16Count := Word(Flags);
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
+      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+    begin
+      Result := Self.ErrorInvalidPtr;
+      Exit;
+    end;
+
+    // thread deffered
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, False);
   end;
+
+  // after thread deffered result
+  Result := FREEMEM_DONE;
 end;
 
 function TThreadHeap.RegetDifficult(P: Pointer; NewB16Count: NativeUInt;
@@ -5838,79 +6007,76 @@ var
   R: Integer;
   Flags, B16Count: NativeUInt;
 begin
-  if (NativeInt(P) and MASK_K4_TEST <> 0) then
+  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+  PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
+  if (PoolThreadHeap <> nil) then
   begin
-    Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-    PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
-    if (PoolThreadHeap <> nil) then
-    begin
-      // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
+    // pool small
+    if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
 
-      // check pointer
-      Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-      repeat
-        ItemSet := Line.ItemSet;
-      until (ItemSet.V64 = Line.ItemSet.V64);
-      Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-      if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
-        (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
-        Self.RaiseInvalidPtr;
+    // check pointer
+    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
+    repeat
+      ItemSet := Line.ItemSet;
+    until (ItemSet.V64 = Line.ItemSet.V64);
+    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
+      (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
+      Self.RaiseInvalidPtr;
 
-      // small flags
-      IsSmall := True;
-      Align := ma16Bytes;
-    end else
-    begin
-      // pool medium
-      PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
-
-      // check pointer
-      Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-      B16Count := Word(Flags);
-      if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
-        Self.RaiseInvalidPtr;
-
-      // medium flags
-      IsSmall := False;
-      Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-    end;
-
-    // free small/medium
-    if (PoolThreadHeap = @Self) then
-    begin
-      if (IsSmall) then R := Self.FreeSmall(P)
-      else R := Self.FreeMedium(P);
-
-      if (R = FREEMEM_INVALID) then
-        Self.RaiseInvalidPtr;
-    end else
-    begin
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
-    end;
-
-    // allocate
-    case (NewB16Count) of
-      0..MAX_SMALL_B16COUNT:
-      begin
-        if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
-        else Result := Self.GetMedium(NewB16Count, Ord(Align));
-      end;
-      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-        Result := Self.GetMedium(NewB16Count, Ord(Align));
-    else
-      Result := Self.GetBigOrLarge(NewB16Count);
-    end;
+    // small flags
+    IsSmall := True;
+    Align := ma16Bytes;
   end else
   begin
-    // big or large
-    Result := Self.RegetBigOrLarge(P, NewB16Count);
+    // pool medium
+    PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
+    if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
+
+    // check pointer
+    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+    B16Count := Word(Flags);
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
+      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+      Self.RaiseInvalidPtr;
+
+    // medium flags
+    IsSmall := False;
+    Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
+  end;
+
+  // free small/medium
+  if (PoolThreadHeap = @Self) then
+  begin
+    if (IsSmall) then R := Self.FreeSmall(P)
+    else R := Self.FreeMedium(P);
+
+    if (R = FREEMEM_INVALID) then
+      Self.RaiseInvalidPtr;
+  end else
+  begin
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
+  end;
+
+  // allocate
+  case (NewB16Count) of
+    0..MAX_SMALL_B16COUNT:
+    begin
+      if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
+      else Result := Self.GetMedium(NewB16Count, Ord(Align));
+    end;
+    MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+      Result := Self.GetMedium(NewB16Count, Ord(Align));
+  else
+    Result := MemoryManager.BrainMM.GetMemoryPages(
+      (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+      PAGESMODE_SYSTEM);
+    if (Result = nil) then
+      Result := Self.ErrorOutOfMemory;
   end;
 end;
 
@@ -5928,88 +6094,85 @@ var
   R: Integer;
   Flags, B16Count: NativeUInt;
 begin
-  if (NativeInt(P) and MASK_K4_TEST <> 0) then
+  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+  PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
+  if (PoolThreadHeap <> nil) then
   begin
-    Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-    PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
-    if (PoolThreadHeap <> nil) then
-    begin
-      // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
+    // pool small
+    if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
 
-      // check pointer
-      Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-      repeat
-        ItemSet := Line.ItemSet;
-      until (ItemSet.V64 = Line.ItemSet.V64);
-      Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-      if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
-        (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
-        Self.RaiseInvalidPtr;
+    // check pointer
+    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
+    repeat
+      ItemSet := Line.ItemSet;
+    until (ItemSet.V64 = Line.ItemSet.V64);
+    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
+      (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
+      Self.RaiseInvalidPtr;
 
-      // small size/flags
-      LastB16Count := Line.ModeSize shr 4;
-      Align := ma16Bytes;
-      IsSmall := True;
-    end else
-    begin
-      // pool medium
-      PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
-
-      // check pointer
-      Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-      B16Count := Word(Flags);
-      if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
-        Self.RaiseInvalidPtr;
-
-      // medium size/flags
-      LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
-      Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-      IsSmall := False;
-    end;
-
-    // allocate
-    case (NewB16Count) of
-      0..MAX_SMALL_B16COUNT:
-      begin
-        if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
-        else Result := Self.GetMedium(NewB16Count, Ord(Align));
-      end;
-      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-        Result := Self.GetMedium(NewB16Count, Ord(Align));
-    else
-      Result := Self.GetBigOrLarge(NewB16Count);
-    end;
-
-    // copy (minimum)
-    if (Result <> nil) then
-    begin
-      if (LastB16Count > NewB16Count) then LastB16Count := NewB16Count;
-      NcMoveB16(P16(P)^, P16(Result)^, LastB16Count);
-    end;
-
-    // free small/medium
-    if (PoolThreadHeap = @Self) then
-    begin
-      if (IsSmall) then R := Self.FreeSmall(P)
-      else R := Self.FreeMedium(P);
-
-      if (R = FREEMEM_INVALID) then
-        Self.RaiseInvalidPtr;
-    end else
-    begin
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
-    end;
+    // small size/flags
+    LastB16Count := Line.ModeSize shr 4;
+    Align := ma16Bytes;
+    IsSmall := True;
   end else
   begin
-    // big or large
-    Result := Self.ReallocBigOrLarge(P, NewB16Count);
+    // pool medium
+    PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
+    if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
+
+    // check pointer
+    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+    B16Count := Word(Flags);
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
+      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+      Self.RaiseInvalidPtr;
+
+    // medium size/flags
+    LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
+    Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
+    IsSmall := False;
+  end;
+
+  // allocate
+  case (NewB16Count) of
+    0..MAX_SMALL_B16COUNT:
+    begin
+      if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
+      else Result := Self.GetMedium(NewB16Count, Ord(Align));
+    end;
+    MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+      Result := Self.GetMedium(NewB16Count, Ord(Align));
+  else
+    Result := MemoryManager.BrainMM.GetMemoryPages(
+      (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+      PAGESMODE_SYSTEM);
+    if (Result = nil) then
+      Result := Self.ErrorOutOfMemory;
+  end;
+
+  // copy (minimum)
+  if (Result <> nil) then
+  begin
+    if (LastB16Count > NewB16Count) then LastB16Count := NewB16Count;
+    NcMoveB16(P16(P)^, P16(Result)^, LastB16Count);
+  end;
+
+  // free small/medium
+  if (PoolThreadHeap = @Self) then
+  begin
+    if (IsSmall) then R := Self.FreeSmall(P)
+    else R := Self.FreeMedium(P);
+
+    if (R = FREEMEM_INVALID) then
+      Self.RaiseInvalidPtr;
+  end else
+  begin
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
   end;
 end;
 
@@ -6186,55 +6349,6 @@ begin
   end;
 end;
 
-function TThreadHeap.GetBigOrLarge(B16Count: NativeUInt): Pointer;
-var
-  PagesCount: NativeUInt;
-begin
-  PagesCount := (B16Count + (B16_PER_PAGE - 1)) {div B16_PER_PAGE} shr (12 - 4);
-  Result := Pointer(MemoryManager.BrainMM.GetMemoryPages(PagesCount, Self.GetPagesMode));
-  if (Result = nil) then
-    Result := Self.ErrorOutOfMemory;
-end;
-
-function TThreadHeap.FreeBigOrLarge(P: Pointer): Integer;
-begin
-  if (MemoryManager.BrainMM.FreeMemoryPages(MemoryPages(P), Self.GetPagesMode)) then
-  begin
-    Result := FREEMEM_DONE;
-  end else
-  begin
-    Result := Self.ErrorInvalidPtr;
-  end;
-end;
-
-function TThreadHeap.RegetBigOrLarge(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-var
-  NewPagesCount: NativeUInt;
-begin
-  NewPagesCount := (NewB16Count + (B16_PER_PAGE - 1)) {div B16_PER_PAGE} shr (12 - 4);
-  Result := Pointer(MemoryManager.BrainMM.RegetMemoryPages(MemoryPages(P), NewPagesCount, Self.GetPagesMode));
-  if (Result = PTR_INVALID) then
-    Self.RaiseInvalidPtr
-  else
-  if (Result = nil) then
-    Result := Self.ErrorOutOfMemory;
-end;
-
-function TThreadHeap.ReallocBigOrLarge(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-var
-  NewPagesCount: NativeUInt;
-begin
-  NewPagesCount := (NewB16Count + (B16_PER_PAGE - 1)) {div B16_PER_PAGE} shr (12 - 4);
-  Result := Pointer(MemoryManager.BrainMM.ReallocMemoryPages(MemoryPages(P), NewPagesCount, Self.GetPagesMode));
-  if (Result = PTR_INVALID) then
-    Self.RaiseInvalidPtr
-  else
-  if (Result = nil) then
-    Result := Self.ErrorOutOfMemory;
-end;
-
 
 { TJITHeap }
 
@@ -6355,7 +6469,11 @@ begin
     begin
       Self.FBigOrLargeHash[Index] := nil;
       repeat
-        Heap.FreeBigOrLarge(HashItem.Pages);
+        if (not MemoryManager.BrainMM.FreeMemoryPages(HashItem.Pages, PAGESMODE_JIT)) then
+        begin
+          Heap.RaiseInvalidPtr;
+        end;
+
         HashItem := HashItem.Next;
       until (HashItem = nil);
     end;
@@ -6451,7 +6569,13 @@ begin
       MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
         Result := Heap.GetMedium(B16Count, Ord(ma16Bytes));
     else
-      Result := Heap.GetBigOrLarge(B16Count);
+      Result := MemoryManager.BrainMM.GetMemoryPages(
+        (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_JIT);
+      if (Result = nil) then
+      begin
+        Heap.RaiseOutOfMemory;
+      end;
+
       Self.EnqueueBigOrLarge(MemoryPages(Result));
     end;
   end else
@@ -6518,7 +6642,10 @@ begin
         begin
           // big or large
           if (Self.DequeueBigOrLarge(MemoryPages(P))) then
-            Heap.FreeBigOrLarge(P);
+          begin
+            if (MemoryManager.BrainMM.FreeMemoryPages(MemoryPages(P), PAGESMODE_JIT)) then
+              Exit;
+          end;
         end else
         begin
           // medium or invalid pointer
