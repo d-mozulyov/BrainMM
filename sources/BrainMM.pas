@@ -428,7 +428,7 @@ type
       First: THeaderMediumEmpty;
       Last: THeaderMediumEmpty;
     end;
-    Reserved: B16;
+    FakeAllocated: THeaderMedium;
     Items: {Start + }THeaderMediumList;
     Finish: THeaderMedium;
   end;
@@ -6317,11 +6317,14 @@ begin
   Result.MarkerNil := nil;
   Result.ThreadHeap := @Self;
 
+  Result.FakeAllocated.PreviousSize := NativeUInt(-1);
+  Result.FakeAllocated.Flags := MASK_MEDIUM_ALLOCATED;
+
   Start := @Result.Items[Low(Result.Items)];
   Start.PreviousSize := 0;
   Start.Flags := {B16Count}(High(Result.Items) + 1) + {Align: ma16Bytes, Allocated: False}0;
   Result.Finish.PreviousSize := (High(Result.Items) + 1) * SizeOf(THeaderMedium);
-  Result.Finish.Flags := {failure B16Count}0 + (Ord(ma16Bytes) shl 16) + ({Allocated}1 shl 24);
+  Result.Finish.Flags := {failure B16Count}0 + (Ord(ma16Bytes) shl 16) + MASK_MEDIUM_ALLOCATED;
 
   Empty := Pointer(@Result.Items[High(Result.Items)]);
   Result.Empties.First.Prev := nil;
