@@ -3669,10 +3669,11 @@ asm
     mov ecx, PAGESMODE_SYSTEM
     shr edx, B16_PER_PAGE_SHIFT
   {$else .CPUX64}
-    mov rax, rdx
+    mov rcx, rdx
     lea rdx, [r8 + B16_PER_PAGE - 1]
     mov r8d, PAGESMODE_SYSTEM
     shr rdx, B16_PER_PAGE_SHIFT
+    push r10
   {$endif}
   call MemoryManager.BrainMM.RegetMemoryPages
   {$ifdef CPUX86}
@@ -3681,7 +3682,7 @@ asm
     cmp rax, 1 // PTR_INVALID
   {$endif}
   ja @return_var_p
-  je @raise_invalid_ptr
+  je @raise_invalid_pages
   {$ifdef CPUX86}
     push offset @return_var_p
     mov eax, fs:[THREAD_HEAP]
@@ -3710,6 +3711,10 @@ asm
     mov [rcx], rax
   {$endif}
   ret
+@raise_invalid_pages:
+  {$ifdef CPUX64}
+    pop r10
+  {$endif}
 @raise_invalid_ptr:
   {$ifdef CPUX86}
     pop ecx
@@ -4111,10 +4116,11 @@ asm
     mov ecx, PAGESMODE_SYSTEM
     shr edx, B16_PER_PAGE_SHIFT
   {$else .CPUX64}
-    mov rax, rdx
+    mov rcx, rdx
     lea rdx, [r8 + B16_PER_PAGE - 1]
     mov r8d, PAGESMODE_SYSTEM
     shr rdx, B16_PER_PAGE_SHIFT
+    push r10
   {$endif}
   call MemoryManager.BrainMM.ReallocMemoryPages
   {$ifdef CPUX86}
@@ -4123,7 +4129,7 @@ asm
     cmp rax, 1 // PTR_INVALID
   {$endif}
   ja @return_var_p
-  je @raise_invalid_ptr
+  je @raise_invalid_pages
   {$ifdef CPUX86}
     push offset @return_var_p
     mov eax, fs:[THREAD_HEAP]
@@ -4152,6 +4158,10 @@ asm
     mov [rcx], rax
   {$endif}
   ret
+@raise_invalid_pages:
+  {$ifdef CPUX64}
+    pop r10
+  {$endif}
 @raise_invalid_ptr:
   {$ifdef CPUX86}
     pop ecx
