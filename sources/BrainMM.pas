@@ -470,8 +470,7 @@ type
     FNextHeap: PThreadHeap;
     FK1LineSmalls: array[1..8] of PK1LineSmall;
     FMarkerNotSelf: SupposedPtr;
-
-    function GetPagesMode: NativeUInt;
+    
   public
     // 1kb-lines (small) + 64kb pool (small) routine
     QK1LineFull: PK1LineSmall;
@@ -1879,7 +1878,7 @@ begin
   Result := GlobalStorage.K64BlockCache.Stack.Pop;
   if (Result <> nil) then
   begin
-    AtomicDecrement(NativeUInt(GlobalStorage.K64BlockCache.Count));
+    AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count), -1);
   end else
   begin
     {$ifdef MSWINDOWS}
@@ -1907,7 +1906,7 @@ begin
   GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   if (GlobalStorage.K64BlockCache.Count < 16) then
   begin
-    AtomicIncrement(NativeUInt(GlobalStorage.K64BlockCache.Count));
+    AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count));
     GlobalStorage.K64BlockCache.Stack.Push(Block);
     Result := True;
   end else
@@ -2005,7 +2004,10 @@ begin
   begin
     Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
     if (Result <> nil) then
+    begin
+      if (LastCount > NewCount) then LastCount := NewCount;
       NcMoveB16(P16(Pages)^, P16(Result)^, LastCount * B16_PER_PAGE);
+    end;  
 
     if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
       {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
@@ -6186,14 +6188,10 @@ begin
   end;
 end;
 
-function TThreadHeap.GetPagesMode: NativeUInt;
-begin
-  Result := PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER);
-end;
-
 function TThreadHeap.NewK64PoolSmall: PK64PoolSmall;
 begin
-  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, Self.GetPagesMode);
+  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, 
+    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER));	
   if (Result = nil) then
   begin
     Result := Self.ErrorOutOfMemory;
@@ -6213,7 +6211,8 @@ begin
   PoolSmall.ThreadHeap := nil;
   PK64PoolMedium(PoolSmall).ThreadHeap := nil;
 
-  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, Self.GetPagesMode)) then
+  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, 
+    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER))) then
   begin
     Result := FREEMEM_DONE;
   end else
@@ -6317,7 +6316,8 @@ var
   Start: PHeaderMedium;
   Empty: PHeaderMediumEmpty;
 begin
-  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, Self.GetPagesMode);
+  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, 
+    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER));
   if (Result = nil) then
   begin
     Result := Self.ErrorOutOfMemory;
@@ -6353,7 +6353,8 @@ begin
   PoolMedium.ThreadHeap := nil;
   PK64PoolSmall(PoolMedium).ThreadHeap := nil;
 
-  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, Self.GetPagesMode)) then
+  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, 
+    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER))) then
   begin
     Result := FREEMEM_DONE;
   end else
