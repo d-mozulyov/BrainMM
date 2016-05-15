@@ -301,22 +301,22 @@ const
   MASK_HIGH_NATIVE_TEST = NativeInt(-1) shr 1;
 
   DEFAULT_BITSETS_SMALL: array[0..15] of Int64 = (
-    {16}   Int64($FFFFFFFFFFFFFFFE),
-    {32}   $5555555555555554,
-    {48}   $2492492492492492,
-    {64}   $1111111111111110,
-    {80}   $0842108421084210,
-    {96}   $0410410410410410,
-    {112}  $0204081020408102,
-    {128}  $0101010101010100,
-    {16-}  Int64($FFFFFFFFFFFFFFF8),
-    {32-}  $5555555555555550,
-    {48-}  $2492492492492490,
-    {64-}  $1111111111111110,
-    {80-}  $0842108421084210,
-    {96-}  $0410410410410410,
-    {112-} $0204081020408100,
-    {128-} $0101010101010100
+    {16}   Int64($FFFFFFFFFFFFFFFC),
+          {32}   $5555555555555554,
+          {48}   $2492492492492490,
+          {64}   $1111111111111110,
+          {80}   $0842108421084210,
+          {96}   $0410410410410410,
+          {112}  $0204081020408100,
+          {128}  $0101010101010100,
+    {16-}  Int64($FFFFFFFFFFFFFFF0),
+          {32-}  $5555555555555550,
+          {48-}  $2492492492492490,
+          {64-}  $1111111111111110,
+          {80-}  $0842108421084210,
+          {96-}  $0410410410410410,
+          {112-} $0204081020408100,
+          {128-} $0101010101010100
   );
 
   OFFSET_MEDIUM_ALIGN = 16;
@@ -349,46 +349,47 @@ type
   B16 = array[0..15] of Byte;
   P16 = ^B16;
 
-  TSupposedPrevNext = packed record
-    (* 1024-aligned pointers *)
-    Prev: SupposedPtr;
-    Next: SupposedPtr;
+  TQueuePrevNext = packed record
+    Prev: Pointer;
+    Next: Pointer;
+    {$ifdef SMALLINT}_Padding: array[0..1] of Cardinal;{$endif}
   end;
-  PSupposedPrevNext = ^TSupposedPrevNext;
+  PQueuePrevNext = ^TQueuePrevNext;
+
+  TK1LineSmallHeader = packed record
+    ItemSet: TBitSet8;
+    (*
+       FullQueue: Boolean:1;
+       Reserved: Boolean:1;
+    *)
+    case Integer of
+      0: (_Padding: Int64; Queue: TQueuePrevNext);
+      1: (ModeSize{+0..15}: Byte; Reserved: Word; {FirstLine}InQK64PoolSmallFull: Boolean);
+      2: (Flags: NativeUInt);
+      (*
+         Index: 0..15:3+1{FirstLine};
+         ModeSizeBits: Byte:4;
+         Reserved: Word;
+         InQK64PoolSmallFull: Boolean;
+      *)
+  end;
+  PK1LineSmallHeader = ^TK1LineSmallHeader;
 
   TK1LineSmall = packed record
   case Integer of
-    0: (
-         ItemSet: TBitSet8;
-         (*
-            FullQueue: Boolean:1;
-         *)
-         case Integer of
-           0: (Next: SupposedPtr);
-           1: (ModeSize{+0..15}: Byte);
-           2: (Flags: NativeUInt{:10});
-           (*
-              Index: 0..15:3+1{FirstLine};
-              ModeSizeBits: Byte:4;
-           *)
-       );
-    1: (FullPrevNext: TSupposedPrevNext);
-    2: (Items: array[0{1}..63] of B16);
+    0: (Header: TK1LineSmallHeader);
+    1: (Items: array[0{2}..63] of B16);
   end;
   PK1LineSmall = ^TK1LineSmall;
 
   TK64PoolSmall = packed record
   case Boolean of
     True: (
-             _: B16;
+             Header: TK1LineSmallHeader;
              ThreadHeap: PThreadHeap;
              {$ifdef SMALLINT}_Padding1: Cardinal;{$endif}
              LineSet: TBitSet8;
-             PrevNext: TSupposedPrevNext;
-             (*
-                FullQueue: Boolean:1;
-             *)
-             {$ifdef SMALLINT}_Padding2: array[0..1] of Cardinal;{$endif}
+             Queue: TQueuePrevNext;
           );
    False: (Lines: array[0..63] of TK1LineSmall);
   end;
@@ -418,16 +419,15 @@ type
   PHeaderMediumList = ^THeaderMediumList;
 
   TK64PoolMedium = packed record
-    PrevNext: TSupposedPrevNext;
-    {$ifdef SMALLINT}_Padding1: array[0..1] of Cardinal;{$endif}
-    MarkerNil: Pointer;
-    {$ifdef SMALLINT}_Padding2: Cardinal;{$endif}
-    ThreadHeap: PThreadHeap;
-    {$ifdef SMALLINT}_Padding3: Cardinal;{$endif}
     Empties: packed record
       First: THeaderMediumEmpty;
       Last: THeaderMediumEmpty;
     end;
+    MarkerNil: Pointer;
+    {$ifdef SMALLINT}_Padding2: Cardinal;{$endif}
+    ThreadHeap: PThreadHeap;
+    {$ifdef SMALLINT}_Padding3: Cardinal;{$endif}
+    Queue: TQueuePrevNext;
     FakeAllocated: THeaderMedium;
     Items: {Start + }THeaderMediumList;
     Finish: THeaderMedium;
@@ -1635,58 +1635,6 @@ end;
 {$endif}
 
 
-procedure SupposedEnqueue(var Queue: Pointer; const Owner: Pointer;
-  var Item: TSupposedPrevNext);
-var
-  OFFSET: NativeUInt;
-  Next: Pointer;
-  Right: PSupposedPrevNext;
-begin
-  OFFSET := NativeUInt(@Item) - NativeUInt(Owner);
-  Next := Queue;
-  Right := PSupposedPrevNext(NativeUInt(Next) + OFFSET);
-
-  Queue := Owner;
-  Item.Prev := {nil} Item.Prev and MASK_K1_TEST;
-  Item.Next := NativeUInt(Next) + (Item.Next and MASK_K1_TEST);
-
-  if (Next <> nil) then
-  begin
-    Right.Prev := NativeUInt(Owner) + (Right.Prev and MASK_K1_TEST);
-  end;
-end;
-
-procedure SupposedDequeue(var Queue: Pointer; const Owner: Pointer;
-  var Item: TSupposedPrevNext);
-var
-  OFFSET: NativeUInt;
-  Prev, Next: Pointer;
-  Left, Right: PSupposedPrevNext;
-begin
-  OFFSET := NativeUInt(@Item) - NativeUInt(Owner);
-  Prev := Pointer(Item.Prev and MASK_K1_CLEAR);
-  Next := Pointer(Item.Next and MASK_K1_CLEAR);
-  Left := PSupposedPrevNext(NativeUInt(Prev) + OFFSET);
-  Right := PSupposedPrevNext(NativeUInt(Next) + OFFSET);
-
-  if (Prev = nil) then
-  begin
-    // first
-    Queue := Next;
-  end else
-  begin
-    // break left contact
-    Left.Next := NativeUInt(Next) + (Left.Next and MASK_K1_TEST);
-  end;
-
-  // break right contact
-  if (Next <> nil) then
-  begin
-    Right.Prev := NativeUInt(Prev) + (Right.Prev and MASK_K1_TEST);
-  end;
-end;
-
-
 { TSyncStack }
 
 {$ifdef CPUX64}
@@ -2550,9 +2498,9 @@ begin
 
   if (Line <> nil) then
   begin
-    if (Line.ItemSet.VLow32 and 1 = 0{not FullQueue}) then
+    if (Line.Header.ItemSet.VLow32 and 3 = 0{not FullQueue}) then
     begin
-      Index := BitReserve(Line.ItemSet);
+      Index := BitReserve(Line.Header.ItemSet);
       if (Index > 0) then
       begin
         Result := @Line.Items[Index];
@@ -2584,19 +2532,19 @@ asm
 
   // if (Line.FullQueue) then RaiseInvalidPtr
   {$ifdef CPUX86}
-    mov edx, [ECX].TK1LineSmall.ItemSet.VLow32
-    test edx, 1
+    mov edx, [ECX].TK1LineSmall.Header.ItemSet.VLow32
+    test edx, 3
     jnz TThreadHeap.RaiseInvalidPtr
   {$else .CPUX64}
-    mov r9, [R8].TK1LineSmall.ItemSet.V64
-    test r9, 1
+    mov r9, [R8].TK1LineSmall.Header.ItemSet.V64
+    test r9, 3
     jnz TThreadHeap.RaiseInvalidPtr
   {$endif}
 
-  // if (Line.ItemSet.VInt64 = 0{deferred Full}) then Exit Self.PenaltyGetSmall(B16Count)
+  // if (Line.Header.ItemSet.VInt64 = 0{deferred Full}) then Exit Self.PenaltyGetSmall(B16Count)
   // Index := BitReserve(Line.ItemSet);
   {$ifdef CPUX86}
-    lea eax, [ECX].TK1LineSmall.ItemSet.VHigh32
+    lea eax, [ECX].TK1LineSmall.Header.ItemSet.VHigh32
     test edx, edx
     DB $0F, $44, $C8 // cmovz ecx, eax
     mov edx, [ecx]
@@ -2611,7 +2559,7 @@ asm
     bsf rax, r9
     jz TThreadHeap.PenaltyGetSmall
     btr r9, rax
-    mov [R8].TK1LineSmall.ItemSet.V64, r9
+    mov [R8].TK1LineSmall.Header.ItemSet.V64, r9
   {$endif}
 
   // Result := @Line.Items[Index]
@@ -2628,7 +2576,7 @@ asm
 @retrieve_penalty:
    // Exit ThreadOf(Line).PenaltyGetSmall(B16CountOf(Line))
    and ecx, MASK_K1_CLEAR
-   movzx edx, byte ptr [ECX].TK1LineSmall.Flags
+   movzx edx, byte ptr [ECX].TK1LineSmall.Header.Flags
    shr edx, 4
    and ecx, MASK_K64_CLEAR
    mov eax, [ECX].TK64PoolSmall.ThreadHeap
@@ -2641,35 +2589,41 @@ function TThreadHeap.PenaltyGetSmall(B16Count: NativeUInt): Pointer;
 label
   new_k1line;
 var
-  Line, Next: PK1LineSmall;
+  Line, Next, N: PK1LineSmall;
 begin
   Line := FK1LineSmalls[B16Count];
-  repeat
+  if (Line = nil) then
+  begin
+  new_k1line:
+    Line := Self.NewK1LineSmall(B16Count);
     if (Line = nil) then
     begin
-    new_k1line:
-      Line := Self.NewK1LineSmall(B16Count);
-      if (Line = nil) then
-      begin
-        Result := nil;
-        Exit;
-      end;
-      Break;
-    end else
-    begin
-      Line.ItemSet.VLow32 := Line.ItemSet.VLow32 or 1{FullQueue := True};
-      Next := Pointer(Line.Next and MASK_K1_CLEAR);
-      SupposedEnqueue(Pointer(QK1LineFull), Line, Line.FullPrevNext);
-
-      FK1LineSmalls[B16Count] := Next;
-      Line := Next;
-      if (Next = nil) then goto new_k1line;
+      Result := nil;
+      Exit;
     end;
+  end else
+  repeat
+    Line.Header.ItemSet.VLow32 := Line.Header.ItemSet.VLow32 or 3{FullQueue := True};
+
+    // Dequeue
+    Next := Line.Header.Queue.Next;
+    FK1LineSmalls[B16Count] := Next;
+
+    // Enqueue
+    N := QK1LineFull;
+    QK1LineFull := Line;
+    Line.Header.Queue.Prev := nil;
+    Line.Header.Queue.Next := N;
+    if (N <> nil) then N.Header.Queue.Prev := Line;
+
+    Line := Next;
+    if (Next = nil) then goto new_k1line;
+    Next.Header.Queue.Prev := nil;
   until (
     {$ifdef SMALLINT}
-      Line.ItemSet.VLow32 or Line.ItemSet.VHigh32 <> 0
+      Line.Header.ItemSet.VLow32 or Line.Header.ItemSet.VHigh32 <> 0
     {$else .LARGEINT}
-      Line.ItemSet.V64 <> 0
+      Line.Header.ItemSet.V64 <> 0
     {$endif}
     );
 
@@ -3201,11 +3155,11 @@ begin
   Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
   Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
 
-  if (Line.ItemSet.VLow32 and 1 = 0{not FullQueue}) then
+  if (Line.Header.ItemSet.VLow32 and 3 = 0{not FullQueue}) then
   begin
-    if (BitUnreserve(Line.ItemSet, Index)) then
+    if (BitUnreserve(Line.Header.ItemSet, Index)) then
     begin
-      if (Line.ItemSet.V64 <> DEFAULT_BITSETS_SMALL[Line.Flags and 15]) then
+      if (Line.Header.ItemSet.V64 <> DEFAULT_BITSETS_SMALL[Line.Header.Flags and 15]) then
       begin
         Result := FREEMEM_DONE;
         Exit;
@@ -3243,9 +3197,9 @@ asm
   // if (Line.FullQueue) then Exit Self.PenaltyFreeSmall(@Line.Items[Index])
   // if (not BitUnreserve(Index)) then Exit Self.ErrorInvalidPtr
   {$ifdef CPUX86}
-    test [EDX].TK1LineSmall.ItemSet.VLow32, 1
+    test [EDX].TK1LineSmall.Header.ItemSet.VLow32, 3
     jnz @penalty_free_mem
-    lea eax, [EDX].TK1LineSmall.ItemSet.VHigh32
+    lea eax, [EDX].TK1LineSmall.Header.ItemSet.VHigh32
     test ecx, 32
     DB $0F, $45, $D0 // cmovnz edx, eax
     and ecx, 31
@@ -3254,20 +3208,20 @@ asm
     mov [edx], eax
     jc @penalty_error
   {$else .CPUX64}
-    mov r8, [RDX].TK1LineSmall.ItemSet.V64
-    test r8, 1
+    mov r8, [RDX].TK1LineSmall.Header.ItemSet.V64
+    test r8, 3
     jnz @penalty_free_mem
     bts r8, rax
-    mov [RDX].TK1LineSmall.ItemSet.V64, r8
+    mov [RDX].TK1LineSmall.Header.ItemSet.V64, r8
     jc @penalty_error
   {$endif}
 
-  // if (Line.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
+  // if (Line.Header.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
   // Exit Self.DisposeK1LineSmall(Line)
   {$ifdef CPUX86}
     and edx, MASK_K1_CLEAR
     mov ecx, 15
-    and ecx, [EDX].TK1LineSmall.Flags
+    and ecx, [EDX].TK1LineSmall.Header.Flags
     mov eax, [offset DEFAULT_BITSETS_SMALL + ecx * 8]
     mov ecx, [offset DEFAULT_BITSETS_SMALL + ecx * 8 + 4]
     sub eax, [edx]
@@ -3275,7 +3229,7 @@ asm
     or eax, ecx
     jz @penalty_dispose_line
   {$else .CPUX64}
-    mov rax, [RDX].TK1LineSmall.Flags
+    mov rax, [RDX].TK1LineSmall.Header.Flags
     and rax, 15
     lea r9, DEFAULT_BITSETS_SMALL
     cmp r8, [r9 + rax * 8]
@@ -3314,22 +3268,35 @@ end;
 // Line.FullQueue = True
 function TThreadHeap.PenaltyFreeSmall(P: Pointer): Integer;
 var
-  Line, Next: PK1LineSmall;
-  Flags, B16Count: NativeUInt;
+  Line, Prev, Next: PK1LineSmall;
+  B16Count: NativeUInt;
 begin
-  // dequeue
+  // Dequeue
   Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-  SupposedDequeue(Pointer(QK1LineFull), Line, Line.FullPrevNext);
+  Prev := Line.Header.Queue.Prev;
+  Next := Line.Header.Queue.Next;
+  if (Prev = nil) then
+  begin
+    QK1LineFull := Next;
+  end else
+  begin
+    Prev.Header.Queue.Next := Next;
+  end;
+  if (Next <> nil) then
+  begin
+    Next.Header.Queue.Prev := Prev;
+  end;
+
+  // Enqueue
+  B16Count := NativeUInt(Line.Header.ModeSize) shr 4;
+  Next := FK1LineSmalls[B16Count];
+  FK1LineSmalls[B16Count] := Line;
+  Line.Header.Queue.Prev := nil;
+  Line.Header.Queue.Next := Next;
+  if (Next <> nil) then Next.Header.Queue.Prev := Line;
 
   // full bitset
-  Line.ItemSet.V64 := 0;
-
-  // move to line smalls list
-  Flags := Line.Flags;
-  B16Count := (Flags and $ff) shr 4;
-  Next := FK1LineSmalls[B16Count];
-  Line.Next := NativeUInt(Next) + (Flags and MASK_K1_TEST);
-  FK1LineSmalls[B16Count] := Line;
+  Line.Header.ItemSet.VLow32{V64} := 0;
 
   // free small memory
   Result := Self.FreeSmall(P);
@@ -3372,7 +3339,7 @@ begin
           begin
             // pool small
             NewB16Count := {NewSize}NewB16Count shl 4;
-            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).ModeSize >= {NewSize}NewB16Count) then
+            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize >= {NewSize}NewB16Count) then
             begin
             return_made_none:
               Result := P;
@@ -3542,13 +3509,13 @@ asm
     mov ebx, edx
     and ebx, MASK_K1_CLEAR
     shl ecx, 4
-    movzx ebx, byte ptr TK1LineSmall[EBX].ModeSize
+    movzx ebx, byte ptr TK1LineSmall[EBX].Header.ModeSize
     cmp ebx, ecx
   {$else .CPUX64}
     mov r9, rdx
     and r9, MASK_K1_CLEAR
     shl r8, 4
-    movzx r9, byte ptr TK1LineSmall[R9].ModeSize
+    movzx r9, byte ptr TK1LineSmall[R9].Header.ModeSize
     cmp r9, r8
   {$endif}
   jb @small_grow
@@ -3819,7 +3786,7 @@ begin
           begin
             // pool small
             NewB16Count := {NewSize}NewB16Count shl 4;
-            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).ModeSize >= {NewSize}NewB16Count) then
+            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize >= {NewSize}NewB16Count) then
             begin
             return_made_none:
               Result := P;
@@ -3989,13 +3956,13 @@ asm
     mov ebx, edx
     and ebx, MASK_K1_CLEAR
     shl ecx, 4
-    movzx ebx, byte ptr TK1LineSmall[EBX].ModeSize
+    movzx ebx, byte ptr TK1LineSmall[EBX].Header.ModeSize
     cmp ebx, ecx
   {$else .CPUX64}
     mov r9, rdx
     and r9, MASK_K1_CLEAR
     shl r8, 4
-    movzx r9, byte ptr TK1LineSmall[R9].ModeSize
+    movzx r9, byte ptr TK1LineSmall[R9].Header.ModeSize
     cmp r9, r8
   {$endif}
   jb @small_grow
@@ -4196,7 +4163,7 @@ begin
   Result := Self.GetSmall(NewB16Count);
   if (Result <> nil) then
   begin
-    LastB16Count := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).ModeSize shr 4;
+    LastB16Count := NativeUInt(PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize) shr 4;
     Result := NcMoveB16Small(P16(P)^, P16(Result)^, LastB16Count);
   end;
 
@@ -4244,9 +4211,9 @@ asm
   // if (Line.FullQueue) then Exit Self.PenaltyGrowSmallToSmall(mode FullQueue)
   // if (not BitUnreserve(Index)) then Exit Self.ErrorInvalidPtr
   {$ifdef CPUX86}
-    test [EDX].TK1LineSmall.ItemSet.VLow32, 1
+    test [EDX].TK1LineSmall.Header.ItemSet.VLow32, 3
     jnz @penalty_copy_freemem
-    lea eax, [EDX].TK1LineSmall.ItemSet.VHigh32
+    lea eax, [EDX].TK1LineSmall.Header.ItemSet.VHigh32
     test ecx, 32
     DB $0F, $45, $D0 // cmovnz edx, eax
     and ecx, 31
@@ -4255,20 +4222,20 @@ asm
     mov [edx], eax
     jc @penalty_error
   {$else .CPUX64}
-    mov r8, [RDX].TK1LineSmall.ItemSet.V64
-    test r8, 1
+    mov r8, [RDX].TK1LineSmall.Header.ItemSet.V64
+    test r8, 3
     jnz @penalty_copy_freemem
     bts r8, rax
-    mov [RDX].TK1LineSmall.ItemSet.V64, r8
+    mov [RDX].TK1LineSmall.Header.ItemSet.V64, r8
     jc @penalty_error
   {$endif}
 
-  // if (Line.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
+  // if (Line.Header.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
   // Exit Self.PenaltyGrowSmallToSmall(mode DisposeK1LineSmall)
   {$ifdef CPUX86}
     and edx, MASK_K1_CLEAR
     mov ecx, 15
-    and ecx, [EDX].TK1LineSmall.Flags
+    and ecx, [EDX].TK1LineSmall.Header.Flags
     mov eax, [offset DEFAULT_BITSETS_SMALL + ecx * 8]
     mov ecx, [offset DEFAULT_BITSETS_SMALL + ecx * 8 + 4]
     sub eax, [edx]
@@ -4276,7 +4243,7 @@ asm
     or eax, ecx
     jz @penalty_copy_freemem
   {$else .CPUX64}
-    mov rax, [RDX].TK1LineSmall.Flags
+    mov rax, [RDX].TK1LineSmall.Header.Flags
     and rax, 15
     lea r9, DEFAULT_BITSETS_SMALL
     cmp r8, [r9 + rax * 8]
@@ -4288,7 +4255,7 @@ asm
     pop edx
     mov eax, ebx
     and ebx, MASK_K1_CLEAR
-    movzx ecx, [EBX].TK1LineSmall.ModeSize
+    movzx ecx, [EBX].TK1LineSmall.Header.ModeSize
     shr ecx, 4
     pop ebx
   {$else .CPUX64}
@@ -4296,7 +4263,7 @@ asm
     mov rdx, r10
     mov rcx, r8
     and r8, MASK_K1_CLEAR
-    movzx r8, [R8].TK1LineSmall.ModeSize
+    movzx r8, [R8].TK1LineSmall.Header.ModeSize
     shr r8, 4
   {$endif}
   jmp NcMoveB16Small
@@ -4372,9 +4339,9 @@ var
   R: Integer;
 begin
   Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-  Result := NcMoveB16Small(P16(P)^, P16(Dest)^, {LastB16Count}Line.ModeSize shr 4);
+  Result := NcMoveB16Small(P16(P)^, P16(Dest)^, {LastB16Count}NativeUInt(Line.Header.ModeSize) shr 4);
 
-  if (Line.ItemSet.VLow32 and 1 <> 0{FullQueue}) then
+  if (Line.Header.ItemSet.VLow32 and 3 <> 0{FullQueue}) then
   begin
     R := Self.PenaltyFreeSmall(P);
   end else
@@ -4952,7 +4919,7 @@ begin
         Empty := Empty.Next;
       until (Empty = @Pool.Empties.Last);
 
-      Pool := Pointer(Pool.PrevNext.Next and MASK_K64_CLEAR);
+      Pool := Pool.Queue.Next;
     until (Pool = nil);
 
     Pool := Self.NewK64PoolMedium;
@@ -5965,10 +5932,10 @@ begin
     // check pointer
     Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
     repeat
-      ItemSet := Line.ItemSet;
-    until (ItemSet.V64 = Line.ItemSet.V64);
+      ItemSet := Line.Header.ItemSet;
+    until (ItemSet.V64 = Line.Header.ItemSet.V64);
     Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-    if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
+    if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
       (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
     begin
       Result := Self.ErrorInvalidPtr;
@@ -6031,10 +5998,10 @@ begin
     // check pointer
     Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
     repeat
-      ItemSet := Line.ItemSet;
-    until (ItemSet.V64 = Line.ItemSet.V64);
+      ItemSet := Line.Header.ItemSet;
+    until (ItemSet.V64 = Line.Header.ItemSet.V64);
     Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-    if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
+    if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
       (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
       Self.RaiseInvalidPtr;
 
@@ -6118,15 +6085,15 @@ begin
     // check pointer
     Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
     repeat
-      ItemSet := Line.ItemSet;
-    until (ItemSet.V64 = Line.ItemSet.V64);
+      ItemSet := Line.Header.ItemSet;
+    until (ItemSet.V64 = Line.Header.ItemSet.V64);
     Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-    if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
+    if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
       (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
       Self.RaiseInvalidPtr;
 
     // small size/flags
-    LastB16Count := Line.ModeSize shr 4;
+    LastB16Count := NativeUInt(Line.Header.ModeSize) shr 4;
     Align := ma16Bytes;
     IsSmall := True;
   end else
@@ -6189,30 +6156,56 @@ begin
 end;
 
 function TThreadHeap.NewK64PoolSmall: PK64PoolSmall;
+var
+  PagesMode: NativeUInt;
+  Next: PK64PoolSmall;
 begin
-  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, 
-    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER));	
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, PagesMode);
   if (Result = nil) then
   begin
     Result := Self.ErrorOutOfMemory;
     Exit;
   end;
 
+  Result.Header.Flags := 0{not FullQueue};
   Result.ThreadHeap := @Self;
   Result.LineSet.V64 := -1{Empty};
-  Result.PrevNext.Prev := 0{not FullQueue};
-  SupposedEnqueue(Pointer(QK64PoolSmall), Result, Result.PrevNext);
+
+  // Enqueue
+  Next := QK64PoolSmall;
+  QK64PoolSmall := Result;
+  Result.Queue.Prev := nil;
+  Result.Queue.Next := Next;
+  if (Next <> nil) then Next.Queue.Prev := Result;
 end;
 
 function TThreadHeap.DisposeK64PoolSmall(PoolSmall: PK64PoolSmall): Integer;
+var
+  PagesMode: NativeUInt;
+  Prev, Next: PK64PoolSmall;
 begin
-  SupposedDequeue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
+  // Dequeue
+  Prev := PoolSmall.Queue.Prev;
+  Next := PoolSmall.Queue.Next;
+  if (Prev = nil) then
+  begin
+    QK64PoolSmall := Next;
+  end else
+  begin
+    Prev.Queue.Next := Next;
+  end;
+  if (Next <> nil) then
+  begin
+    Next.Queue.Prev := Prev;
+  end;
+
   PoolSmall.LineSet.V64 := 0{none available lines};
   PoolSmall.ThreadHeap := nil;
   PK64PoolMedium(PoolSmall).ThreadHeap := nil;
 
-  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, 
-    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER))) then
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, PagesMode)) then
   begin
     Result := FREEMEM_DONE;
   end else
@@ -6224,7 +6217,7 @@ end;
 function TThreadHeap.NewK1LineSmall(B16Count: NativeUInt): PK1LineSmall;
 var
   Index: NativeUInt;
-  PoolSmall: PK64PoolSmall;
+  PoolSmall, Next: PK64PoolSmall;
 begin
   // take small pool
   repeat
@@ -6232,10 +6225,19 @@ begin
     if (PoolSmall <> nil) then
     begin
       if ({has available lines}PoolSmall.LineSet.V64 <> 0) then Break;
-      // Full not FullQueue --> FullQueue
-      PoolSmall.PrevNext.Prev := PoolSmall.PrevNext.Prev or 1;
-      SupposedDequeue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
-      SupposedEnqueue(Pointer(QK64PoolSmallFull), PoolSmall, PoolSmall.PrevNext);
+
+      // Full (QK64PoolSmall) --> (QK64PoolSmallFull)
+      PoolSmall.Header.InQK64PoolSmallFull := True;
+      // Dequeue
+      Next := QK64PoolSmall.Queue.Next;
+      QK64PoolSmall := Next;
+      if (Next <> nil) then Next.Queue.Prev := nil;
+      // Enqueue
+      Next := QK64PoolSmallFull;
+      QK64PoolSmallFull := PoolSmall;
+      PoolSmall.Queue.Prev := nil;
+      PoolSmall.Queue.Next := Next;
+      if (Next <> nil) then Next.Queue.Prev := PoolSmall;
       // Continue;
     end else
     begin
@@ -6254,47 +6256,66 @@ begin
 
   // parameters
   Index := {BaseIndex}(B16Count - 1) + {IsFirst: Boolean}(Byte(Pointer(PoolSmall) = Pointer(Result)) shl 3);
-  Result.ItemSet.V64 := DEFAULT_BITSETS_SMALL[Index];
-  Result.Flags := {ModeSizeBits}(B16Count shl 4) + Index;
+  Result.Header.ItemSet.V64 := DEFAULT_BITSETS_SMALL[Index];
+  Result.Header.Flags := {ModeSizeBits}(B16Count shl 4) + Index;
 
-  // store line
-  { Result.Next := nil; }
+  // store line single
   FK1LineSmalls[B16Count] := Result;
+  Result.Header.Queue.Prev := nil;
+  Result.Header.Queue.Next := nil;
 end;
 
 function TThreadHeap.DisposeK1LineSmall(Line: PK1LineSmall): Integer;
 var
-  Current, Next: PK1LineSmall;
   Index: NativeUInt;
   PoolSmall: PK64PoolSmall;
+  Prev, Next: Pointer;
 begin
-  Current := Self.FK1LineSmalls[(Line.Flags and 7) + 1];
-  if (Current = Line) then
+  // Dequeue
+  Prev := Line.Header.Queue.Prev;
+  Next := Line.Header.Queue.Next;
+  if (Prev = nil) then
   begin
-    Self.FK1LineSmalls[(Line.Flags and 7) + 1] := Pointer(Line.Next and MASK_K1_CLEAR);
+    Self.FK1LineSmalls[(Line.Header.Flags and 7) + 1] := Next;
   end else
   begin
-    Next := Pointer(Current.Next and MASK_K1_CLEAR);
-    if (Next <> Line) then
-    repeat
-      Current := Next;
-      Next := Pointer(Current.Next and MASK_K1_CLEAR);
-    until (Next = Line);
-
-    Current.Next := (Current.Next and MASK_K1_TEST) + (Line.Next and MASK_K1_CLEAR);
+    PK1LineSmall(Prev).Header.Queue.Next := Next;
   end;
-
-  Line.ItemSet.V64 := 0{non available items};
-  Line.Flags := 0;
-  PoolSmall := Pointer(NativeUInt(Line) and MASK_K64_CLEAR);
-  Index := (NativeUInt(Line) and MASK_K64_TEST) shr 10;
-
-  if (PoolSmall.PrevNext.Prev and 1 <> 0{FullQueue --> Standard}) then
+  if (Next <> nil) then
   begin
-    PoolSmall.PrevNext.Prev := PoolSmall.PrevNext.Prev and -2{FullQueue := False};
-    SupposedDequeue(Pointer(QK64PoolSmallFull), PoolSmall, PoolSmall.PrevNext);
-    SupposedEnqueue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
+    PK1LineSmall(Next).Header.Queue.Prev := Prev;
   end;
+
+  PoolSmall := Pointer(NativeUInt(Line) and MASK_K64_CLEAR);
+  if (PoolSmall.Header.InQK64PoolSmallFull) then
+  begin
+    // QK64PoolSmallFull --> QK64PoolSmall
+    PoolSmall.Header.InQK64PoolSmallFull := False;
+    // Dequeue
+    Prev := PoolSmall.Queue.Prev;
+    Next := PoolSmall.Queue.Next;
+    if (Prev = nil) then
+    begin
+      QK64PoolSmallFull := Next;
+    end else
+    begin
+      PK64PoolSmall(Prev).Queue.Next := Next;
+    end;
+    if (Next <> nil) then
+    begin
+      PK64PoolSmall(Next).Queue.Prev := Prev;
+    end;
+    // Enqueue
+    Next := QK64PoolSmall;
+    QK64PoolSmall := PoolSmall;
+    PoolSmall.Queue.Prev := nil;
+    PoolSmall.Queue.Next := Next;
+    if (Next <> nil) then PK64PoolSmall(Next).Queue.Prev := PoolSmall;
+  end;
+
+  Line.Header.ItemSet.V64 := 0{non available items};
+  Line.Header.Flags := 0;
+  Index := (NativeUInt(Line) and MASK_K64_TEST) shr 10;
 
   if (not BitUnreserve(PoolSmall.LineSet, Index)) then
   begin
@@ -6313,11 +6334,13 @@ end;
 
 function TThreadHeap.NewK64PoolMedium: PK64PoolMedium;
 var
+  PagesMode: NativeUInt;
   Start: PHeaderMedium;
   Empty: PHeaderMediumEmpty;
+  Next: PK64PoolMedium;
 begin
-  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, 
-    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER));
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, PagesMode);
   if (Result = nil) then
   begin
     Result := Self.ErrorOutOfMemory;
@@ -6344,17 +6367,39 @@ begin
   Result.Empties.Last.Prev := Empty;
   Result.Empties.Last.Next := nil;
 
-  SupposedEnqueue(Pointer(QK64PoolMedium), Result, Result.PrevNext);
+  // Enqueue
+  Next := QK64PoolMedium;
+  QK64PoolMedium := Result;
+  Result.Queue.Prev := nil;
+  Result.Queue.Next := Next;
+  if (Next <> nil) then Next.Queue.Prev := Result;
 end;
 
 function TThreadHeap.DisposeK64PoolMedium(PoolMedium: PK64PoolMedium): Integer;
+var
+  PagesMode: NativeUInt;
+  Prev, Next: PK64PoolMedium;
 begin
-  SupposedDequeue(Pointer(QK64PoolMedium), PoolMedium, PoolMedium.PrevNext);
+  // Dequeue
+  Prev := PoolMedium.Queue.Prev;
+  Next := PoolMedium.Queue.Next;
+  if (Prev = nil) then
+  begin
+    QK64PoolMedium := Next;
+  end else
+  begin
+    Prev.Queue.Next := Next;
+  end;
+  if (Next <> nil) then
+  begin
+    Next.Queue.Prev := Prev;
+  end;
+
   PoolMedium.ThreadHeap := nil;
   PK64PoolSmall(PoolMedium).ThreadHeap := nil;
 
-  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, 
-    PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER))) then
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, PagesMode)) then
   begin
     Result := FREEMEM_DONE;
   end else
@@ -6504,7 +6549,7 @@ begin
   begin
     Heap.QK64PoolSmall := nil;
     repeat
-      Next := Pointer(PoolSmall.PrevNext.Next and MASK_K64_CLEAR);
+      Next := PoolSmall.Queue.Next;
 
       if (not MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, PAGESMODE_JIT)) then
       begin
@@ -6521,7 +6566,7 @@ begin
   begin
     Heap.QK64PoolSmallFull := nil;
     repeat
-      Next := Pointer(PoolSmall.PrevNext.Next and MASK_K64_CLEAR);
+      Next := PoolSmall.Queue.Next;
 
       if (not MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, PAGESMODE_JIT)) then
       begin
@@ -6538,7 +6583,7 @@ begin
   begin
     Heap.QK64PoolMedium := nil;
     repeat
-      Next := Pointer(PoolMedium.PrevNext.Next and MASK_K64_CLEAR);
+      Next := PoolMedium.Queue.Next;
 
       if (not MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, PAGESMODE_JIT)) then
       begin

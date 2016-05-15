@@ -521,6 +521,8 @@ procedure TestSizes;
 begin
   CheckSize(SizeOf(TBitSet8), 8);
   CheckSize(SizeOf(B16), 16);
+  CheckSize(SizeOf(TQueuePrevNext), 16);
+  CheckSize(SizeOf(TK1LineSmallHeader), 32);
   CheckSize(SizeOf(TK1LineSmall), 1024);
   CheckSize(SizeOf(TK64PoolSmall), 64 * 1024);
   CheckSize(SizeOf(THeaderMedium), 16);
@@ -836,8 +838,8 @@ var
   HeapInfo: TThreadHeapInfo;
 
   P: Pointer;
-  PTRS_16_FIRST: array[3..63] of Pointer;
-  PTRS_16_SECOND: array[1..63] of Pointer;
+  PTRS_16_FIRST: array[4..63] of Pointer;
+  PTRS_16_SECOND: array[2..63] of Pointer;
   PTRS_128: array[1..7] of Pointer;
   PTRS_128_MANY: array[0..7 * 64 - 1] of Pointer;
 
@@ -1984,21 +1986,24 @@ begin
     (ValuePool.LineSet.V64 and (Int64(1) shl ValueIndex) <> 0) then
     SystemError;
 
-  Size := V.ModeSize and $f0;
-  Index := V.ModeSize and 15;
+  Size := V.Header.ModeSize and $f0;
+  Index := V.Header.ModeSize and 15;
   if (Size <> (16 * (Index and 7 + 1))) then
     SystemError;
+  if (Ord(NativeInt(V) and MASK_K64_TEST = 0) <> Ord(Index >= 8)) then
+    SystemError;
+  if (V.Header.InQK64PoolSmallFull) and (Index <= 7) then
+    SystemError;
 
-  ItemSet := V.ItemSet;
-  InFullQueue := (ItemSet.V64 and 1 <> 0);
-  if (InFullQueue) then
-  begin
-    ItemSet.V64 := 0;
-  end else
-  begin
-    if (ItemSet.V64 and (not DEFAULT_BITSETS_SMALL[Index]) <> 0) then
-      SystemError;
+  ItemSet.V64 := V.Header.ItemSet.V64 and -4;
+  case (V.Header.ItemSet.VLow32 and 3) of
+    0: InFullQueue := False;
+    3: InFullQueue := True;
+  else
+    SystemError;
   end;
+  if (ItemSet.V64 and (not DEFAULT_BITSETS_SMALL[Index]) <> 0) then
+    SystemError;
   Items.Init(ItemSet);
 
   EmptiesCount := 0;
@@ -2022,32 +2027,39 @@ end;
 
 procedure TK1LineInfo.Init(const V: PK1LineSmall);
 var
+  Found: Boolean;
+  Current: PK1LineSmall;
   Left, Right: PK1LineSmall;
 begin
   inherited Init(V);
 
   if (InFullQueue) then
   begin
-    Left := Pointer(V.FullPrevNext.Prev and MASK_K1_CLEAR);
-    Right := Pointer(V.FullPrevNext.Next and MASK_K1_CLEAR);
+    Current := ValuePool.ThreadHeap.QK1LineFull;
   end else
   begin
-    Left := nil;
-    Right := ValuePool.ThreadHeap.FK1LineSmalls[(Self.Index and 7) + 1];
-    repeat
-      if (Right = nil) then
-        SystemError;
-
-      if (Right = V) then
-        Break;
-
-      Left := Right;
-      Right := Pointer(Right.Next and MASK_K1_CLEAR);
-    until (False);
-
-    Right := Pointer(Right.Next and MASK_K1_CLEAR);
+    Current := ValuePool.ThreadHeap.FK1LineSmalls[(Self.Index and 7) + 1];
   end;
+  if (Current = nil) then SystemError;
+  if (Current.Header.Queue.Prev <> nil) then SystemError;
 
+  Found := (Current = V);
+  while (True) do
+  begin
+    Left := Current;
+    Current := Current.Header.Queue.Next;
+    if (Current = nil) then Break;
+
+    if (Current = V) then
+      Found := True;
+
+    if (Current.Header.Queue.Prev <> Left) then
+      SystemError;
+  end;
+  if (not Found) then
+    SystemError;
+
+  Left := V.Header.Queue.Prev;
   if (Left = nil) then
   begin
     Prev := nil;
@@ -2057,6 +2069,7 @@ begin
     Prev.Init(Left);
   end;
 
+  Right := V.Header.Queue.Next;
   if (Right = nil) then
   begin
     Next := nil;
@@ -2080,7 +2093,7 @@ begin
   if (ValueThreadHeap = nil) or (Pointer(not ValueThreadHeap.FMarkerNotSelf) <> ValueThreadHeap) then
     SystemError;
 
-  InFullQueue := (V.PrevNext.Prev and 1 <> 0);
+  InFullQueue := V.Header.InQK64PoolSmallFull;
   Lines.Init(V.LineSet);
 
   EmptiesCount := 0;
@@ -2103,20 +2116,39 @@ end;
 
 procedure TPoolSmallInfo.Init(const V: PK64PoolSmall);
 var
+  Found: Boolean;
+  Current: PK64PoolSmall;
   Left, Right: PK64PoolSmall;
 begin
   inherited Init(V);
 
   if (InFullQueue) then
   begin
-    Left := Pointer(V.PrevNext.Prev and MASK_K64_CLEAR);
-    Right := Pointer(V.PrevNext.Next and MASK_K64_CLEAR);
+    Current := ValueThreadHeap.QK64PoolSmallFull;
   end else
   begin
-    Left := nil;
-    Right := nil;
+    Current := ValueThreadHeap.QK64PoolSmall;
   end;
+  if (Current = nil) then SystemError;
+  if (Current.Queue.Prev <> nil) then SystemError;
 
+  Found := (Current = V);
+  while (True) do
+  begin
+    Left := Current;
+    Current := Current.Queue.Next;
+    if (Current = nil) then Break;
+
+    if (Current = V) then
+      Found := True;
+
+    if (Current.Queue.Prev <> Left) then
+      SystemError;
+  end;
+  if (not Found) then
+    SystemError;
+
+  Left := V.Queue.Prev;
   if (Left = nil) then
   begin
     Prev := nil;
@@ -2130,6 +2162,7 @@ begin
       SystemError;
   end;
 
+  Right := V.Queue.Next;
   if (Right = nil) then
   begin
     Next := nil;
@@ -2251,13 +2284,33 @@ end;
 
 procedure TPoolMediumInfo.Init(const V: PK64PoolMedium);
 var
+  Found: Boolean;
+  Current: PK64PoolMedium;
   Left, Right: PK64PoolMedium;
 begin
   inherited Init(V);
 
-  Left := Pointer(V.PrevNext.Prev and MASK_K64_CLEAR);
-  Right := Pointer(V.PrevNext.Next and MASK_K64_CLEAR);
+  Current := ValueThreadHeap.QK64PoolMedium;
+  if (Current = nil) then SystemError;
+  if (Current.Queue.Prev <> nil) then SystemError;
 
+  Found := (Current = V);
+  while (True) do
+  begin
+    Left := Current;
+    Current := Current.Queue.Next;
+    if (Current = nil) then Break;
+
+    if (Current = V) then
+      Found := True;
+
+    if (Current.Queue.Prev <> Left) then
+      SystemError;
+  end;
+  if (not Found) then
+    SystemError;
+
+  Left := V.Queue.Prev;
   if (Left = nil) then
   begin
     Prev := nil;
@@ -2270,6 +2323,7 @@ begin
       SystemError;
   end;
 
+  Right := V.Queue.Next;
   if (Right = nil) then
   begin
     Next := nil;
@@ -2324,7 +2378,7 @@ begin
         Inc(LineCounts.AvailableNonFull);
       end;
 
-      Line := Pointer(Line.Next and MASK_K1_CLEAR);
+      Line := Line.Header.Queue.Next;
     end;
   end;
 
