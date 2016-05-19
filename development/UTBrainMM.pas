@@ -787,7 +787,7 @@ begin
   CheckEmptyHeap;
 
   INC_TEST;
-  ThreadHeap := CurrentThreadHeap;
+  ThreadHeap := MainThreadHeap;
   if (ThreadHeap = nil) then SystemError;
 
   // small
@@ -848,7 +848,7 @@ var
   PTRS: array[0..2000 - 1] of Pointer;
 begin
   INC_TEST;
-  ThreadHeap := CurrentThreadHeap;
+  ThreadHeap := MainThreadHeap;
   if (ThreadHeap = nil) then SystemError;
 
   // first line
@@ -1032,7 +1032,7 @@ var
 begin
   // push back
   INC_TEST;
-  ThreadHeap := CurrentThreadHeap;
+  ThreadHeap := MainThreadHeap;
   if (ThreadHeap = nil) then SystemError;
 
   INC_TEST;
@@ -1225,7 +1225,7 @@ var
   PTRS: array[0..2000 - 1] of Pointer;
 begin
   INC_TEST;
-  ThreadHeap := CurrentThreadHeap;
+  ThreadHeap := MainThreadHeap;
   if (ThreadHeap = nil) then SystemError;
 
   // initialize
@@ -1420,7 +1420,7 @@ var
 
 begin
   INC_TEST;
-  ThreadHeap := CurrentThreadHeap;
+  ThreadHeap := MainThreadHeap;
   if (ThreadHeap = nil) then SystemError;
 
   // initialize
@@ -1803,7 +1803,7 @@ var
 
 begin
   INC_TEST;
-  ThreadHeap := CurrentThreadHeap;
+  ThreadHeap := MainThreadHeap;
   if (ThreadHeap = nil) then SystemError;
   ThreadHeap.ErrorAddr := @TestDifficults;
 
