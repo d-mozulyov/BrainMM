@@ -8,7 +8,7 @@ unit UTBrainMM;
 
 interface
   uses BrainMM,
-       {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
+       {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif}
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif};
 
 const
@@ -236,6 +236,7 @@ const
 type
   TFormatBuffer = array[0..1024] of Char;
 
+{$ifdef MSWINDOWS}
 function vsprintf(S: PChar; const Format: PChar; va_list: Pointer): Integer; cdecl;
   external 'msvcrt.dll' name {$ifdef UNICODE}'vswprintf'{$else}'vsprintf'{$endif};
 
@@ -274,10 +275,12 @@ begin
 
   Result[vsprintf(Result, FmtStr, @va_list)] := #0;
 end;
+{$endif}
 
 // make console?
 function Log(const Text: PChar; ModeException: Boolean = False;
   CancelAvailable: Boolean = False): Boolean;
+{$ifdef MSWINDOWS}
 const
   DLG_MODES: array[Boolean] of Integer = (MB_ICONINFORMATION, MB_ICONERROR);
   DLG_CAPTIONS: array[Boolean] of PChar = ('Information:', 'Exception:');
@@ -286,6 +289,11 @@ begin
   Result := (ID_OK = MessageBox(GetForegroundWindow, Text,
     DLG_CAPTIONS[ModeException], DLG_MODES[ModeException] or DLG_BUTTONS[CancelAvailable]));
 end;
+{$else .POSIX}
+begin
+  Result := False;
+end;
+{$endif}
 
 procedure ErrorHandler(ErrorCode: TRuntimeError; ErrorAddr: Pointer);
 var
@@ -331,11 +339,15 @@ rePrivInstruction: Error := 'rePrivInstruction';
     S^ := #0;
   end;
 
-  TextBuffer := FormatBuffer('TEST_NUMBER: %d'#13'Exception %s at %p',
-    [TEST_NUMBER, Error, ErrorAddr]);
+  {$ifdef MSWINDOWS}
+    TextBuffer := FormatBuffer('TEST_NUMBER: %d'#13'Exception %s at %p',
+      [TEST_NUMBER, Error, ErrorAddr]);
 
-  // show exception message
-  Log(TextBuffer, True);
+    // show exception message
+    Log(TextBuffer, True);
+  {$else .POSIX}
+    Log(Error, True);
+  {$endif}
   Halt;
 end;
 
@@ -2715,7 +2727,9 @@ end;
 
 initialization
   System.ErrorProc := Pointer(@ErrorHandler);
+  {$ifdef MSWINDOWS}
   System.ExceptObjProc := Pointer(@ExceptionHandler);
+  {$endif}
   RUN_TESTS;
 
 end.

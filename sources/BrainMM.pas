@@ -124,7 +124,7 @@ interface
   uses {$ifdef CONDITIONALEXPRESSIONS}
          {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
          {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif}
-         {$ifdef POSIX}Posix.String_, Posix.SysStat, Posix.Unistd{$endif};
+         {$ifdef POSIX}Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread{$endif};
        {$else}
          Windows;
        {$endif}
@@ -288,7 +288,7 @@ const
 
   THREAD_HEAP_LOCKABLE = 2;
   THREAD_HEAP_LOCKED_BIT = 1;
-  THRAED_HEAP_LOCKED = THREAD_HEAP_LOCKABLE or THREAD_HEAP_LOCKED_BIT;
+  THREAD_HEAP_LOCKED = THREAD_HEAP_LOCKABLE or THREAD_HEAP_LOCKED_BIT;
 
   PTR_INVALID = Pointer(1);
   FREEMEM_INVALID = Integer({$ifdef FPC}0{$else}-1{$endif});
@@ -655,6 +655,7 @@ var
   GLOBAL_STORAGE: array[0..SizeOf(TGlobalStorage) + 63] of Byte;
 
 {$ifdef BRAINMM_UNITTEST}
+  function CurrentThreadHeap: PThreadHeap;
 implementation
 {$endif}
 
@@ -1696,7 +1697,7 @@ end;
 
 {$ifdef CPUX64}
 const
-  X64_SYNCSTACK_MASK = ((1 shl 48) - 1) and -16;
+  X64_SYNCSTACK_MASK = ((NativeUInt(1) shl 48) - 1) and -16;
   X64_SYNCSTACK_CLEAR = not X64_SYNCSTACK_MASK;
 {$endif}
 
@@ -1704,7 +1705,7 @@ const
 function TSyncStack.GetAssigned: Boolean;
 begin
   {$ifdef CPUINTEL}
-    Result := (F.Handle and X64_SYNCSTACK_MASK <> 0);
+    Result := (F.Handle and (((NativeUInt(1) shl 48) - 1) and -16){X64_SYNCSTACK_MASK} <> 0);
   {$else .CPUARM64}
     Result := (F.Handle <> 0);
   {$endif}
@@ -1730,8 +1731,8 @@ var
 begin
   repeat
     Item := F.Handle;
-    PSupposedPtr(Last)^ := Item {$ifdef CPUARM64}and X64_SYNCSTACK_MASK{$endif};
-    NewItem := SupposedPtr(First) {$ifdef CPUARM64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    PSupposedPtr(Last)^ := Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif};
+    NewItem := SupposedPtr(First) {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
 {$else .CPUX86}
@@ -1779,10 +1780,10 @@ var
 begin
   repeat
     Item := F.Handle;
-    Result := Pointer(Item {$ifdef CPUARM64}and X64_SYNCSTACK_MASK{$endif});
+    Result := Pointer(Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif});
     if (Result = nil) then Exit;
 
-    NewItem := PSupposedPtr(Result)^ {$ifdef CPUARM64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    NewItem := PSupposedPtr(Result)^ {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
 {$else .CPUX86}
@@ -1825,10 +1826,10 @@ var
 begin
   repeat
     Item := F.Handle;
-    Result := Pointer(Item {$ifdef CPUARM64}and X64_SYNCSTACK_MASK{$endif});
+    Result := Pointer(Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif});
     if (Result = nil) then Exit;
 
-    NewItem := {nil}0 {$ifdef CPUARM64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    NewItem := {nil}0 {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
 {$else .CPUX86}
@@ -1946,6 +1947,7 @@ function CreateThreadHeap(Store: Boolean): PThreadHeap;
 var
   GlobalStorage: PGlobalStorage;
   InternalRecord: PInternalRecord;
+  Flags: SupposedPtr;
   NextHeap: PThreadHeap;
 begin
   GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
@@ -1957,7 +1959,17 @@ begin
 
     // make unlokable
     repeat
-      if (Result.LockFlags <> THREAD_HEAP_LOCKABLE) then SpinWait(Result.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      Flags := Result.LockFlags;
+      if (Flags <> THREAD_HEAP_LOCKABLE) then
+      begin
+        if (Flags = THREAD_HEAP_LOCKED) then
+        begin
+          SpinWait(Result.LockFlags, THREAD_HEAP_LOCKED_BIT);
+        end else
+        begin
+          {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+        end;
+      end;
     until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(Result.LockFlags, 0, THREAD_HEAP_LOCKABLE));
 
     // deferred
@@ -2061,6 +2073,22 @@ asm
 end;
 {$endif}
 
+function CurrentThreadHeap: PThreadHeap;
+{$ifdef PUREPASCAL}
+begin
+  Result := ThreadHeapInstance;
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    mov rax, gs:[abs THREAD_HEAP]
+  {$endif}
+end;
+{$endif}
+
+
 type
   PThreadRec = ^TThreadRec;
   TThreadRec = record
@@ -2074,6 +2102,8 @@ var
   InternalRecord: PInternalRecord;
 begin
   ThreadHeap.ProcessThreadDeferred;
+  if (ThreadHeap.LockFlags <> 0) then
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
   ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
 
   InternalRecord := CoreInternalRecordPop;
@@ -2101,8 +2131,17 @@ begin
   {$ifdef PUREPASCAL}
     ThreadHeapInstance := nil;
   {$endif}
-  if (ThreadHeap <> nil) and (ThreadHeap.LockFlags = 0) then
-    ThreadHeapLock(ThreadHeap);
+  if (ThreadHeap <> nil) then
+  begin
+    if (ThreadHeap.LockFlags = 0) then
+    begin
+      ThreadHeapLock(ThreadHeap);
+    end else
+    if (ThreadHeap.LockFlags > THREAD_HEAP_LOCKED) then
+    begin
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+    end;
+  end;
 end;
 
 procedure BrainMMEndThreadEvent(ExitCode: Integer);
@@ -2114,8 +2153,17 @@ begin
     ThreadHeapInstance := nil;
   {$endif}
 
-  if (ThreadHeap <> nil) and (ThreadHeap.LockFlags = 0) then
-    ThreadHeapLock(ThreadHeap);
+  if (ThreadHeap <> nil) then
+  begin
+    if (ThreadHeap.LockFlags = 0) then
+    begin
+      ThreadHeapLock(ThreadHeap);
+    end else
+    if (ThreadHeap.LockFlags > THREAD_HEAP_LOCKED) then
+    begin
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+    end;
+  end;
 end;
 
 {$ifdef FPC}
@@ -2140,10 +2188,11 @@ end;
 
 {$ifdef THREAD_FUNCS_WRAPPER}
 procedure _FpuInit;
+{$WARNINGS OFF}
 {$ifdef CPUX86}
   {$ifdef IOS}
   begin
-    FPUExceptionMaskBits := (Default8087CW and $003F) or ((DefaultMXCSR and $1F80) shr 7) or $8000;
+    FSetExceptMask((DefaultMXCSR and $1F80) shr 7);
     Set8087CW(Default8087CW);
     SetMXCSR(DefaultMXCSR);
   end;
@@ -2157,30 +2206,22 @@ procedure _FpuInit;
   end;
   {$endif}
 {$else}
-  {$ifdef ANDROID}
-  const
-    ValidMask = $07C0009F;
-  begin
-    SetFPSCR(DefaultFPSCR and ValidMask);
-    FPSCRExceptionEnableBits := DefaultFPSCR and femALLEXCEPT;
-  end;
-  {$else}
-    {$ifdef CPUARM}
+  {$ifdef CPUARM}
     const
       ValidMask = $07C0009F;
     begin
       SetFPSCR(DefaultFPSCR and ValidMask);
-      FPSCRExceptionEnableBits := DefaultFPSCR and femALLEXCEPT;
+      FSetExceptMask(DefaultFPSCR);
     end;
-    {$else .CPUX64}
-       {$ifdef MSWINDOWS}
-       asm
-          LDMXCSR DefaultMXCSR
-       end;
-       {$endif}
-    {$endif}
+  {$else .CPUX64}
+     {$ifdef MSWINDOWS}
+     asm
+        LDMXCSR DefaultMXCSR
+     end;
+     {$endif}
   {$endif}
 {$endif}
+{$WARNINGS ON}
 
 procedure RunErrorAt(ErrCode: Integer; ErrorAtAddr: Pointer);
 begin
@@ -2202,7 +2243,7 @@ begin
 end;
 
 function __ThreadWrapper(Parameter: Pointer):
-  {$ifdef MSWINDOWS}Integer; stdcall;{$else .POSIX}NativeInt; cdecl;{$endif}
+  {$ifdef MSWINDOWS}Integer; stdcall;{$else .POSIX}NativeInt; cdecl; {$endif}
 var
   ThreadRec: TThreadRec;
 begin
@@ -2250,7 +2291,8 @@ begin
   P.Parameter := Proxy;
 
   IsMultiThread := True;
-  Result := pthread_create(pthread_t(ThreadID), Ppthread_attr_t(Attribute), @ThreadWrapper, P);
+  Result := pthread_create(pthread_t(ThreadID), Ppthread_attr_t(Attribute),
+    TThreadFunc(@__ThreadWrapper), P);
 
   if Result <> 0 then
     Dispose(P);
@@ -2602,8 +2644,17 @@ begin
     repeat
       Flags := Self.LockFlags;
       if (Flags = 0) then goto lock_free;
-      if (Flags <> THREAD_HEAP_LOCKABLE) then SpinWait(Self.LockFlags, THREAD_HEAP_LOCKED_BIT);
-    until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(Self.LockFlags, THRAED_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+      if (Flags <> THREAD_HEAP_LOCKABLE) then
+      begin
+        if (Flags = THREAD_HEAP_LOCKED) then
+        begin
+          SpinWait(Self.LockFlags, THREAD_HEAP_LOCKED_BIT);
+        end else
+        begin
+          {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+        end;
+      end;
+    until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(Self.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
     LastErrorAddr := Self.ErrorAddr;
     try
       Self.ErrorAddr := ReturnAddress;
@@ -2621,33 +2672,12 @@ begin
   end;
 end;
 
-function CheckThreadDeferredDuplicates(First, Current: {not duplicated}PThreadDeferred): {duplicate}PThreadDeferred;
-var
-  NextUnchecked: PThreadDeferred;
-begin
-  NextUnchecked := Current.Next;
-  if (NextUnchecked <> nil) then
-  begin
-    // checking loop
-    Result := First;
-    repeat
-      if (Result = NextUnchecked) then {duplicate found}Exit;
-      Result := Result.Next;
-    until (Result = Current);
-
-    // recursion
-    Result := CheckThreadDeferredDuplicates(First, {checked}NextUnchecked);
-  end else
-  begin
-    Result := nil;
-  end;
-end;
-
 procedure TThreadHeap.ProcessThreadDeferred;
 var
   LastErrorAddr: Pointer;
   ReturnAddress: SupposedPtr;
-  ThreadDeferred, Next, Duplicate: PThreadDeferred;
+  Counter: NativeUInt;
+  ThreadDeferred, Next: PThreadDeferred;
 begin
   ThreadDeferred := Deferreds.PopList;
   if (ThreadDeferred <> nil) then
@@ -2658,14 +2688,16 @@ begin
       Next := ThreadDeferred.Next;
       if (Next <> nil) then
       begin
-        if (ThreadDeferred = Next) then Duplicate := ThreadDeferred
-        else Duplicate := CheckThreadDeferredDuplicates(ThreadDeferred, Next);
-
-        if (Duplicate <> nil) then
-        begin
-          Self.ErrorAddr := Pointer(NativeInt(Duplicate.ReturnAddress) and MASK_HIGH_NATIVE_TEST);
-          Self.RaiseInvalidPtr;
-        end;
+        Counter := 0;
+        repeat
+          if (NativeInt(Next) and MASK_16_TEST <> 0) or (ThreadDeferred = Next) then
+          begin
+            Self.ErrorAddr := Pointer(NativeInt(ThreadDeferred.ReturnAddress) and MASK_HIGH_NATIVE_TEST);
+            Self.RaiseInvalidPtr;
+          end;
+          Next := Next.Next;
+          Inc(Counter);
+        until ((Next = nil) or (Counter = 16));
       end;
 
       // free small/medium
@@ -2695,12 +2727,23 @@ function BrainMMUnknownGetMem(None: Pointer; B16Count: NativeUInt;
   ErrorAddr: Pointer): Pointer;
 var
   ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
 begin
   // inline SpinLock
   ThreadHeap := UnknownThreadHeap;
   repeat
-    if (ThreadHeap.LockFlags <> THREAD_HEAP_LOCKABLE) then SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
-  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THRAED_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
   try
     // allocation
     ThreadHeap.ErrorAddr := ErrorAddr;
@@ -3287,12 +3330,23 @@ label
   medium;
 var
   ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
 begin
   // inline SpinLock
   ThreadHeap := UnknownThreadHeap;
   repeat
-    if (ThreadHeap.LockFlags <> THREAD_HEAP_LOCKABLE) then SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
-  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THRAED_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
   try
     // allocation
     ThreadHeap.ErrorAddr := ErrorAddr;
@@ -3373,13 +3427,24 @@ label
   medium, error_invalid_ptr;
 var
   ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
   Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
 begin
   // inline SpinLock
   ThreadHeap := UnknownThreadHeap;
   repeat
-    if (ThreadHeap.LockFlags <> THREAD_HEAP_LOCKABLE) then SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
-  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THRAED_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
   try
     // dispose
     ThreadHeap.ErrorAddr := ErrorAddr;
@@ -3926,14 +3991,25 @@ label
   return_made_none, medium, raise_invalid_ptr;
 var
   ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
   Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
   LastB16Count: NativeUInt;
 begin
   // inline SpinLock
   ThreadHeap := UnknownThreadHeap;
   repeat
-    if (ThreadHeap.LockFlags <> THREAD_HEAP_LOCKABLE) then SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
-  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THRAED_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
   try
     // reget
     ThreadHeap.ErrorAddr := ErrorAddr;
@@ -4476,14 +4552,25 @@ label
   return_made_none, medium, raise_invalid_ptr;
 var
   ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
   Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
   LastB16Count: NativeUInt;
 begin
   // inline SpinLock
   ThreadHeap := UnknownThreadHeap;
   repeat
-    if (ThreadHeap.LockFlags <> THREAD_HEAP_LOCKABLE) then SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
-  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THRAED_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
   try
     // realloc
     ThreadHeap.ErrorAddr := ErrorAddr;
