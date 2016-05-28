@@ -9,7 +9,7 @@ unit UTBrainMM;
 interface
   uses BrainMM,
        {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif}
-       {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif};
+       {$ifdef MSWINDOWS},{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif};
 
 const
   BREAKPOINT = 0;

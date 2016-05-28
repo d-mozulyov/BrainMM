@@ -124,7 +124,7 @@ interface
   uses {$ifdef CONDITIONALEXPRESSIONS}
          {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
          {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif}
-         {$ifdef POSIX}Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread{$endif};
+         {$ifdef POSIX}Posix.Base, Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread{$endif};
        {$else}
          Windows;
        {$endif}
@@ -859,18 +859,6 @@ end;
 
 {$ifdef POSIX}
 const
-  {$ifdef ANDROID}
-    libc = '/system/lib/libc.so';
-  {$else}
-    {$MESSAGE ERROR 'ToDo'}
-  {$endif}
-
-  {$IFDEF UNDERSCOREIMPORTNAME}
-    _PU = '_';
-  {$ELSE}
-    _PU = '';
-  {$ENDIF}
-
   PROT_READ       = $1;         { Page can be read.  }
   PROT_WRITE      = $2;         { Page can be written.  }
   PROT_EXEC       = $4;         { Page can be executed.  }
@@ -898,10 +886,6 @@ procedure free(P: Pointer); cdecl;
 function mmap(address: Pointer; length: NativeUInt; protect, flags, filedes: Integer;
   offset: NativeUInt): Pointer; cdecl;
   external libc name _PU + 'mmap';
-
-function mmap64(address: Pointer; length: NativeUInt; protect, flags, filedes: Integer;
-  offset: UInt64): Pointer; cdecl;
-  external libc name _PU + 'mmap64';
 
 function munmap(address: Pointer; length: NativeUInt): Integer; cdecl;
   external libc name _PU + 'munmap';
@@ -2243,7 +2227,7 @@ begin
 end;
 
 function __ThreadWrapper(Parameter: Pointer):
-  {$ifdef MSWINDOWS}Integer; stdcall;{$else .POSIX}NativeInt; cdecl; {$endif}
+  {$ifdef MSWINDOWS}Integer; stdcall;{$else .POSIX}NativeInt; cdecl;{$endif}
 var
   ThreadRec: TThreadRec;
 begin
@@ -2276,6 +2260,10 @@ begin
   Result := P;
 end;
 {$else .POSIX}
+function posix_pthread_create(var Thread: pthread_t; Attr: Ppthread_attr_t;
+  TFunc: Pointer; Arg: Pointer): Integer; cdecl;
+  external libpthread name _PU + 'pthread_create';
+
 function BrainMMThreadFuncEvent(Attribute: PThreadAttr;
     ThreadFunc: TThreadFunc; Parameter: Pointer;
     var ThreadId: NativeUInt): Integer;
@@ -2291,8 +2279,8 @@ begin
   P.Parameter := Proxy;
 
   IsMultiThread := True;
-  Result := pthread_create(pthread_t(ThreadID), Ppthread_attr_t(Attribute),
-    TThreadFunc(@__ThreadWrapper), P);
+  Result := posix_pthread_create(pthread_t(ThreadID), Ppthread_attr_t(Attribute),
+    @__ThreadWrapper, P);
 
   if Result <> 0 then
     Dispose(P);
