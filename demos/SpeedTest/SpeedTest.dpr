@@ -58,6 +58,10 @@ program SpeedTest;
 
 
 uses
+  {$ifdef DEBUG}
+    BrainMM,
+  {$endif}
+
   {$ifdef FASTMM}
     FastMM4,
   {$endif}

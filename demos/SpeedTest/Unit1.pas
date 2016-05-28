@@ -33,19 +33,25 @@ implementation
 {$R *.dfm}
 
 procedure TForm1.Button1Click(Sender: TObject);
+var
+  Time, P: Integer;
+  S: string;
 begin
-  SpeedTest := TSpeedTest.Create(1000);
+  SpeedTest := TSpeedTest.Create(50000);
   SpeedTest.Multicore := CheckBox1.Checked;
 
   Button1.Enabled := False;
   Screen.Cursor := crHourGlass;
-
-  Form1.Caption := 'Time = ' + SpeedTest.Execute.ToString;
+  Time := SpeedTest.Execute;
 
   SpeedTest.Free;
   Button1.Enabled := True;
   Screen.Cursor := crDefault;
 
+  S := ChangeFileExt(ExtractFileName(Application.ExeName), '');
+  P := Pos('.', S);
+  if (P <> 0) then Delete(S, 1, P);
+  Form1.Caption := Format('%s time: %dms', [S, Time]);
 end;
 
 end.

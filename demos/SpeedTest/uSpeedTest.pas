@@ -112,9 +112,9 @@ end;
 constructor TFooList.create;
 begin
   inherited create;
-  fSize := 12000;
+  fSize := 3500;
   fList := TObjectList<TFoo>.Create;
-  fList.Capacity := 10;
+  fList.Capacity := 7;
 end;
 
 destructor TFooList.destroy;
@@ -136,11 +136,11 @@ begin
   end;
 
   result := 0;
-  while fList.Count > 0 do
+  for i := fList.Count - 1 downto 0 do
   begin
-    fValue := fList[0].Value;
-    result := fList[0].Value;
-    fList.Delete(0);
+    fValue := fList[i].Value;
+    result := fList[i].Value;
+    fList.Delete(i);
   end;
 
 end;
