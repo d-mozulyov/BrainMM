@@ -1,0 +1,528 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{1DBCA9C4-1B1E-4CB5-923E-9929CCE25841}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="BrainMM_x64_8.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x64_16.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x64_24.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x64_32.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x64_48.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x64_64.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x86_8.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x86_16.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x86_24.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x86_32.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x86_48.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="BrainMM_x86_64.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x64_8.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x64_16.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x64_24.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x64_32.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x64_48.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x64_64.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_8.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_16.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_16_8.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_16_16.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_16_24.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_16_32.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_16_48.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_16_64.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_24.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_32.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_48.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FastMM_x86_64.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x64_8.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x64_16.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x64_24.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x64_32.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x64_48.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x64_64.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x86_8.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x86_16.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x86_24.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x86_32.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x86_48.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ScaleMM2_x86_64.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="BrainMM_x64_8">
+        <MSBuild Projects="BrainMM_x64_8.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x64_8:Clean">
+        <MSBuild Projects="BrainMM_x64_8.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x64_8:Make">
+        <MSBuild Projects="BrainMM_x64_8.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x64_16">
+        <MSBuild Projects="BrainMM_x64_16.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x64_16:Clean">
+        <MSBuild Projects="BrainMM_x64_16.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x64_16:Make">
+        <MSBuild Projects="BrainMM_x64_16.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x64_24">
+        <MSBuild Projects="BrainMM_x64_24.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x64_24:Clean">
+        <MSBuild Projects="BrainMM_x64_24.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x64_24:Make">
+        <MSBuild Projects="BrainMM_x64_24.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x64_32">
+        <MSBuild Projects="BrainMM_x64_32.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x64_32:Clean">
+        <MSBuild Projects="BrainMM_x64_32.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x64_32:Make">
+        <MSBuild Projects="BrainMM_x64_32.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x64_48">
+        <MSBuild Projects="BrainMM_x64_48.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x64_48:Clean">
+        <MSBuild Projects="BrainMM_x64_48.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x64_48:Make">
+        <MSBuild Projects="BrainMM_x64_48.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x64_64">
+        <MSBuild Projects="BrainMM_x64_64.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x64_64:Clean">
+        <MSBuild Projects="BrainMM_x64_64.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x64_64:Make">
+        <MSBuild Projects="BrainMM_x64_64.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x86_8">
+        <MSBuild Projects="BrainMM_x86_8.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x86_8:Clean">
+        <MSBuild Projects="BrainMM_x86_8.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x86_8:Make">
+        <MSBuild Projects="BrainMM_x86_8.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x86_16">
+        <MSBuild Projects="BrainMM_x86_16.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x86_16:Clean">
+        <MSBuild Projects="BrainMM_x86_16.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x86_16:Make">
+        <MSBuild Projects="BrainMM_x86_16.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x86_24">
+        <MSBuild Projects="BrainMM_x86_24.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x86_24:Clean">
+        <MSBuild Projects="BrainMM_x86_24.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x86_24:Make">
+        <MSBuild Projects="BrainMM_x86_24.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x86_32">
+        <MSBuild Projects="BrainMM_x86_32.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x86_32:Clean">
+        <MSBuild Projects="BrainMM_x86_32.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x86_32:Make">
+        <MSBuild Projects="BrainMM_x86_32.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x86_48">
+        <MSBuild Projects="BrainMM_x86_48.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x86_48:Clean">
+        <MSBuild Projects="BrainMM_x86_48.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x86_48:Make">
+        <MSBuild Projects="BrainMM_x86_48.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BrainMM_x86_64">
+        <MSBuild Projects="BrainMM_x86_64.dproj"/>
+    </Target>
+    <Target Name="BrainMM_x86_64:Clean">
+        <MSBuild Projects="BrainMM_x86_64.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BrainMM_x86_64:Make">
+        <MSBuild Projects="BrainMM_x86_64.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x64_8">
+        <MSBuild Projects="FastMM_x64_8.dproj"/>
+    </Target>
+    <Target Name="FastMM_x64_8:Clean">
+        <MSBuild Projects="FastMM_x64_8.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x64_8:Make">
+        <MSBuild Projects="FastMM_x64_8.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x64_16">
+        <MSBuild Projects="FastMM_x64_16.dproj"/>
+    </Target>
+    <Target Name="FastMM_x64_16:Clean">
+        <MSBuild Projects="FastMM_x64_16.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x64_16:Make">
+        <MSBuild Projects="FastMM_x64_16.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x64_24">
+        <MSBuild Projects="FastMM_x64_24.dproj"/>
+    </Target>
+    <Target Name="FastMM_x64_24:Clean">
+        <MSBuild Projects="FastMM_x64_24.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x64_24:Make">
+        <MSBuild Projects="FastMM_x64_24.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x64_32">
+        <MSBuild Projects="FastMM_x64_32.dproj"/>
+    </Target>
+    <Target Name="FastMM_x64_32:Clean">
+        <MSBuild Projects="FastMM_x64_32.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x64_32:Make">
+        <MSBuild Projects="FastMM_x64_32.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x64_48">
+        <MSBuild Projects="FastMM_x64_48.dproj"/>
+    </Target>
+    <Target Name="FastMM_x64_48:Clean">
+        <MSBuild Projects="FastMM_x64_48.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x64_48:Make">
+        <MSBuild Projects="FastMM_x64_48.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x64_64">
+        <MSBuild Projects="FastMM_x64_64.dproj"/>
+    </Target>
+    <Target Name="FastMM_x64_64:Clean">
+        <MSBuild Projects="FastMM_x64_64.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x64_64:Make">
+        <MSBuild Projects="FastMM_x64_64.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_8">
+        <MSBuild Projects="FastMM_x86_8.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_8:Clean">
+        <MSBuild Projects="FastMM_x86_8.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_8:Make">
+        <MSBuild Projects="FastMM_x86_8.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_16">
+        <MSBuild Projects="FastMM_x86_16.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_16:Clean">
+        <MSBuild Projects="FastMM_x86_16.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_16:Make">
+        <MSBuild Projects="FastMM_x86_16.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_16_8">
+        <MSBuild Projects="FastMM_x86_16_8.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_16_8:Clean">
+        <MSBuild Projects="FastMM_x86_16_8.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_16_8:Make">
+        <MSBuild Projects="FastMM_x86_16_8.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_16_16">
+        <MSBuild Projects="FastMM_x86_16_16.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_16_16:Clean">
+        <MSBuild Projects="FastMM_x86_16_16.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_16_16:Make">
+        <MSBuild Projects="FastMM_x86_16_16.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_16_24">
+        <MSBuild Projects="FastMM_x86_16_24.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_16_24:Clean">
+        <MSBuild Projects="FastMM_x86_16_24.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_16_24:Make">
+        <MSBuild Projects="FastMM_x86_16_24.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_16_32">
+        <MSBuild Projects="FastMM_x86_16_32.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_16_32:Clean">
+        <MSBuild Projects="FastMM_x86_16_32.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_16_32:Make">
+        <MSBuild Projects="FastMM_x86_16_32.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_16_48">
+        <MSBuild Projects="FastMM_x86_16_48.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_16_48:Clean">
+        <MSBuild Projects="FastMM_x86_16_48.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_16_48:Make">
+        <MSBuild Projects="FastMM_x86_16_48.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_16_64">
+        <MSBuild Projects="FastMM_x86_16_64.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_16_64:Clean">
+        <MSBuild Projects="FastMM_x86_16_64.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_16_64:Make">
+        <MSBuild Projects="FastMM_x86_16_64.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_24">
+        <MSBuild Projects="FastMM_x86_24.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_24:Clean">
+        <MSBuild Projects="FastMM_x86_24.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_24:Make">
+        <MSBuild Projects="FastMM_x86_24.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_32">
+        <MSBuild Projects="FastMM_x86_32.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_32:Clean">
+        <MSBuild Projects="FastMM_x86_32.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_32:Make">
+        <MSBuild Projects="FastMM_x86_32.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_48">
+        <MSBuild Projects="FastMM_x86_48.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_48:Clean">
+        <MSBuild Projects="FastMM_x86_48.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_48:Make">
+        <MSBuild Projects="FastMM_x86_48.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FastMM_x86_64">
+        <MSBuild Projects="FastMM_x86_64.dproj"/>
+    </Target>
+    <Target Name="FastMM_x86_64:Clean">
+        <MSBuild Projects="FastMM_x86_64.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FastMM_x86_64:Make">
+        <MSBuild Projects="FastMM_x86_64.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_8">
+        <MSBuild Projects="ScaleMM2_x64_8.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_8:Clean">
+        <MSBuild Projects="ScaleMM2_x64_8.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_8:Make">
+        <MSBuild Projects="ScaleMM2_x64_8.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_16">
+        <MSBuild Projects="ScaleMM2_x64_16.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_16:Clean">
+        <MSBuild Projects="ScaleMM2_x64_16.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_16:Make">
+        <MSBuild Projects="ScaleMM2_x64_16.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_24">
+        <MSBuild Projects="ScaleMM2_x64_24.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_24:Clean">
+        <MSBuild Projects="ScaleMM2_x64_24.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_24:Make">
+        <MSBuild Projects="ScaleMM2_x64_24.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_32">
+        <MSBuild Projects="ScaleMM2_x64_32.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_32:Clean">
+        <MSBuild Projects="ScaleMM2_x64_32.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_32:Make">
+        <MSBuild Projects="ScaleMM2_x64_32.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_48">
+        <MSBuild Projects="ScaleMM2_x64_48.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_48:Clean">
+        <MSBuild Projects="ScaleMM2_x64_48.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_48:Make">
+        <MSBuild Projects="ScaleMM2_x64_48.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_64">
+        <MSBuild Projects="ScaleMM2_x64_64.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_64:Clean">
+        <MSBuild Projects="ScaleMM2_x64_64.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x64_64:Make">
+        <MSBuild Projects="ScaleMM2_x64_64.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_8">
+        <MSBuild Projects="ScaleMM2_x86_8.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_8:Clean">
+        <MSBuild Projects="ScaleMM2_x86_8.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_8:Make">
+        <MSBuild Projects="ScaleMM2_x86_8.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_16">
+        <MSBuild Projects="ScaleMM2_x86_16.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_16:Clean">
+        <MSBuild Projects="ScaleMM2_x86_16.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_16:Make">
+        <MSBuild Projects="ScaleMM2_x86_16.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_24">
+        <MSBuild Projects="ScaleMM2_x86_24.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_24:Clean">
+        <MSBuild Projects="ScaleMM2_x86_24.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_24:Make">
+        <MSBuild Projects="ScaleMM2_x86_24.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_32">
+        <MSBuild Projects="ScaleMM2_x86_32.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_32:Clean">
+        <MSBuild Projects="ScaleMM2_x86_32.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_32:Make">
+        <MSBuild Projects="ScaleMM2_x86_32.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_48">
+        <MSBuild Projects="ScaleMM2_x86_48.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_48:Clean">
+        <MSBuild Projects="ScaleMM2_x86_48.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_48:Make">
+        <MSBuild Projects="ScaleMM2_x86_48.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_64">
+        <MSBuild Projects="ScaleMM2_x86_64.dproj"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_64:Clean">
+        <MSBuild Projects="ScaleMM2_x86_64.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="ScaleMM2_x86_64:Make">
+        <MSBuild Projects="ScaleMM2_x86_64.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="BrainMM_x64_8;BrainMM_x64_16;BrainMM_x64_24;BrainMM_x64_32;BrainMM_x64_48;BrainMM_x64_64;BrainMM_x86_8;BrainMM_x86_16;BrainMM_x86_24;BrainMM_x86_32;BrainMM_x86_48;BrainMM_x86_64;FastMM_x64_8;FastMM_x64_16;FastMM_x64_24;FastMM_x64_32;FastMM_x64_48;FastMM_x64_64;FastMM_x86_8;FastMM_x86_16;FastMM_x86_16_8;FastMM_x86_16_16;FastMM_x86_16_24;FastMM_x86_16_32;FastMM_x86_16_48;FastMM_x86_16_64;FastMM_x86_24;FastMM_x86_32;FastMM_x86_48;FastMM_x86_64;ScaleMM2_x64_8;ScaleMM2_x64_16;ScaleMM2_x64_24;ScaleMM2_x64_32;ScaleMM2_x64_48;ScaleMM2_x64_64;ScaleMM2_x86_8;ScaleMM2_x86_16;ScaleMM2_x86_24;ScaleMM2_x86_32;ScaleMM2_x86_48;ScaleMM2_x86_64"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="BrainMM_x64_8:Clean;BrainMM_x64_16:Clean;BrainMM_x64_24:Clean;BrainMM_x64_32:Clean;BrainMM_x64_48:Clean;BrainMM_x64_64:Clean;BrainMM_x86_8:Clean;BrainMM_x86_16:Clean;BrainMM_x86_24:Clean;BrainMM_x86_32:Clean;BrainMM_x86_48:Clean;BrainMM_x86_64:Clean;FastMM_x64_8:Clean;FastMM_x64_16:Clean;FastMM_x64_24:Clean;FastMM_x64_32:Clean;FastMM_x64_48:Clean;FastMM_x64_64:Clean;FastMM_x86_8:Clean;FastMM_x86_16:Clean;FastMM_x86_16_8:Clean;FastMM_x86_16_16:Clean;FastMM_x86_16_24:Clean;FastMM_x86_16_32:Clean;FastMM_x86_16_48:Clean;FastMM_x86_16_64:Clean;FastMM_x86_24:Clean;FastMM_x86_32:Clean;FastMM_x86_48:Clean;FastMM_x86_64:Clean;ScaleMM2_x64_8:Clean;ScaleMM2_x64_16:Clean;ScaleMM2_x64_24:Clean;ScaleMM2_x64_32:Clean;ScaleMM2_x64_48:Clean;ScaleMM2_x64_64:Clean;ScaleMM2_x86_8:Clean;ScaleMM2_x86_16:Clean;ScaleMM2_x86_24:Clean;ScaleMM2_x86_32:Clean;ScaleMM2_x86_48:Clean;ScaleMM2_x86_64:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="BrainMM_x64_8:Make;BrainMM_x64_16:Make;BrainMM_x64_24:Make;BrainMM_x64_32:Make;BrainMM_x64_48:Make;BrainMM_x64_64:Make;BrainMM_x86_8:Make;BrainMM_x86_16:Make;BrainMM_x86_24:Make;BrainMM_x86_32:Make;BrainMM_x86_48:Make;BrainMM_x86_64:Make;FastMM_x64_8:Make;FastMM_x64_16:Make;FastMM_x64_24:Make;FastMM_x64_32:Make;FastMM_x64_48:Make;FastMM_x64_64:Make;FastMM_x86_8:Make;FastMM_x86_16:Make;FastMM_x86_16_8:Make;FastMM_x86_16_16:Make;FastMM_x86_16_24:Make;FastMM_x86_16_32:Make;FastMM_x86_16_48:Make;FastMM_x86_16_64:Make;FastMM_x86_24:Make;FastMM_x86_32:Make;FastMM_x86_48:Make;FastMM_x86_64:Make;ScaleMM2_x64_8:Make;ScaleMM2_x64_16:Make;ScaleMM2_x64_24:Make;ScaleMM2_x64_32:Make;ScaleMM2_x64_48:Make;ScaleMM2_x64_64:Make;ScaleMM2_x86_8:Make;ScaleMM2_x86_16:Make;ScaleMM2_x86_24:Make;ScaleMM2_x86_32:Make;ScaleMM2_x86_48:Make;ScaleMM2_x86_64:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>
