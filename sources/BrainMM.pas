@@ -2061,13 +2061,21 @@ function CurrentThreadHeap: PThreadHeap;
 {$ifdef PUREPASCAL}
 begin
   Result := ThreadHeapInstance;
+  if (Result = nil) then
+    Result := UnknownThreadHeap;
 end;
 {$else}
 asm
   {$ifdef CPUX86}
     mov eax, fs:[THREAD_HEAP]
+    mov edx, UnknownThreadHeap
+    test eax, eax
+    DB $0F, $44, $C2 // cmovz eax, edx
   {$else .CPUX64}
     mov rax, gs:[abs THREAD_HEAP]
+    mov rdx, UnknownThreadHeap
+    test rax, rax
+    cmovz rax, rdx
   {$endif}
 end;
 {$endif}
@@ -7109,8 +7117,8 @@ begin
   Result.LineSet.V64 := -1{Empty};
 
   // Enqueue
-  Next := QK64PoolSmall;
-  QK64PoolSmall := Result;
+  Next := Self.QK64PoolSmall;
+  Self.QK64PoolSmall := Result;
   Result.Queue.Prev := nil;
   Result.Queue.Next := Next;
   if (Next <> nil) then Next.Queue.Prev := Result;
@@ -7126,7 +7134,7 @@ begin
   Next := PoolSmall.Queue.Next;
   if (Prev = nil) then
   begin
-    QK64PoolSmall := Next;
+    Self.QK64PoolSmall := Next;
   end else
   begin
     Prev.Queue.Next := Next;
@@ -7232,7 +7240,7 @@ begin
         PoolSmall.Queue.Next := NextFull;
         if (Next <> nil) then
         begin
-          PoolSmall.Queue.Prev := nil;
+          Next.Queue.Prev := nil;
           if (NextFull <> nil) then NextFull.Queue.Prev := PoolSmall;
           // Continue;
         end else
@@ -8023,13 +8031,15 @@ asm
   {$endif}
 end;
 
-// Size: 14/15
-// BrainMMFreeMem: 4/5
+// Size: 17/19
+// BrainMMFreeMem: 7/9
 function RedirectFreeMem(P: Pointer): Integer;
 asm
   {$ifdef CPUX86}
+    mov ecx, [esp]
     test eax, eax
   {$else .CPUX64}
+    mov r8, [rsp]
     test rcx, rcx
   {$endif}
   jnz BrainMMFreeMem // + 4
@@ -8128,7 +8138,7 @@ const
       Jump: @BrainMMAllocMem; JumpOffset: 4)
   );
   JUMPS_FREEMEM: array[0..0] of TJumpInfo = (
-    ( CodeOffset: {$ifdef CPUX86}4{$else .CPUX64}5{$endif};
+    ( CodeOffset: {$ifdef CPUX86}7{$else .CPUX64}9{$endif};
       Jump: @BrainMMFreeMem; JumpOffset: 4)
   );
   JUMPS_REALLOCMEM: array[0..2] of TJumpInfo = (
@@ -8152,7 +8162,7 @@ begin
     @RedirectGetMem, JUMPS_GETMEM);
   PatchRedirect(AddrAllocMem, {$ifdef CPUX86}14{$else .CPUX64}17{$endif},
     @RedirectAllocMem, JUMPS_ALLOCMEM);
-  PatchRedirect(AddrFreeMem, {$ifdef CPUX86}14{$else .CPUX64}15{$endif},
+  PatchRedirect(AddrFreeMem, {$ifdef CPUX86}17{$else .CPUX64}19{$endif},
     @RedirectFreeMem, JUMPS_FREEMEM);
   PatchRedirect(AddrReallocMem, {$ifdef CPUX86}30{$else .CPUX64}33{$endif},
     @RedirectReallocRegetMem, JUMPS_REALLOCMEM);
