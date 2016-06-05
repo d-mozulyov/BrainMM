@@ -56,6 +56,30 @@ program SpeedTest;
   {$endif}
 {$endif}
 
+{$ifdef INTELTBB}
+  {$ifdef CPUX64}
+    {$EXTENSION 'IntelTBB-64.exe'}
+  {$else}
+    {$EXTENSION 'IntelTBB-32.exe'}
+  {$endif}
+{$endif}
+
+{$ifdef TCMALLOC}
+  {$ifdef CPUX64}
+    {$EXTENSION 'TCMalloc-64.exe'}
+  {$else}
+    {$EXTENSION 'TCMalloc-32.exe'}
+  {$endif}
+{$endif}
+
+{$ifdef MSHEAP}
+  {$ifdef CPUX64}
+    {$EXTENSION 'MSHeap-64.exe'}
+  {$else}
+    {$EXTENSION 'MSHeap-32.exe'}
+  {$endif}
+{$endif}
+
 
 uses
   {$ifdef DEBUG}
@@ -77,6 +101,15 @@ uses
   {$endif}
   {$ifdef BRAINMM}
     BrainMM,
+  {$endif}
+  {$ifdef INTELTBB}
+    IntelTBB,
+  {$endif}
+  {$ifdef TCMALLOC}
+    TCMalloc,
+  {$endif}
+  {$ifdef MSHEAP}
+    MSHeap,
   {$endif}
   Vcl.Forms,
   Unit1 in 'Unit1.pas' {Form1};

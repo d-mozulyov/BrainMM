@@ -22,16 +22,13 @@ type
 
   TFooList = class
   private
-    fList: TObjectList<TFoo>;
-    fSize: integer;
     fValue: double;
   public
     constructor create;
     destructor Destroy; override;
 
-    function Execute: double;
+    function Execute(Size: integer = 3500; Capacity: integer = 7): double;
 
-    property Size: integer read fSize;
     property Value: double read fValue;
   end;
 
@@ -112,37 +109,42 @@ end;
 constructor TFooList.create;
 begin
   inherited create;
-  fSize := 3500;
-  fList := TObjectList<TFoo>.Create;
-  fList.Capacity := 7;
+
 end;
 
 destructor TFooList.destroy;
 begin
-  fList.Free;
+
   inherited;
 end;
 
-function TFooList.Execute: double;
+function TFooList.Execute(Size, Capacity: integer): double;
 var
+  List: TObjectList<TFoo>;
   aFoo: TFoo;
   i: Integer;
 begin
+  List := TObjectList<TFoo>.Create;
+  List.Capacity := Capacity;
+  try
 
-  for i := 0 to Size - 1 do
-  begin
-    aFoo := TFoo.create;
-    fList.Add(aFoo);
+    for i := 0 to Size - 1 do
+    begin
+      aFoo := TFoo.create;
+      List.Add(aFoo);
+    end;
+
+    result := 0;
+    for i := List.Count - 1 downto 0 do
+    begin
+      fValue := List[i].Value;
+      result := List[i].Value;
+      List.Delete(i);
+    end;
+
+  finally
+    List.Free;
   end;
-
-  result := 0;
-  for i := fList.Count - 1 downto 0 do
-  begin
-    fValue := fList[i].Value;
-    result := fList[i].Value;
-    fList.Delete(i);
-  end;
-
 end;
 
 { TFoo }

@@ -5,7 +5,7 @@
         <FrameworkType>VCL</FrameworkType>
         <MainSource>SpeedTest.dpr</MainSource>
         <Base>True</Base>
-        <Config Condition="'$(Config)'==''">SAPMM</Config>
+        <Config Condition="'$(Config)'==''">MSHeap</Config>
         <Platform Condition="'$(Platform)'==''">Win32</Platform>
         <TargetedPlatforms>3</TargetedPlatforms>
         <AppType>Application</AppType>
@@ -144,6 +144,31 @@
         <Cfg_2>true</Cfg_2>
         <Base>true</Base>
     </PropertyGroup>
+    <PropertyGroup Condition="'$(Config)'=='IntelTBB' or '$(Cfg_4)'!=''">
+        <Cfg_4>true</Cfg_4>
+        <CfgParent>Cfg_2</CfgParent>
+        <Cfg_2>true</Cfg_2>
+        <Base>true</Base>
+    </PropertyGroup>
+    <PropertyGroup Condition="('$(Platform)'=='Win32' and '$(Cfg_4)'=='true') or '$(Cfg_4_Win32)'!=''">
+        <Cfg_4_Win32>true</Cfg_4_Win32>
+        <CfgParent>Cfg_4</CfgParent>
+        <Cfg_4>true</Cfg_4>
+        <Cfg_2>true</Cfg_2>
+        <Base>true</Base>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(Config)'=='TCMalloc' or '$(Cfg_10)'!=''">
+        <Cfg_10>true</Cfg_10>
+        <CfgParent>Cfg_2</CfgParent>
+        <Cfg_2>true</Cfg_2>
+        <Base>true</Base>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(Config)'=='MSHeap' or '$(Cfg_11)'!=''">
+        <Cfg_11>true</Cfg_11>
+        <CfgParent>Cfg_2</CfgParent>
+        <Cfg_2>true</Cfg_2>
+        <Base>true</Base>
+    </PropertyGroup>
     <PropertyGroup Condition="'$(Base)'!=''">
         <VerInfo_Locale>1049</VerInfo_Locale>
         <Manifest_File>$(BDS)\bin\default_app.manifest</Manifest_File>
@@ -174,7 +199,7 @@
         <DCC_UsePackage>DBXSqliteDriver;dxCoreRS23;vclactnband;vclFireDAC;tethering;cxDataRS23;dxTabbedMDIRS23;FireDACADSDriver;dxSkinBlackRS23;dxSkinLondonLiquidSkyRS23;dxDBXServerModeRS23;dxHttpIndyRequestRS23;cxSchedulerRS23;vcltouch;vcldb;Intraweb;dxWizardControlRS23;dxSkinMcSkinRS23;dxSkinOffice2007BlueRS23;dxBarRS23;cxSchedulerRibbonStyleEventEditorRS23;dxSkinOffice2013WhiteRS23;VCL_FlexCel_Components;cxLibraryRS23;dxSkinVisualStudio2013LightRS23;vclib;cxPivotGridChartRS23;DropMasterVcl;dxSkinSummer2008RS23;dxGDIPlusRS23;dxSkinDarkSideRS23;dxSkinSevenRS23;dxSkinFoggyRS23;vclx;dxSkinOffice2010SilverRS23;dxdborRS23;RESTBackendComponents;dxLayoutControlRS23;VCLRESTComponents;dxSkinDevExpressStyleRS23;dxSkinWhiteprintRS23;vclie;bindengine;CloudService;FireDACMySQLDriver;AdvGridExportFilters;dxSkinOffice2013DarkGrayRS23;bindcompdbx;IndyIPServer;dxSkinPumpkinRS23;IndySystem;dsnapcon;cxTreeListdxBarPopupMenuRS23;FireDACMSAccDriver;fmxFireDAC;vclimg;dxSkinLilianRS23;tmsexdXE9;dxBarDBNavRS23;dxFlowChartRS23;dxSkinOffice2016ColorfulRS23;soaprtl;DbxCommonDriver;dxSpreadSheetRS23;xmlrtl;soapmidas;dxSkinOffice2007PinkRS23;fmxobj;dxSkinHighContrastRS23;rtl;DbxClientDriver;dxSkinDevExpressDarkStyleRS23;dxNavBarRS23;dxSkinSevenClassicRS23;dxSkinMetropolisDarkRS23;dxSkinTheAsphaltWorldRS23;dxRichEditControlRS23;appanalytics;cxPivotGridRS23;dxSkinsdxDLPainterRS23;IndyIPClient;dxRibbonRS23;bindcompvcl;dxSkinOffice2007SilverRS23;dxMapControlRS23;VclSmp;cxTreeListRS23;FireDACODBCDriver;dxRibbonCustomizationFormRS23;dxBarExtDBItemsRS23;dxSkiniMaginaryRS23;dxSpellCheckerRS23;lmdrtshell;dxSkinsdxBarPainterRS23;dxSkinCoffeeRS23;RESTComponents;DBXInterBaseDriver;dxADOServerModeRS23;lmdrtl;dxmdsRS23;dxSkinLiquidSkyRS23;dxSkinSpringTimeRS23;dxdbtrRS23;dxSkinscxPCPainterRS23;dxSkinXmas2008BlueRS23;bindcompfmx;dxSkinSilverRS23;dxSkinValentineRS23;inetdb;RaizeComponentsVcl;RaizeComponentsVclDb;dxBarExtItemsRS23;FireDACIBDriver;fmx;fmxdae;dxServerModeRS23;dxSkinOffice2010BlackRS23;cxPageControlRS23;dxSkinStardustRS23;cxSchedulerGridRS23;dbexpress;IndyCore;OnGuardDR;dxSkinSharpPlusRS23;dsnap;lmdrtrtlx;FireDACCommon;dxSkinOffice2010BlueRS23;dxSkinVS2010RS23;dxSkinMetropolisRS23;cxVerticalGridRS23;soapserver;dxSkinCaramelRS23;dxTileControlRS23;cxGridRS23;DBXMySQLDriver;FireDACCommonDriver;inet;IndyIPCommon;dxSkinDarkRoomRS23;dxDockingRS23;vcl;dxSkinOffice2007GreenRS23;dxSkinsCoreRS23;dxThemeRS23;dxSkinsdxRibbonPainterRS23;dxSkinVisualStudio2013BlueRS23;dxSkinMoneyTwinsRS23;dxtrmdRS23;cxSchedulerTreeBrowserRS23;FireDAC;dxFireDACServerModeRS23;dxSkinBlueRS23;FireDACSqliteDriver;FireDACPgDriver;ibmonitor;FireDACASADriver;cxEditorsRS23;dxSkinGlassOceansRS23;dxSkinsdxNavBarPainterRS23;dxGaugeControlRS23;ibxpress;dxSkinSharpRS23;cxPivotGridOLAPRS23;ibxbindings;vclwinx;dxSkinBlueprintRS23;dxSkinOffice2007BlackRS23;CustomIPTransport;vcldsnap;DOSCommandDR;dxSkinOffice2013LightGrayRS23;bindcomp;dxorgcRS23;vclribbon;dbxcds;VCL_FlexCel_Core;adortl;dxComnRS23;dsnapxml;dbrtl;inetdbxpress;IndyProtocols;cxExportRS23;dxSkinOffice2016DarkRS23;dxSkinVisualStudio2013DarkRS23;dxSkinscxSchedulerPainterRS23;tmsdXE9;fmxase;$(DCC_UsePackage)</DCC_UsePackage>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1)'!=''">
-        <DCC_UnitSearchPath>..\..\sources\;..\lib\FastMM\;..\lib\ScaleMM2\;..\lib\SAPMM\;..\lib\NexusDB\;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+        <DCC_UnitSearchPath>..\..\sources\;..\lib\FastMM\;..\lib\ScaleMM2\;..\lib\SAPMM\;..\lib\NexusDB\;..\lib\IntelTBB;..\lib\TCMalloc;..\lib\MSHeap;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <DCC_Define>DEBUG;$(DCC_Define)</DCC_Define>
         <DCC_DebugDCUs>true</DCC_DebugDCUs>
         <DCC_Optimize>false</DCC_Optimize>
@@ -268,6 +293,22 @@
         <VerInfo_Locale>1033</VerInfo_Locale>
         <AppEnableRuntimeThemes>true</AppEnableRuntimeThemes>
     </PropertyGroup>
+    <PropertyGroup Condition="'$(Cfg_4)'!=''">
+        <DCC_Define>INTELTBB;$(DCC_Define)</DCC_Define>
+        <DCC_UnitSearchPath>..\lib\IntelTBB\;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(Cfg_4_Win32)'!=''">
+        <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
+        <VerInfo_Locale>1033</VerInfo_Locale>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(Cfg_10)'!=''">
+        <DCC_Define>TCMALLOC;$(DCC_Define)</DCC_Define>
+        <DCC_UnitSearchPath>..\lib\TCMalloc\;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(Cfg_11)'!=''">
+        <DCC_Define>MSHEAP;$(DCC_Define)</DCC_Define>
+        <DCC_UnitSearchPath>..\lib\MSHeap\;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    </PropertyGroup>
     <ItemGroup>
         <DelphiCompile Include="$(MainSource)">
             <MainSource>MainSource</MainSource>
@@ -275,8 +316,16 @@
         <DCCReference Include="Unit1.pas">
             <Form>Form1</Form>
         </DCCReference>
+        <BuildConfiguration Include="IntelTBB">
+            <Key>Cfg_4</Key>
+            <CfgParent>Cfg_2</CfgParent>
+        </BuildConfiguration>
         <BuildConfiguration Include="ScaleMM2">
             <Key>Cfg_5</Key>
+            <CfgParent>Cfg_2</CfgParent>
+        </BuildConfiguration>
+        <BuildConfiguration Include="TCMalloc">
+            <Key>Cfg_10</Key>
             <CfgParent>Cfg_2</CfgParent>
         </BuildConfiguration>
         <BuildConfiguration Include="SAPMM">
@@ -297,6 +346,10 @@
         <BuildConfiguration Include="Release">
             <Key>Cfg_2</Key>
             <CfgParent>Base</CfgParent>
+        </BuildConfiguration>
+        <BuildConfiguration Include="MSHeap">
+            <Key>Cfg_11</Key>
+            <CfgParent>Cfg_2</CfgParent>
         </BuildConfiguration>
         <BuildConfiguration Include="FastMM">
             <Key>Cfg_3</Key>
@@ -768,8 +821,8 @@
                 <ProjectRoot Platform="Win32" Name="$(PROJECTNAME)"/>
                 <ProjectRoot Platform="iOSDevice64" Name="$(PROJECTNAME).app"/>
                 <ProjectRoot Platform="OSX32" Name="$(PROJECTNAME).app"/>
-                <ProjectRoot Platform="Win64" Name="$(PROJECTNAME)"/>
                 <ProjectRoot Platform="iOSSimulator" Name="$(PROJECTNAME).app"/>
+                <ProjectRoot Platform="Win64" Name="$(PROJECTNAME)"/>
             </Deployment>
             <Platforms>
                 <Platform value="Win32">True</Platform>
