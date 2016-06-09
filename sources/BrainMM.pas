@@ -124,7 +124,7 @@ interface
   uses {$ifdef CONDITIONALEXPRESSIONS}
          {$ifdef UNITSCOPENAMES}System.Types{$else}Types{$endif},
          {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif}{$endif}
-         {$ifdef POSIX}Posix.String_, Posix.SysStat, Posix.Unistd{$endif};
+         {$ifdef POSIX}Posix.Base, Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread{$endif};
        {$else}
          Windows;
        {$endif}
@@ -273,6 +273,7 @@ const
   MASK_K64_TEST = SIZE_K64 - 1;
 
   B16_PER_PAGE = SIZE_K4 div SIZE_16;
+  B16_PER_PAGE_SHIFT = 12 - 4;
 
   MAX_SMALL_SIZE = 128;
   MAX_SMALL_B16COUNT = MAX_SMALL_SIZE div 16;
@@ -284,7 +285,10 @@ const
   PAGESMODE_USER = 0;
   PAGESMODE_SYSTEM = 1;
   PAGESMODE_JIT = 2;
-  PAGESMODE_CORE = 3;
+
+  THREAD_HEAP_LOCKABLE = 2;
+  THREAD_HEAP_LOCKED_BIT = 1;
+  THREAD_HEAP_LOCKED = THREAD_HEAP_LOCKABLE or THREAD_HEAP_LOCKED_BIT;
 
   PTR_INVALID = Pointer(1);
   FREEMEM_INVALID = Integer({$ifdef FPC}0{$else}-1{$endif});
@@ -300,22 +304,45 @@ const
   MASK_HIGH_NATIVE_TEST = NativeInt(-1) shr 1;
 
   DEFAULT_BITSETS_SMALL: array[0..15] of Int64 = (
-    {16}   Int64($FFFFFFFFFFFFFFFE),
-    {32}   $5555555555555554,
-    {48}   $2492492492492492,
-    {64}   $1111111111111110,
-    {80}   $0842108421084210,
-    {96}   $0410410410410410,
-    {112}  $0204081020408102,
-    {128}  $0101010101010100,
-    {16-}  Int64($FFFFFFFFFFFFFFF8),
-    {32-}  $5555555555555550,
-    {48-}  $2492492492492490,
-    {64-}  $1111111111111110,
-    {80-}  $0842108421084210,
-    {96-}  $0410410410410410,
-    {112-} $0204081020408100,
-    {128-} $0101010101010100
+    {16}   Int64($FFFFFFFFFFFFFFFC),
+          {32}   $5555555555555554,
+          {48}   $2492492492492490,
+          {64}   $1111111111111110,
+          {80}   $0842108421084210,
+          {96}   $0410410410410410,
+          {112}  $0204081020408100,
+          {128}  $0101010101010100,
+    {16-}  Int64($FFFFFFFFFFFFFFF0),
+          {32-}  $5555555555555550,
+          {48-}  $2492492492492490,
+          {64-}  $1111111111111110,
+          {80-}  $0842108421084210,
+          {96-}  $0410410410410410,
+          {112-} $0204081020408100,
+          {128-} $0101010101010100
+  );
+
+  FIRST_BITSETS_SMALL: array[0..15] of Cardinal = (
+  (*
+      BitMask: Word;
+      PtrOffset: Word(Byte);
+  *)
+      $00200004,
+      $00200004,
+      $00400010,
+      $00400010,
+      $00400010,
+      $00400010,
+      $00800100,
+      $00800100,
+      $00400010,
+      $00400010,
+      $00400010,
+      $00400010,
+      $00400010,
+      $00400010,
+      $00800100,
+      $00800100
   );
 
   OFFSET_MEDIUM_ALIGN = 16;
@@ -348,46 +375,47 @@ type
   B16 = array[0..15] of Byte;
   P16 = ^B16;
 
-  TSupposedPrevNext = packed record
-    (* 1024-aligned pointers *)
-    Prev: SupposedPtr;
-    Next: SupposedPtr;
+  TQueuePrevNext = packed record
+    Prev: Pointer;
+    Next: Pointer;
+    {$ifdef SMALLINT}_Padding: array[0..1] of Cardinal;{$endif}
   end;
-  PSupposedPrevNext = ^TSupposedPrevNext;
+  PQueuePrevNext = ^TQueuePrevNext;
+
+  TK1LineSmallHeader = packed record
+    ItemSet: TBitSet8;
+    (*
+       FullQueue: Boolean:1;
+       Reserved: Boolean:1;
+    *)
+    case Integer of
+      0: (_Padding: Int64; Queue: TQueuePrevNext);
+      1: (ModeSize{+0..15}: Byte; Reserved: Word; {FirstLine}InQK64PoolSmallFull: Boolean);
+      2: (Flags: NativeUInt);
+      (*
+         Index: 0..15:3+1{FirstLine};
+         ModeSizeBits: Byte:4;
+         Reserved: Word;
+         InQK64PoolSmallFull: Boolean;
+      *)
+  end;
+  PK1LineSmallHeader = ^TK1LineSmallHeader;
 
   TK1LineSmall = packed record
   case Integer of
-    0: (
-         ItemSet: TBitSet8;
-         (*
-            FullQueue: Boolean:1;
-         *)
-         case Integer of
-           0: (Next: SupposedPtr);
-           1: (ModeSize{+0..15}: Byte);
-           2: (Flags: NativeUInt{:10});
-           (*
-              Index: 0..15:3+1{FirstLine};
-              ModeSizeBits: Byte:4;
-           *)
-       );
-    1: (FullPrevNext: TSupposedPrevNext);
-    2: (Items: array[0{1}..63] of B16);
+    0: (Header: TK1LineSmallHeader);
+    1: (Items: array[0{2}..63] of B16);
   end;
   PK1LineSmall = ^TK1LineSmall;
 
   TK64PoolSmall = packed record
   case Boolean of
     True: (
-             _: B16;
+             Header: TK1LineSmallHeader;
              ThreadHeap: PThreadHeap;
              {$ifdef SMALLINT}_Padding1: Cardinal;{$endif}
              LineSet: TBitSet8;
-             PrevNext: TSupposedPrevNext;
-             (*
-                FullQueue: Boolean:1;
-             *)
-             {$ifdef SMALLINT}_Padding2: array[0..1] of Cardinal;{$endif}
+             Queue: TQueuePrevNext;
           );
    False: (Lines: array[0..63] of TK1LineSmall);
   end;
@@ -417,17 +445,16 @@ type
   PHeaderMediumList = ^THeaderMediumList;
 
   TK64PoolMedium = packed record
-    PrevNext: TSupposedPrevNext;
-    {$ifdef SMALLINT}_Padding1: array[0..1] of Cardinal;{$endif}
-    MarkerNil: Pointer;
-    {$ifdef SMALLINT}_Padding2: Cardinal;{$endif}
-    ThreadHeap: PThreadHeap;
-    {$ifdef SMALLINT}_Padding3: Cardinal;{$endif}
     Empties: packed record
       First: THeaderMediumEmpty;
       Last: THeaderMediumEmpty;
     end;
-    Reserved: B16;
+    MarkerNil: Pointer;
+    {$ifdef SMALLINT}_Padding2: Cardinal;{$endif}
+    ThreadHeap: PThreadHeap;
+    {$ifdef SMALLINT}_Padding3: Cardinal;{$endif}
+    Queue: TQueuePrevNext;
+    FakeAllocated: THeaderMedium;
     Items: {Start + }THeaderMediumList;
     Finish: THeaderMedium;
   end;
@@ -470,7 +497,6 @@ type
     FK1LineSmalls: array[1..8] of PK1LineSmall;
     FMarkerNotSelf: SupposedPtr;
 
-    function GetPagesMode: NativeUInt;
   public
     // 1kb-lines (small) + 64kb pool (small) routine
     QK1LineFull: PK1LineSmall;
@@ -479,11 +505,8 @@ type
 
     function NewK64PoolSmall: PK64PoolSmall;
     function DisposeK64PoolSmall(PoolSmall: PK64PoolSmall): Integer;
-    function NewK1LineSmall(B16Count: NativeUInt): PK1LineSmall;
+    function GetNewK1LineSmall(B16Count: NativeUInt): Pointer;
     function DisposeK1LineSmall(Line: PK1LineSmall): Integer;
-
-    function PenaltyGetSmall(B16Count: NativeUInt): Pointer;
-    function PenaltyFreeSmall(P: Pointer): Integer;
     {$ifNdef PUREPASCAL}function PenaltyGrowSmallToSmall(P: Pointer; Dest: Pointer): Pointer;{$endif}
   public
     // 64kb pool (medium) routine
@@ -508,7 +531,9 @@ type
     function RaiseInvalidPtr: Integer;
   public
     // thread deffered (free) memory pieces: small or medium
-    Deferreds: TSyncStack64;
+    Deferreds: TSyncStack;
+    LockFlags: SupposedPtr;
+    _Padding: array[1..64 - SizeOf(TSyncStack) - SizeOf(SupposedPtr)] of Byte;
 
     procedure PushThreadDeferred(P: Pointer; ReturnAddress: Pointer; IsSmall: Boolean);
     procedure ProcessThreadDeferred;
@@ -526,12 +551,6 @@ type
     function RegetMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
     function ReallocMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
 
-    // big (4kb aligned) or large (64kb aligned) routine
-    function GetBigOrLarge(B16Count: NativeUInt): Pointer;
-    function FreeBigOrLarge(P: Pointer): Integer;
-    function RegetBigOrLarge(P: Pointer; NewB16Count: NativeUInt): Pointer;
-    function ReallocBigOrLarge(P: Pointer; NewB16Count: NativeUInt): Pointer;
-
     // difficult routine
     function FreeDifficult(P: Pointer; ReturnAddress: Pointer): Integer;
     function RegetDifficult(P: Pointer; NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
@@ -546,6 +565,13 @@ type
   case Integer of
     0: (
         BrainMM: packed record
+          {$ifdef MSWINDOWS}
+          ThreadFuncEvent: function(ThreadFunc: TThreadFunc; Parameter: Pointer): Pointer;
+          {$else .POSIX}
+          ThreadFuncEvent: function(Attribute: PThreadAttr; ThreadFunc: TThreadFunc; Parameter: Pointer; var ThreadId: NativeUInt): Integer;
+          {$endif}
+          EndThreadEvent: procedure(ExitCode: Integer);
+
           GetMemoryBlock: function(BlockSize: TMemoryBlockSize; PagesMode: NativeUInt): MemoryBlock;
           FreeMemoryBlock: function(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
           GetMemoryPages: function(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
@@ -566,37 +592,65 @@ type
           Reserved: array[1..4] of Pointer;
         end;
        );
-    1: (POINTERS: array[1..22] of Pointer);
+    1: (POINTERS: array[1..24] of Pointer);
   end;
 
   TK4Page = array[0..4 * 1024 - 1] of Byte;
   PK4Page = TK4Page;
 
-  PK4PagesOptions = ^TK4PagesOptions;
-  TK4PagesOptions = packed record
-    Next: PK4PagesOptions;
-    Items: PK4Page;
-    Count: NativeUInt;
-    PagesMode: Byte;
-    BlockSize: TMemoryBlockSize{4kb default};
-    _Padding: array[3..SizeOf(NativeUInt)] of Byte;
+  PInternalRecord = ^TInternalRecord;
+  TInternalRecord = packed record
+    Next: PInternalRecord;
+    case Integer of
+      0: (SupposedStart: SupposedPtr;
+          (*
+             PagesMode: Byte:2;
+             IsBlock: Boolean:1;
+             IsLarge: Boolean:1;
+             Reserved: Byte:8;
+             Pages: Pointer:High(Pointer)-12;
+          *)
+          PagesCount: NativeUInt;
+          case Integer of
+            // Big
+            0: (BigPool: PInternalRecord);
+            // Large
+            1: (LastPart: PInternalRecord);
+            // Block
+            // todo
+          );
+    // 1: BigPool
+      2: (ThreadHeap: PThreadHeap);
   end;
+
+  TPagesHashItem = packed record
+    Spin: SupposedPtr;
+    List: PInternalRecord;
+  end;
+  PPagesHashItem = ^TPagesHashItem;
 
   // 64 bytes aligned global storage
   TGlobalStorage = packed record
-    // ToDo PagesHash: array[0..1023] of SupposedPtr{PK4PagesOptions};
+    PagesHash: array[0..1023] of TPagesHashItem;
+
+    CoreThreadHeaps: TSyncStack64;
+    CoreInternalRecords: TSyncStack64;
+    DeferredThreadHeaps: TSyncStack64;
+
     K64BlockCache: packed record
       Stack: TSyncStack;
       Count: NativeUInt;
       _Padding: array[1..64 - SizeOf(TSyncStack) - SizeOf(NativeUInt)] of Byte;
     end;
-    CoreThreadHeaps: TSyncStack64;
   end;
   PGlobalStorage = ^TGlobalStorage;
 
 
 var
   MemoryManager: TBrainMemoryManager;
+
+  UnknownThreadHeap: PThreadHeap;
+  MainThreadHeap: PThreadHeap;
   ThreadHeapList: PThreadHeap;
   GLOBAL_STORAGE: array[0..SizeOf(TGlobalStorage) + 63] of Byte;
 
@@ -805,18 +859,6 @@ end;
 
 {$ifdef POSIX}
 const
-  {$ifdef ANDROID}
-    libc = '/system/lib/libc.so';
-  {$else}
-    {$MESSAGE ERROR 'ToDo'}
-  {$endif}
-
-  {$IFDEF UNDERSCOREIMPORTNAME}
-    _PU = '_';
-  {$ELSE}
-    _PU = '';
-  {$ENDIF}
-
   PROT_READ       = $1;         { Page can be read.  }
   PROT_WRITE      = $2;         { Page can be written.  }
   PROT_EXEC       = $4;         { Page can be executed.  }
@@ -844,10 +886,6 @@ procedure free(P: Pointer); cdecl;
 function mmap(address: Pointer; length: NativeUInt; protect, flags, filedes: Integer;
   offset: NativeUInt): Pointer; cdecl;
   external libc name _PU + 'mmap';
-
-function mmap64(address: Pointer; length: NativeUInt; protect, flags, filedes: Integer;
-  offset: UInt64): Pointer; cdecl;
-  external libc name _PU + 'mmap64';
 
 function munmap(address: Pointer; length: NativeUInt): Integer; cdecl;
   external libc name _PU + 'munmap';
@@ -946,6 +984,8 @@ begin
       if (Count > 0) then
       begin
         {$ifdef MSWINDOWS}
+          //If we're (done) manipulating executable pages, make sure to Flush the cache so self-modifing code does not mess up.
+          if ((Rights and $4) > 0) then FlushInstructionCache(GetCurrentProcess, Pages, SIZE_K4 * Count);
           if (not VirtualProtect(Pages, SIZE_K4 * Count, ACCESS_RIGHTS[Byte(Rights)], Protect)) then
             {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
         {$else .POSIX}
@@ -1019,7 +1059,7 @@ begin
   repeat
     Result := Spin;
     if (Result and Mask = 0) then Exit;
-    
+
     K := (K + 1) and 7;
     case (K) of
    3..5: ThreadSwitch;
@@ -1031,7 +1071,7 @@ begin
   until (False);
 end;
 
-procedure SpinLock(var Spin: SupposedPtr);
+(* procedure SpinLock(var Spin: SupposedPtr);
 begin
   repeat
     // wait locked
@@ -1044,7 +1084,7 @@ end;
 procedure SpinUnlock(var Spin: SupposedPtr);
 begin
   Spin := 0;
-end;
+end; *)
 
 const
   SPINEX_LOCK_INCREMENT = 1 shl 16;
@@ -1083,7 +1123,7 @@ begin
   AtomicIncrement(NativeInt(SpinEx), -SPINEX_LOCK_INCREMENT);
 end;
 
-procedure SpinExEnter{Readonly}(var SpinEx: SupposedPtr);
+procedure SpinExReadEnter{Readonly}(var SpinEx: SupposedPtr);
 var
   Item: SupposedPtr;
 begin
@@ -1106,7 +1146,7 @@ begin
   until (False);
 end;
 
-procedure SpinExLeave{Readonly}(var SpinEx: SupposedPtr);
+procedure SpinExReadLeave{Readonly}(var SpinEx: SupposedPtr);
 begin
   AtomicIncrement(NativeInt(SpinEx), -1);
 end;
@@ -1142,7 +1182,8 @@ asm
     lea edx, [edx + ecx * 2]
     neg ecx
   {$else .CPUX64}
-    lea r8, [r8 * 8]
+    //lea r8, [r8 * 8]  //2 cycles
+    shl r8, 3  //1 cycle
     lea rax, [rcx + r8 * 2]
     lea rdx, [rdx + r8 * 2]
     xor rcx, rcx
@@ -1166,13 +1207,12 @@ asm
     cmp rcx, -COUNT_8
     jle @move_128
 
+    lea r9, @done            //Atom does not do OoO.
     lea rax, [rax + rcx * 2]
     lea rdx, [rdx + rcx * 2]
-    lea r9, @done
     lea r9, [r9 + rcx]
     jmp r9
-    nop
-    nop
+    db $66,$90
   @move_128:
     lea rax, [rax - 128]
     lea rdx, [rdx - 128]
@@ -1194,10 +1234,8 @@ asm
     DB $0F, $29, $52, $20 // movaps [edx + 2*16], xmm2
     DB $0F, $28, $48, $10 // movaps xmm1, [eax + 1*16]
     DB $0F, $29, $4A, $10 // movaps [edx + 1*16], xmm1
-    DB $0F, $28, $00      // movaps xmm0, [eax]
-    DB $90                // nop
-    DB $0F, $29, $02      // movaps [edx], xmm0
-    DB $90                // nop
+    DB $F3, $0F, $28, $00 // rep movaps xmm0, [eax]
+    DB $F3, $0F, $29, $02 // rep movaps [edx], xmm0
   {$else .CPUX64}
     movaps xmm7, [rax + 7*16]
     movaps [rdx + 7*16], xmm7
@@ -1213,14 +1251,12 @@ asm
     movaps [rdx + 2*16], xmm2
     movaps xmm1, [rax + 1*16]
     movaps [rdx + 1*16], xmm1
-    movaps xmm0, [rax]
-    nop
-    movaps [rdx], xmm0
-    nop
+    rep movaps xmm0, [rax]     //reduce pressure on decoding unit.
+    rep movaps [rdx], xmm0     //might speed up the jump.
   {$endif}
 @done:
   jl @move_next_16128
-  ret
+  rep ret
 
   {$ifdef CPUX86}
   @x86_non_SSE:
@@ -1275,6 +1311,7 @@ asm
   jmp BackwardSSEMove
 
 @none:
+  rep ret //never jump to a naked ret, that costs 25! cycles on AMD due to forced misprediction
 end;
 {$endif}
 
@@ -1369,7 +1406,7 @@ asm
   {$endif}
 @done:
   ja @move_next_16128
-  ret
+  rep ret
 
   {$ifdef CPUX86}
   @x86_non_SSE:
@@ -1410,13 +1447,15 @@ asm
     lea ecx, [ecx + @done]
     jmp ecx
   {$else .CPUX64}
-    lea rcx, [rcx * 8]
+    //lea rcx, [rcx * 8]  //2 cycles
+    shl rcx, 3  //1 cycle
+    lea r9, @done
     lea rax, [rax + rcx * 2]
     lea rdx, [rdx + rcx * 2]
-    lea r9, @done
+    sub r9, rcx
     neg rcx
-    lea r9, [r9 + rcx]
     jmp r9
+    nop
     nop
   {$endif}
 
@@ -1459,23 +1498,22 @@ asm
   {$ifdef CPUX86}
     sub ecx, offset @done
     lea eax, [edx + ecx * 2]
+    ret
   {$else .CPUX64}
     lea rax, [rdx + rcx * 2]
   {$endif}
-  ret
 
   {$ifdef CPUX86}
-  @x86_non_SSE:
-  push eax
+@x86_non_SSE:
+    push eax
     shl ecx, 4
     call Move
-  pop eax
+    pop eax
   {$endif}
 end;
 {$endif}
 
 
-{$ifdef PUREPASCAL}
 const
   BIT_SCANS: array[Byte] of Byte = ({failure}8, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0,
     2, 0, 1, 0, 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 5, 0, 1, 0, 2,
@@ -1489,7 +1527,6 @@ const
     2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2,
     0, 1, 0, 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
   );
-{$endif}
 
 function BitScan(var BitSet: TBitSet8): NativeInt;
 {$ifdef PUREPASCAL}
@@ -1516,12 +1553,12 @@ asm
     sub ecx, eax
     and ecx, 32
     or eax, -1
-    bsf eax, edx
+    rep bsf eax, edx
     or eax, ecx
   {$else .CPUX64}
     mov rdx, [rcx]
     or rax, -1
-    bsf rax, rdx
+    rep bsf rax, rdx   //tzcnt takes 2 cycles, bsf takes 7
   {$endif}
 end;
 {$endif}
@@ -1560,7 +1597,7 @@ asm
     lea ecx, [ecx - 4]
     mov edx, [eax]
     push ecx
-    bsf ecx, edx
+    rep bsf ecx, edx
     jz @failure
     btr edx, ecx
     mov [eax], edx
@@ -1570,7 +1607,7 @@ asm
     lea eax, [edx + ecx]
   {$else .CPUX64}
     mov rdx, [rcx]
-    bsf rax, rdx
+    rep bsf rax, rdx
     jz @failure
     btr rdx, rax
     mov [rcx], rdx
@@ -1641,63 +1678,11 @@ end;
 {$endif}
 
 
-procedure SupposedEnqueue(var Queue: Pointer; const Owner: Pointer;
-  var Item: TSupposedPrevNext);
-var
-  OFFSET: NativeUInt;
-  Next: Pointer;
-  Right: PSupposedPrevNext;
-begin
-  OFFSET := NativeUInt(@Item) - NativeUInt(Owner);
-  Next := Queue;
-  Right := PSupposedPrevNext(NativeUInt(Next) + OFFSET);
-
-  Queue := Owner;
-  Item.Prev := {nil} Item.Prev and MASK_K1_TEST;
-  Item.Next := NativeUInt(Next) + (Item.Next and MASK_K1_TEST);
-
-  if (Next <> nil) then
-  begin
-    Right.Prev := NativeUInt(Owner) + (Right.Prev and MASK_K1_TEST);
-  end;
-end;
-
-procedure SupposedDequeue(var Queue: Pointer; const Owner: Pointer;
-  var Item: TSupposedPrevNext);
-var
-  OFFSET: NativeUInt;
-  Prev, Next: Pointer;
-  Left, Right: PSupposedPrevNext;
-begin
-  OFFSET := NativeUInt(@Item) - NativeUInt(Owner);
-  Prev := Pointer(Item.Prev and MASK_K1_CLEAR);
-  Next := Pointer(Item.Next and MASK_K1_CLEAR);
-  Left := PSupposedPrevNext(NativeUInt(Prev) + OFFSET);
-  Right := PSupposedPrevNext(NativeUInt(Next) + OFFSET);
-
-  if (Prev = nil) then
-  begin
-    // first
-    Queue := Next;
-  end else
-  begin
-    // break left contact
-    Left.Next := NativeUInt(Next) + (Left.Next and MASK_K1_TEST);
-  end;
-
-  // break right contact
-  if (Next <> nil) then
-  begin
-    Right.Prev := NativeUInt(Prev) + (Right.Prev and MASK_K1_TEST);
-  end;
-end;
-
-
 { TSyncStack }
 
 {$ifdef CPUX64}
 const
-  X64_SYNCSTACK_MASK = ((1 shl 48) - 1) and -16;
+  X64_SYNCSTACK_MASK = ((NativeUInt(1) shl 48) - 1) and -16;
   X64_SYNCSTACK_CLEAR = not X64_SYNCSTACK_MASK;
 {$endif}
 
@@ -1705,7 +1690,7 @@ const
 function TSyncStack.GetAssigned: Boolean;
 begin
   {$ifdef CPUINTEL}
-    Result := (F.Handle and X64_SYNCSTACK_MASK <> 0);
+    Result := (F.Handle and (((NativeUInt(1) shl 48) - 1) and -16){X64_SYNCSTACK_MASK} <> 0);
   {$else .CPUARM64}
     Result := (F.Handle <> 0);
   {$endif}
@@ -1731,8 +1716,8 @@ var
 begin
   repeat
     Item := F.Handle;
-    PSupposedPtr(Last)^ := Item {$ifdef CPUARM64}and X64_SYNCSTACK_MASK{$endif};
-    NewItem := SupposedPtr(First) {$ifdef CPUARM64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    PSupposedPtr(Last)^ := Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif};
+    NewItem := SupposedPtr(First) {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
 {$else .CPUX86}
@@ -1780,10 +1765,10 @@ var
 begin
   repeat
     Item := F.Handle;
-    Result := Pointer(Item {$ifdef CPUARM64}and X64_SYNCSTACK_MASK{$endif});
+    Result := Pointer(Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif});
     if (Result = nil) then Exit;
 
-    NewItem := PSupposedPtr(Result)^ {$ifdef CPUARM64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    NewItem := PSupposedPtr(Result)^ {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
 {$else .CPUX86}
@@ -1826,10 +1811,10 @@ var
 begin
   repeat
     Item := F.Handle;
-    Result := Pointer(Item {$ifdef CPUARM64}and X64_SYNCSTACK_MASK{$endif});
+    Result := Pointer(Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif});
     if (Result = nil) then Exit;
 
-    NewItem := {nil}0 {$ifdef CPUARM64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    NewItem := {nil}0 {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
 {$else .CPUX86}
@@ -1866,6 +1851,489 @@ end;
 {$endif}
 
 
+ (* Global storage routine *)
+
+function GrowCoreThreadHeaps(Storage: PGlobalStorage): PThreadHeap;
+type
+  TCoreThreadHeapList = array[0..SIZE_K64 div SizeOf(TThreadHeap) - 1] of TThreadHeap;
+  PCoreThreadHeapList = ^TCoreThreadHeapList;
+var
+  i: Integer;
+  CoreThreadHeapList: PCoreThreadHeapList;
+begin
+  {$ifdef MSWINDOWS}
+    CoreThreadHeapList := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT or MEM_TOP_DOWN, PAGE_READWRITE);
+  {$else .POSIX}
+    CoreThreadHeapList := memalign(SIZE_K64, SIZE_K64);
+  {$endif}
+  if (CoreThreadHeapList = nil) then
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+
+  for i := 1 to High(TCoreThreadHeapList) - 1 do
+    CoreThreadHeapList[i].FNextHeap := @CoreThreadHeapList[i + 1];
+
+  Storage.CoreThreadHeaps.PushList(@CoreThreadHeapList[1],
+    @CoreThreadHeapList[High(TCoreThreadHeapList)]);
+
+  Result := @CoreThreadHeapList[0];
+end;
+
+function GrowCoreInternalRecords(Storage: PGlobalStorage): PInternalRecord;
+type
+  TCoreInternalRecordList = array[0..SizeOf(TThreadHeap) div SizeOf(TInternalRecord) - 1] of TInternalRecord;
+  PCoreInternalRecordList = ^TCoreInternalRecordList;
+var
+  i: Integer;
+  CoreInternalRecordList: PCoreInternalRecordList;
+begin
+  CoreInternalRecordList := Storage.CoreThreadHeaps.Pop;
+  if (CoreInternalRecordList = nil) then
+  begin
+    CoreInternalRecordList := Pointer(GrowCoreThreadHeaps(Storage));
+  end;
+
+  for i := 1 to High(TCoreInternalRecordList) - 1 do
+    CoreInternalRecordList[i].Next := @CoreInternalRecordList[i + 1];
+
+  Storage.CoreInternalRecords.PushList(@CoreInternalRecordList[1],
+    @CoreInternalRecordList[High(TCoreInternalRecordList)]);
+
+  Result := @CoreInternalRecordList[0];
+end;
+
+function CoreInternalRecordPop: PInternalRecord;
+var
+  GlobalStorage: PGlobalStorage;
+begin
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+
+  Result := GlobalStorage.CoreInternalRecords.Pop;
+  if (Result = nil) then
+    Result := GrowCoreInternalRecords(GlobalStorage);
+end;
+
+procedure CoreInternalRecordPush(const InternalRecord: PInternalRecord);
+var
+  GlobalStorage: PGlobalStorage;
+begin
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  GlobalStorage.CoreInternalRecords.Push(InternalRecord);
+end;
+
+
+ (* Local thread heap initialization *)
+
+{$ifdef PUREPASCAL}
+threadvar
+  ThreadHeapInstance: PThreadHeap;
+{$endif}
+
+function CreateThreadHeap(Store: Boolean): PThreadHeap;
+var
+  GlobalStorage: PGlobalStorage;
+  InternalRecord: PInternalRecord;
+  Flags: SupposedPtr;
+  NextHeap: PThreadHeap;
+begin
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+
+  InternalRecord := GlobalStorage.DeferredThreadHeaps.Pop;
+  if (InternalRecord <> nil) then
+  begin
+    Result := InternalRecord.ThreadHeap;
+
+    // make unlokable
+    repeat
+      Flags := Result.LockFlags;
+      if (Flags <> THREAD_HEAP_LOCKABLE) then
+      begin
+        if (Flags = THREAD_HEAP_LOCKED) then
+        begin
+          SpinWait(Result.LockFlags, THREAD_HEAP_LOCKED_BIT);
+        end else
+        begin
+          {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+        end;
+      end;
+    until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(Result.LockFlags, 0, THREAD_HEAP_LOCKABLE));
+
+    // deferred
+    Result.ProcessThreadDeferred;
+
+    {$ifdef PUREPASCAL}
+    if (Store) then
+      ThreadHeapInstance := Result;
+    {$endif}
+
+    GlobalStorage.CoreInternalRecords.Push(InternalRecord);
+    Exit;
+  end;
+
+  Result := GlobalStorage.CoreThreadHeaps.Pop;
+  if (Result = nil) then
+  begin
+    Result := GrowCoreThreadHeaps(GlobalStorage);
+  end;
+
+  FillChar(Result^, SizeOf(TThreadHeap), #0);
+  Result.FMarkerNotSelf := not SupposedPtr(Result);
+
+  repeat
+    NextHeap := ThreadHeapList;
+    Result.FNextHeap := NextHeap;
+  until (SupposedPtr(NextHeap) = AtomicCmpExchange(SupposedPtr(ThreadHeapList),
+    SupposedPtr(Result), SupposedPtr(NextHeap)));
+
+  {$ifdef PUREPASCAL}
+  if (Store) then
+    ThreadHeapInstance := Result;
+  {$endif}
+
+  // hints off
+  Result.FReserved := nil;
+end;
+
+{$ifNdef PUREPASCAL}
+const
+  THREAD_HEAP = {$ifdef CPUX86}$14{$else}$28{$endif};
+
+function ThreadHeapInstance: PThreadHeap;
+asm
+  // Get
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+    test eax, eax
+  {$else .CPUX64}
+    mov rax, gs:[abs THREAD_HEAP]
+    test rax, rax
+  {$endif}
+  jz @create_thread_heap
+  rep ret
+
+@create_thread_heap:
+  {$ifdef CPUX86}
+    xor eax, eax
+    call CreateThreadHeap
+  {$else .CPUX64}
+    {stack align} push rcx
+    xor rcx, rcx
+    call CreateThreadHeap
+    {stack align} pop rcx
+  {$endif}
+
+  // Set
+  {$ifdef CPUX86}
+    mov fs:[THREAD_HEAP], eax
+  {$else .CPUX64}
+    mov gs:[abs THREAD_HEAP], rax
+  {$endif}
+end;
+
+function SafeProcessThreadDeferred(Self: PThreadHeap
+  {, v2, v3, ReturnAddress, x64_v5: Pointer}): PThreadHeap;
+asm
+  {$ifdef CPUX86}
+  push eax
+    push edx
+    push ecx
+      call TThreadHeap.ProcessThreadDeferred
+    pop ecx
+    pop edx
+  pop eax
+  jmp ebx
+  {$else .CPUX64}
+  push rcx
+  push r9
+    push rdx
+    push r8
+    push r10
+      call TThreadHeap.ProcessThreadDeferred
+    pop r10
+    pop r8
+    pop rdx
+  pop r9
+  pop rcx
+  jmp r9
+  {$endif}
+end;
+{$endif}
+
+function CurrentThreadHeap: PThreadHeap;
+{$ifdef PUREPASCAL}
+begin
+  Result := ThreadHeapInstance;
+  if (Result = nil) then
+    Result := UnknownThreadHeap;
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+    mov edx, UnknownThreadHeap
+    test eax, eax
+    DB $0F, $44, $C2 // cmovz eax, edx
+  {$else .CPUX64}
+    mov rax, gs:[abs THREAD_HEAP]
+    mov rdx, UnknownThreadHeap
+    test rax, rax
+    cmovz rax, rdx
+  {$endif}
+end;
+{$endif}
+
+
+type
+  PThreadRec = ^TThreadRec;
+  TThreadRec = record
+    Func: TThreadFunc;
+    Parameter: Pointer;
+  end;
+
+procedure ThreadHeapLock(ThreadHeap: PThreadHeap);
+var
+  GlobalStorage: PGlobalStorage;
+  InternalRecord: PInternalRecord;
+begin
+  ThreadHeap.ProcessThreadDeferred;
+  if (ThreadHeap.LockFlags <> 0) then
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+  ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
+
+  InternalRecord := CoreInternalRecordPop;
+  InternalRecord.ThreadHeap := ThreadHeap;
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  GlobalStorage.DeferredThreadHeaps.Push(InternalRecord);
+end;
+
+function BrainMMThreadProxy(Parameter: Pointer): Integer;
+var
+  ThreadRec: TThreadRec;
+  ThreadHeap: PThreadHeap;
+begin
+  {$ifdef PUREPASCAL}
+    CreateThreadHeap(True);
+  {$else}
+    ThreadHeapInstance;
+  {$endif}
+
+  ThreadRec := PThreadRec(Parameter)^;
+  CoreInternalRecordPush(Parameter);
+  Result := ThreadRec.Func(ThreadRec.Parameter);
+
+  ThreadHeap := ThreadHeapInstance;
+  {$ifdef PUREPASCAL}
+    ThreadHeapInstance := nil;
+  {$endif}
+  if (ThreadHeap <> nil) then
+  begin
+    if (ThreadHeap.LockFlags = 0) then
+    begin
+      ThreadHeapLock(ThreadHeap);
+    end else
+    if (ThreadHeap.LockFlags > THREAD_HEAP_LOCKED) then
+    begin
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+    end;
+  end;
+end;
+
+procedure BrainMMEndThreadEvent(ExitCode: Integer);
+var
+  ThreadHeap: PThreadHeap;
+begin
+  ThreadHeap := ThreadHeapInstance;
+  {$ifdef PUREPASCAL}
+    ThreadHeapInstance := nil;
+  {$endif}
+
+  if (ThreadHeap <> nil) then
+  begin
+    if (ThreadHeap.LockFlags = 0) then
+    begin
+      ThreadHeapLock(ThreadHeap);
+    end else
+    if (ThreadHeap.LockFlags > THREAD_HEAP_LOCKED) then
+    begin
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+    end;
+  end;
+end;
+
+{$ifdef FPC}
+  {$MESSAGE ERROR 'THREAD ROUTINE NOT YET REALIZED'}
+{$else}
+  {$ifdef MSWINDOWS}
+    {$ifdef CONDITIONALEXPRESSIONS}
+       {$if CompilerVersion < 18}
+         {$define THREAD_FUNCS_EMULATE}
+         {$define THREAD_FUNCS_WRAPPER}
+       {$ifend}
+    {$else}
+       {$define THREAD_FUNCS_EMULATE}
+       {$define THREAD_FUNCS_WRAPPER}
+    {$endif}
+  {$endif}
+{$endif}
+
+{$ifdef POSIX}
+  {$define THREAD_FUNCS_WRAPPER}
+{$endif}
+
+{$ifdef THREAD_FUNCS_WRAPPER}
+procedure _FpuInit;
+{$WARNINGS OFF}
+{$ifdef CPUX86}
+  {$ifdef IOS}
+  begin
+    FSetExceptMask((DefaultMXCSR and $1F80) shr 7);
+    Set8087CW(Default8087CW);
+    SetMXCSR(DefaultMXCSR);
+  end;
+  {$else}
+  const
+    Default8087CW: Word = $1332;
+  asm
+    FNINIT
+    FWAIT
+    FLDCW Default8087CW
+  end;
+  {$endif}
+{$else}
+  {$ifdef CPUARM}
+    const
+      ValidMask = $07C0009F;
+    begin
+      SetFPSCR(DefaultFPSCR and ValidMask);
+      FSetExceptMask(DefaultFPSCR);
+    end;
+  {$else .CPUX64}
+     {$ifdef MSWINDOWS}
+     asm
+        LDMXCSR DefaultMXCSR
+     end;
+     {$endif}
+  {$endif}
+{$endif}
+{$WARNINGS ON}
+
+procedure RunErrorAt(ErrCode: Integer; ErrorAtAddr: Pointer);
+begin
+  ErrorAddr := ErrorAtAddr;
+  Halt(ErrCode);
+end;
+
+procedure _UnhandledException;
+type TExceptProc = procedure (Obj: TObject; Addr: Pointer);
+begin
+  {$ifdef CONDITIONALEXPRESSIONS}
+  if Assigned(ExceptProc) then
+    TExceptProc(ExceptProc)(ExceptObject, ExceptAddr)
+  else
+    RunErrorAt(230, ExceptAddr);
+  {$else}
+    RunErrorAt(230, ErrorAddr);
+  {$endif}
+end;
+
+function __ThreadWrapper(Parameter: Pointer):
+  {$ifdef MSWINDOWS}Integer; stdcall;{$else .POSIX}NativeInt; cdecl;{$endif}
+var
+  ThreadRec: TThreadRec;
+begin
+  Result := 0;
+  try
+    _FpuInit;
+    ThreadRec := PThreadRec(Parameter)^;
+    FreeMem(PThreadRec(Parameter));
+    Result := ThreadRec.Func(ThreadRec.Parameter);
+  except
+    _UnhandledException;
+  end;
+end;
+{$endif}
+
+
+{$ifdef MSWINDOWS}
+function BrainMMThreadFuncEvent(ThreadFunc: TThreadFunc; Parameter: Pointer): Pointer;
+var
+  Proxy, P: PThreadRec;
+begin
+  Proxy := Pointer(CoreInternalRecordPop);
+  Proxy.Func := ThreadFunc;
+  Proxy.Parameter := Parameter;
+
+  New(P);
+  P.Func := BrainMMThreadProxy;
+  P.Parameter := Proxy;
+
+  Result := P;
+end;
+{$else .POSIX}
+function posix_pthread_create(var Thread: pthread_t; Attr: Ppthread_attr_t;
+  TFunc: Pointer; Arg: Pointer): Integer; cdecl;
+  external libpthread name _PU + 'pthread_create';
+
+function BrainMMThreadFuncEvent(Attribute: PThreadAttr;
+    ThreadFunc: TThreadFunc; Parameter: Pointer;
+    var ThreadId: NativeUInt): Integer;
+var
+  Proxy, P: PThreadRec;
+begin
+  Proxy := Pointer(CoreInternalRecordPop);
+  Proxy.Func := ThreadFunc;
+  Proxy.Parameter := Parameter;
+
+  New(P);
+  P.Func := BrainMMThreadProxy;
+  P.Parameter := Proxy;
+
+  IsMultiThread := True;
+  Result := posix_pthread_create(pthread_t(ThreadID), Ppthread_attr_t(Attribute),
+    @__ThreadWrapper, P);
+
+  if Result <> 0 then
+    Dispose(P);
+end;
+{$endif}
+
+{$ifdef THREAD_FUNCS_EMULATE} // CompilerVersion <= Delphi 2005
+var
+  SystemThreadFuncProc: function(ThreadFunc: TThreadFunc; Parameter: Pointer): Pointer;
+  SystemThreadEndProc: procedure(ExitCode: Integer);
+
+function __BeginThread(SecurityAttributes: Pointer; StackSize: LongWord;
+  ThreadFunc: TThreadFunc; Parameter: Pointer; CreationFlags: LongWord;
+  var ThreadId: NativeUInt): THandle;
+var
+  P: PThreadRec;
+begin
+  if Assigned(SystemThreadFuncProc) then
+    P := PThreadRec(SystemThreadFuncProc(ThreadFunc, Parameter))
+  else
+  begin
+    New(P);
+    P.Func := ThreadFunc;
+    P.Parameter := Parameter;
+  end;
+
+  IsMultiThread := TRUE;
+
+  Result := CreateThread(SecurityAttributes, StackSize, @__ThreadWrapper, P,
+    CreationFlags, ThreadID);
+
+  if Result = 0 then
+    Dispose(P);
+end;
+
+procedure __EndThread(ExitCode: Integer);
+begin
+  if Assigned(SystemThreadEndProc) then
+    SystemThreadEndProc(ExitCode);
+  ExitThread(ExitCode);
+end;
+{$endif}
+
+
  (* Global pages/blocks routine *)
 
 function BrainMMGetMemoryBlock(BlockSize: TMemoryBlockSize;
@@ -1884,7 +2352,7 @@ begin
   Result := GlobalStorage.K64BlockCache.Stack.Pop;
   if (Result <> nil) then
   begin
-    AtomicDecrement(NativeUInt(GlobalStorage.K64BlockCache.Count));
+    AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count), -1);
   end else
   begin
     {$ifdef MSWINDOWS}
@@ -1912,7 +2380,7 @@ begin
   GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   if (GlobalStorage.K64BlockCache.Count < 16) then
   begin
-    AtomicIncrement(NativeUInt(GlobalStorage.K64BlockCache.Count));
+    AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count));
     GlobalStorage.K64BlockCache.Stack.Push(Block);
     Result := True;
   end else
@@ -2010,7 +2478,10 @@ begin
   begin
     Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
     if (Result <> nil) then
+    begin
+      if (LastCount > NewCount) then LastCount := NewCount;
       NcMoveB16(P16(Pages)^, P16(Result)^, LastCount * B16_PER_PAGE);
+    end;
 
     if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
       {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
@@ -2037,166 +2508,6 @@ begin
 end;
 
 
- (* Local thread heap memory routine *)
-
-{$ifdef PUREPASCAL}
-threadvar
-  ThreadHeapInstance: PThreadHeap;
-{$endif}
-
-function GrowCoreThreadHeaps(Storage: PGlobalStorage): PThreadHeap;
-type
-  TCoreThreadHeapList = array[0..SIZE_K64 div SizeOf(TThreadHeap) - 1] of TThreadHeap;
-  PCoreThreadHeapList = ^TCoreThreadHeapList;
-var
-  i: Integer;
-  CoreThreadHeapList: PCoreThreadHeapList;
-begin
-  CoreThreadHeapList := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, PAGESMODE_CORE);
-  if (CoreThreadHeapList = nil) then
-    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
-
-  for i := 1 to High(TCoreThreadHeapList) - 1 do
-    CoreThreadHeapList[i].FNextHeap := @CoreThreadHeapList[i + 1];
-
-  Storage.CoreThreadHeaps.PushList(@CoreThreadHeapList[1],
-    @CoreThreadHeapList[High(TCoreThreadHeapList)]);
-
-  Result := @CoreThreadHeapList[0];
-end;
-
-function CreateThreadHeap: PThreadHeap;
-var
-  GlobalStorage: PGlobalStorage;
-  NextHeap: PThreadHeap;
-begin
-  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-  Result := GlobalStorage.CoreThreadHeaps.Pop;
-  if (Result = nil) then
-  begin
-    Result := GrowCoreThreadHeaps(GlobalStorage);
-  end;
-
-  FillChar(Result^, SizeOf(TThreadHeap), #0);
-  Result.FMarkerNotSelf := not SupposedPtr(Result);
-
-  repeat
-    NextHeap := ThreadHeapList;
-    Result.FNextHeap := NextHeap;
-  until (SupposedPtr(NextHeap) = AtomicCmpExchange(SupposedPtr(ThreadHeapList),
-    SupposedPtr(Result), SupposedPtr(NextHeap)));
-
-  {$ifdef PUREPASCAL}
-    ThreadHeapInstance := Result;
-  {$endif}
-
-  // hints off
-  Result.FReserved := nil;
-end;
-
-{$ifNdef PUREPASCAL}
-const
-  THREAD_HEAP = {$ifdef CPUX86}$14{$else}$28{$endif};
-
-
-function ThreadHeapInstance: PThreadHeap;
-asm
-  // Get
-  {$ifdef CPUX86}
-    mov eax, fs:[THREAD_HEAP]
-    test eax, eax
-  {$else .CPUX64}
-    mov rax, gs:[abs THREAD_HEAP]
-    test rax, rax
-  {$endif}
-  jz @create_thread_heap
-  ret
-
-@create_thread_heap:
-  {$ifdef CPUX86}
-    call CreateThreadHeap
-  {$else .CPUX64}
-    {stack align} push rcx
-    call CreateThreadHeap
-    {stack align} pop rcx
-  {$endif}
-
-  // Set
-  {$ifdef CPUX86}
-    mov fs:[THREAD_HEAP], eax
-  {$else .CPUX64}
-    mov gs:[abs THREAD_HEAP], rax
-  {$endif}
-end;
-
-function SafeThreadHeapInstance(ReturnAddress{, v2, v3, v4, x64_v5}: Pointer): PThreadHeap;
-asm
-  {$ifdef CPUX86}
-  push eax
-    push edx
-    push ecx
-      call ThreadHeapInstance
-    pop ecx
-    pop edx
-  add esp, 4
-  jmp dword ptr [esp - 4]
-  {$else .CPUX64}
-  push rcx
-    push rdx
-    push r8
-    push r9
-    push r10
-      call ThreadHeapInstance
-    pop r10
-    pop r9
-    pop r8
-    pop rdx
-    mov rcx, rax
-  pop r11
-  jmp r11
-  {$endif}
-end;
-
-function SafeProcessThreadDeferred(Self: PThreadHeap
-  {, v2, v3, ReturnAddress, x64_v5: Pointer}): PThreadHeap;
-asm
-  {$ifdef CPUX86}
-  push eax
-    push edx
-    push ecx
-      call TThreadHeap.ProcessThreadDeferred
-    pop ecx
-    pop edx
-  pop eax
-  jmp ebx
-  {$else .CPUX64}
-  push rcx
-  push r9
-    push rdx
-    push r8
-    push r10
-      call TThreadHeap.ProcessThreadDeferred
-    pop r10
-    pop r8
-    pop rdx
-  pop r9
-  pop rcx
-  jmp r9
-  {$endif}
-end;
-{$endif}
-
-function CurrentThreadHeap: PThreadHeap;
-begin
-  Result := ThreadHeapInstance;
-
-  {$ifdef PUREPASCAL}
-  if (Result = nil) then
-    Result := CreateThreadHeap;
-  {$endif}
-end;
-
-
 { TThreadHeap }
 
 function TThreadHeap.ErrorOutOfMemory: Pointer;
@@ -2213,7 +2524,7 @@ begin
     {$else}
       TErrorProc(System.ErrorProc)(1, ErrorAddr);
     {$endif}
-      
+
     System.ErrorAddr := ErrorAddr;
     if (System.ExitCode = 0) then System.ExitCode := 203{reOutOfMemory};
     System.Halt;
@@ -2235,7 +2546,7 @@ begin
       System.ErrorProc(Byte(reInvalidPtr), ErrorAddr);
     {$else}
       TErrorProc(System.ErrorProc)(2, ErrorAddr);
-    {$endif}      
+    {$endif}
 
     System.ErrorAddr := ErrorAddr;
     if (System.ExitCode = 0) then System.ExitCode := 204{reInvalidPtr};
@@ -2312,31 +2623,49 @@ type
 
 procedure TThreadHeap.PushThreadDeferred(P: Pointer; ReturnAddress: Pointer;
   IsSmall: Boolean);
-begin
-  PThreadDeferred(P).ReturnAddress := SupposedPtr(ReturnAddress) +
-    (SupposedPtr(IsSmall) shl HIGH_NATIVE_BIT);
-  Deferreds.Push(P);
-end;
-
-function CheckThreadDeferredDuplicates(First, Current: {not duplicated}PThreadDeferred): {duplicate}PThreadDeferred;
+label
+  lock_free;
 var
-  NextUnchecked: PThreadDeferred;
+  Flags: SupposedPtr;
+  LastErrorAddr: Pointer;
 begin
-  NextUnchecked := Current.Next;
-  if (NextUnchecked <> nil) then
+  if (Self.LockFlags = 0) then
   begin
-    // checking loop
-    Result := First;
-    repeat
-      if (Result = NextUnchecked) then {duplicate found}Exit;
-      Result := Result.Next;
-    until (Result = Current);
-
-    // recursion
-    Result := CheckThreadDeferredDuplicates(First, {checked}NextUnchecked);
+  lock_free:
+    PThreadDeferred(P).ReturnAddress := SupposedPtr(ReturnAddress) +
+      (SupposedPtr(IsSmall) shl HIGH_NATIVE_BIT);
+    Deferreds.Push(P);
   end else
   begin
-    Result := nil;
+    // inline SpinLock
+    repeat
+      Flags := Self.LockFlags;
+      if (Flags = 0) then goto lock_free;
+      if (Flags <> THREAD_HEAP_LOCKABLE) then
+      begin
+        if (Flags = THREAD_HEAP_LOCKED) then
+        begin
+          SpinWait(Self.LockFlags, THREAD_HEAP_LOCKED_BIT);
+        end else
+        begin
+          {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+        end;
+      end;
+    until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(Self.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+    LastErrorAddr := Self.ErrorAddr;
+    try
+      Self.ErrorAddr := ReturnAddress;
+      if (IsSmall) then
+      begin
+        Self.FreeSmall(P);
+      end else
+      begin
+        Self.FreeMedium(P);
+      end;
+    finally
+      Self.ErrorAddr := LastErrorAddr;
+      Self.LockFlags := THREAD_HEAP_LOCKABLE; // inline SpinUnlock
+    end;
   end;
 end;
 
@@ -2344,7 +2673,8 @@ procedure TThreadHeap.ProcessThreadDeferred;
 var
   LastErrorAddr: Pointer;
   ReturnAddress: SupposedPtr;
-  ThreadDeferred, Next, Duplicate: PThreadDeferred;
+  Counter: NativeUInt;
+  ThreadDeferred, Next: PThreadDeferred;
 begin
   ThreadDeferred := Deferreds.PopList;
   if (ThreadDeferred <> nil) then
@@ -2355,14 +2685,16 @@ begin
       Next := ThreadDeferred.Next;
       if (Next <> nil) then
       begin
-        if (ThreadDeferred = Next) then Duplicate := ThreadDeferred
-        else Duplicate := CheckThreadDeferredDuplicates(ThreadDeferred, Next);
-
-        if (Duplicate <> nil) then
-        begin
-          Self.ErrorAddr := Pointer(NativeInt(Duplicate.ReturnAddress) and MASK_HIGH_NATIVE_TEST);
-          Self.RaiseInvalidPtr;
-        end;
+        Counter := 0;
+        repeat
+          if (NativeInt(Next) and MASK_16_TEST <> 0) or (ThreadDeferred = Next) then
+          begin
+            Self.ErrorAddr := Pointer(NativeInt(ThreadDeferred.ReturnAddress) and MASK_HIGH_NATIVE_TEST);
+            Self.RaiseInvalidPtr;
+          end;
+          Next := Next.Next;
+          Inc(Counter);
+        until ((Next = nil) or (Counter = 16));
       end;
 
       // free small/medium
@@ -2387,10 +2719,52 @@ begin
   end;
 end;
 
+
+function BrainMMUnknownGetMem(None: Pointer; B16Count: NativeUInt;
+  ErrorAddr: Pointer): Pointer;
+var
+  ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
+begin
+  // inline SpinLock
+  ThreadHeap := UnknownThreadHeap;
+  repeat
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+  try
+    // allocation
+    ThreadHeap.ErrorAddr := ErrorAddr;
+    case (B16Count) of
+      0..MAX_SMALL_B16COUNT: Result := ThreadHeap.GetSmall(B16Count);
+      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+        Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
+    else
+      Result := MemoryManager.BrainMM.GetMemoryPages(
+        (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+        PAGESMODE_SYSTEM);
+      if (Result = nil) then
+        Result := ThreadHeap.ErrorOutOfMemory;
+    end;
+  finally
+    // inline SpinUnlock
+    ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
+  end;
+end;
+
 function BrainMMGetMem(Size: NativeUInt): Pointer;
 {$ifdef PUREPASCAL}
 label
-  thread_heap_done, thread_deferreds_done;
+  thread_deferreds_done;
 const
   ErrorAddr = nil;
 var
@@ -2401,7 +2775,6 @@ begin
   ThreadHeap := ThreadHeapInstance;
   if (ThreadHeap <> nil) then
   begin
-  thread_heap_done:
     ThreadHeap.ErrorAddr := ErrorAddr;
 
     if (not ThreadHeap.Deferreds.Assigned) then
@@ -2412,7 +2785,11 @@ begin
         MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
           Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
       else
-        Result := ThreadHeap.GetBigOrLarge(B16Count);
+        Result := MemoryManager.BrainMM.GetMemoryPages(
+          (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+          PAGESMODE_SYSTEM);
+        { if (Result = nil) then
+          Result := ThreadHeap.ErrorOutOfMemory; }
       end;
     end else
     begin
@@ -2421,8 +2798,7 @@ begin
     end;
   end else
   begin
-    ThreadHeap := CreateThreadHeap;
-    goto thread_heap_done;
+    Result := BrainMMUnknownGetMem(nil, B16Count, ErrorAddr);
   end;
 end;
 {$else}
@@ -2454,8 +2830,7 @@ asm
     mov rcx, gs:[abs THREAD_HEAP]
     test rcx, rcx
   {$endif}
-  jz @penalty_thread_heap
-@thread_heap_done:
+  jz BrainMMUnknownGetMem
   // ThreadHeap(v1).ErrorAddr := ErrorAddr(v3)
   {$ifdef CPUX86}
     mov [EAX].TThreadHeap.ErrorAddr, ecx
@@ -2476,7 +2851,7 @@ asm
   // case (B16Count) of
   //   Exit ThreadHeap.GetSmall(B16Count)
   //   Exit ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes))
-  //   Exit ThreadHeap.GetBigOrLarge(B16Count)
+  //   Exit MemoryManager.BrainMM.GetMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     xor ecx, ecx
     cmp edx, MAX_SMALL_B16COUNT
@@ -2490,7 +2865,32 @@ asm
     cmp rdx, MAX_MEDIUM_B16COUNT
     jbe TThreadHeap.GetMedium
   {$endif}
-  jmp TThreadHeap.GetBigOrLarge
+
+  {$ifdef CPUX86}
+    lea eax, [edx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr eax, B16_PER_PAGE_SHIFT
+  {$else .CPUX64}
+    lea rcx, [rdx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr rcx, B16_PER_PAGE_SHIFT
+  {$endif}
+  call MemoryManager.BrainMM.GetMemoryPages
+  {$ifdef CPUX86}
+    test eax, eax
+  {$else .CPUX64}
+    test rax, rax
+  {$endif}
+  jz @error_outof_memory
+  rep ret     //saves about 25 cycles on AMD.
+
+@error_outof_memory:
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  jmp TThreadHeap.ErrorOutOfMemory
 
 @penalty_thread_deferreds:
   {$ifdef CPUX86}
@@ -2504,88 +2904,111 @@ asm
     lea r9, @thread_deferreds_done
     jmp SafeProcessThreadDeferred
   {$endif}
-@penalty_thread_heap:
-  {$ifdef CPUX86}
-    lea eax, @thread_heap_done
-  {$else .CPUX64}
-    lea rcx, @thread_heap_done
-  {$endif}
-  jmp SafeThreadHeapInstance
 end;
 {$endif}
 
 function TThreadHeap.GetSmall(B16Count: NativeUInt): Pointer;
 {$ifdef PUREPASCAL}
+label
+  item_reserve, new_k1line;
 var
-  Line: PK1LineSmall;
+  Line, Next, N: PK1LineSmall;
   Index: NativeInt;
 begin
-  Line := FK1LineSmalls[B16Count];
+  Line := Self.FK1LineSmalls[B16Count];
 
   if (Line <> nil) then
   begin
-    if (Line.ItemSet.VLow32 and 1 = 0{not FullQueue}) then
+    if (Line.Header.ItemSet.VLow32 and 3 = 0{not FullQueue}) then
     begin
-      Index := BitReserve(Line.ItemSet);
+    item_reserve:
+      Index := BitReserve(Line.Header.ItemSet);
       if (Index > 0) then
       begin
         Result := @Line.Items[Index];
         Exit;
+      end else
+      begin
+        repeat
+          Line.Header.ItemSet.VLow32 := 3{FullQueue := True};
+
+          // Dequeue
+          Next := Line.Header.Queue.Next;
+          Self.FK1LineSmalls[B16Count] := Next;
+
+          // Enqueue
+          N := Self.QK1LineFull;
+          Self.QK1LineFull := Line;
+          Line.Header.Queue.Prev := nil;
+          Line.Header.Queue.Next := N;
+          if (N <> nil) then N.Header.Queue.Prev := Line;
+
+          Line := Next;
+          if (Next = nil) then goto new_k1line;
+          Next.Header.Queue.Prev := nil;
+        until (
+          {$ifdef SMALLINT}
+            Line.Header.ItemSet.VLow32 or Line.Header.ItemSet.VHigh32 <> 0
+          {$else .LARGEINT}
+            Line.Header.ItemSet.V64 <> 0
+          {$endif}
+          );
+        goto item_reserve;
       end;
     end else
     begin
-      Result := Pointer(RaiseInvalidPtr);
+      Result := Pointer(Self.RaiseInvalidPtr);
       Exit;
     end;
+  end else
+  begin
+  new_k1line:
+    Result := Self.GetNewK1LineSmall(B16Count);
   end;
-
-  // penalty: optional mark full + new line + TThreadHeap.GetSmall
-  Result := Self.PenaltyGetSmall(B16Count);
 end;
 {$else}
 asm
   // Line := FK1LineSmalls[B16Count]
-  // if (Line = nil) then Exit Self.PenaltyGetSmall(B16Count)
+  // if (Line = nil) then Exit Self.GetNewK1LineSmall(B16Count)
   {$ifdef CPUX86}
     mov ecx, [EAX + edx * 4]
     test ecx, ecx
-    jz TThreadHeap.PenaltyGetSmall
   {$else .CPUX64}
     mov r8, [RCX + rdx * 8]
     test r8, r8
-    jz TThreadHeap.PenaltyGetSmall
   {$endif}
+  jz TThreadHeap.GetNewK1LineSmall
 
-  // if (Line.FullQueue) then RaiseInvalidPtr
+  // if (Line.FullQueue) then Exit RaiseInvalidPtr;
   {$ifdef CPUX86}
-    mov edx, [ECX].TK1LineSmall.ItemSet.VLow32
-    test edx, 1
-    jnz TThreadHeap.RaiseInvalidPtr
+    mov edx, [ECX].TK1LineSmall.Header.ItemSet.VLow32
+    test edx, 3
   {$else .CPUX64}
-    mov r9, [R8].TK1LineSmall.ItemSet.V64
-    test r9, 1
-    jnz TThreadHeap.RaiseInvalidPtr
+    mov r9, [R8].TK1LineSmall.Header.ItemSet.V64
+    test r9, 3
   {$endif}
+  jnz TThreadHeap.RaiseInvalidPtr
 
-  // if (Line.ItemSet.VInt64 = 0{deferred Full}) then Exit Self.PenaltyGetSmall(B16Count)
-  // Index := BitReserve(Line.ItemSet);
+  // if (Line.Header.ItemSet.VInt64 <> 0{deferred Full}) then Index := BitReserve(Line.ItemSet)
+  // else RequeueLine(FK1LineSmalls, QK1LineFull), FindNextLine;
+@item_reserve:
   {$ifdef CPUX86}
-    lea eax, [ECX].TK1LineSmall.ItemSet.VHigh32
+    lea eax, [ECX].TK1LineSmall.Header.ItemSet.VHigh32
     test edx, edx
     DB $0F, $44, $C8 // cmovz ecx, eax
     mov edx, [ecx]
-    bsf eax, edx
-    jz @retrieve_penalty
+    rep bsf eax, edx
+    jz @requeue_line_loop_prefix
     btr edx, eax
     mov [ecx], edx
     lea edx, [eax + 32]
     test ecx, MASK_K1_TEST
     DB $0F, $45, $C2 // cmovnz eax, edx
   {$else .CPUX64}
-    bsf rax, r9
-    jz TThreadHeap.PenaltyGetSmall
+    rep bsf rax, r9
+    jz @requeue_line_loop_prefix
     btr r9, rax
-    mov [R8].TK1LineSmall.ItemSet.V64, r9
+    mov [R8].TK1LineSmall.Header.ItemSet.V64, r9
   {$endif}
 
   // Result := @Line.Items[Index]
@@ -2598,63 +3021,194 @@ asm
     lea rax, [r8 + rax * 8]
   {$endif}
   ret
+@requeue_line_loop_prefix:
 {$ifdef CPUX86}
-@retrieve_penalty:
-   // Exit ThreadOf(Line).PenaltyGetSmall(B16CountOf(Line))
-   and ecx, MASK_K1_CLEAR
-   movzx edx, byte ptr [ECX].TK1LineSmall.Flags
-   shr edx, 4
-   and ecx, MASK_K64_CLEAR
-   mov eax, [ECX].TK64PoolSmall.ThreadHeap
-   jmp TThreadHeap.PenaltyGetSmall
+  // store ebx/esi, retrieve Line, ThreadHeap, B16Count
+  mov [esp - 8], ebx
+  mov [esp - 4], esi
+  and ecx, MASK_K1_CLEAR
+  movzx edx, byte ptr [ECX].TK1LineSmall.Header.Flags
+  shr edx, 4
+  mov eax, MASK_K64_CLEAR
+  and eax, ecx
+  mov eax, [EAX].TK64PoolSmall.ThreadHeap
 {$endif}
+@requeue_line_loop:
+  // mark as FullQueue
+  {$ifdef CPUX86}
+    mov [ECX].TK1LineSmall.Header.ItemSet.VLow32, 3
+  {$else .CPUX64}
+    mov [R8].TK1LineSmall.Header.ItemSet.VLow32, 3
+  {$endif}
+
+  // dequeue, enqueue (during optional fake next LineFull)
+  {$ifdef CPUX86}
+    mov ebx, [ECX].TK1LineSmall.Header.Queue.Next
+    mov esi, [EAX].TThreadHeap.QK1LineFull
+    mov [EAX + edx * 4], ebx
+    mov [EAX].TThreadHeap.QK1LineFull, ecx
+
+    mov [ECX].TK1LineSmall.Header.Queue.Prev, 0
+    mov [ECX].TK1LineSmall.Header.Queue.Next, esi
+    lea esp, [esp - 64]
+    test esi, esi
+    DB $0F, $44, $F4 // cmovz esi, esp
+    lea esp, [esp + 64]
+    mov [ESI].TK1LineSmall.Header.Queue.Prev, ecx
+  {$else .CPUX64}
+    mov r9, [R8].TK1LineSmall.Header.Queue.Next
+    mov r10, [RCX].TThreadHeap.QK1LineFull
+    mov [RCX + rdx * 8], r9
+    mov [RCX].TThreadHeap.QK1LineFull, R8
+
+    xor rax, rax
+    mov [R8].TK1LineSmall.Header.Queue.Prev, rax
+    mov [R8].TK1LineSmall.Header.Queue.Next, r10
+    lea rax, [rsp - 64]
+    test r10, r10
+    cmovz r10, rax
+    mov [R10].TK1LineSmall.Header.Queue.Prev, r8
+  {$endif}
+
+  // Line := Next;
+  // if (Line = nil) then Exit Self.GetNewK1LineSmall(B16Count);
+  {$ifdef CPUX86}
+    test ebx, ebx
+    xchg ecx, ebx
+    mov ebx, [esp - 8]
+    mov esi, [esp - 4]
+  {$else .CPUX64}
+    test r9, r9
+    xchg r8, r9
+  {$endif}
+  jz TThreadHeap.GetNewK1LineSmall
+
+  // Line.Header.Queue.Prev := nil;
+  // if (Line.Header.ItemSet.V64 = 0) then Continue;
+  {$ifdef CPUX86}
+    mov [ECX].TK1LineSmall.Header.Queue.Prev, 0
+    mov ebx, [ECX].TK1LineSmall.Header.ItemSet.VLow32
+    mov esi, [ECX].TK1LineSmall.Header.ItemSet.VHigh32
+    or esi, ebx
+  {$else .CPUX64}
+    xor rax, rax
+    mov [R8].TK1LineSmall.Header.Queue.Prev, rax
+    mov r9, [R8].TK1LineSmall.Header.ItemSet.V64
+    test r9, r9
+  {$endif}
+  jz @requeue_line_loop
+
+  // if (Line.FullQueue) then Exit RaiseInvalidPtr;
+  // goto @item_reserve;
+  {$ifdef CPUX86}
+    test ebx, 3
+    xchg edx, ebx
+    mov ebx, [esp - 8]
+    mov esi, [esp - 4]
+  {$else .CPUX64}
+    test r9, 3
+  {$endif}
+  jz @item_reserve
+  jmp TThreadHeap.RaiseInvalidPtr
 end;
 {$endif}
 
-function TThreadHeap.PenaltyGetSmall(B16Count: NativeUInt): Pointer;
-label
-  new_k1line;
-var
-  Line, Next: PK1LineSmall;
+{$Region FillCharJBASM}
+{$ifdef CPUX64}
+//Count is number of 16-byte blocks to fill.
+//return dest as a pointer.
+function ZeroMem16(var Dest; Count16: NativeInt): pointer;
+//rcx = dest
+//rdx=count
+asm
+              .noframe
+              .align 16
+              mov r11,rdx
+              xor rax,rax
+              lea r10,[rip + @SmallFill + (8*4)]
+              shl r11,3                //every 4 bytes of instruction fills 8 bytes
+                                       //so divide by 16*8 = divide count by 2.
+              cmp rdx,4                //16*4 = 64
+              jg  @Above64
+              sub r10,r11
+              jmp r10
+@SmallFill:   rep mov [rcx+56], rax
+              rep mov [rcx+48], rax
+              rep mov [rcx+40], rax
+              rep mov [rcx+32], rax
+              rep mov [rcx+24], rax
+              rep mov [rcx+16], rax
+              rep mov [rcx+08], rax
+              mov [rcx],rax
+              mov rax,rcx
+              ret
+
+
+@Above64:     shl rdx,4              //x16: real number of bytes to fill
+              push rcx               //save dest = result of AllocMem.
+              shr r11,5              //divide by (32*2 = 64)
+              and edx,(32+16+8)      //count the partial iterations of the loop
+              mov r8d,64             //code shrink to help alignment.
+              mov r9,rdx
+              jz @Initloop64
+@partialloop: add r10,$63            //jump to the end of @partial
+              shr r9,1               //every instruction is 4 bytes but moves 8 bytes
+              add rcx,rdx            //add the partial loop count to dest to correct the offsets in the moves below.
+                                     //this simplifies the address calculation in the moves
+              sub r10,r9             //step back as needed; ZF=1 do more loops after partial one; ZF=0: do at least one full loop
+              //test r11,r11         because count=64 is handled above ((r11 > 0) = true).
+              stc                    //CF=1: we're in a partial loop,
+              jmp r10                //start a partial loop
+              db $0F,$1F,$00         //nop
+@Initloop64:  mov rdx,r11
+              shr r11,(19-6)         //use non-temporal move for > 512kb
+              jnz @InitFillHuge
+@Doloop64:    add rcx,r8
+              dec edx                //loop < 512K so we can use edx and save a byte
+              mov [rcx-64+00H],rax
+@partial:     mov [rcx-64+08H],rax
+              mov [rcx-64+10H],rax
+              mov [rcx-64+18H],rax
+              mov [rcx-64+20H],rax
+              mov [rcx-64+28H],rax
+              mov [rcx-64+30H],rax
+              mov [rcx-64+38H],rax
+              jnbe @DoLoop64         //repeat while not(partial {CF}) and not(done {ZF})
+              jnz @InitLoop64        //init the loop if we did a partial before but need to do more work.
+@done:        pop rax
+              rep ret                //prevent the need for a nop10
+              db $66,$0F,$1F,$84,$00,$00,$00,$00,$00  //nop9
+@InitFillHuge:
+@FillHuge:    dec rdx
+              db $48,$0F,$C3,$01     //movnti  [rcx],rax
+              db $48,$0F,$C3,$41,$08 //movnti  [rcx+08H],rax
+              db $48,$0F,$C3,$41,$10 //movnti  [rcx+10H],rax
+              db $48,$0F,$C3,$41,$18 //movnti  [rcx+18H],rax
+              db $48,$0F,$C3,$41,$20 //movnti  [rcx+20H],rax
+              db $48,$0F,$C3,$41,$28 //movnti  [rcx+28H],rax
+              db $48,$0F,$C3,$41,$30 //movnti  [rcx+30H],rax
+              db $48,$0F,$C3,$41,$38 //movnti  [rcx+38H],rax
+              lea rcx,[rcx+r8]       //don't alter the flags
+              jnz @FillHuge          //jump aligns exactly on 16 bytes
+@donefillhuge:mfence
+              pop rax
+end;
+{$endif}
+{$EndRegion}
+
+
+function BrainMMUnknownAllocMem(None: Pointer; B16Count: NativeUInt;
+  ErrorAddr: Pointer): Pointer;
 begin
-  Line := FK1LineSmalls[B16Count];
-  repeat
-    if (Line = nil) then
-    begin
-    new_k1line:
-      Line := Self.NewK1LineSmall(B16Count);
-      if (Line = nil) then
-      begin
-        Result := nil;
-        Exit;
-      end;
-      Break;
-    end else
-    begin
-      Line.ItemSet.VLow32 := Line.ItemSet.VLow32 or 1{FullQueue := True};
-      Next := Pointer(Line.Next and MASK_K1_CLEAR);
-      SupposedEnqueue(Pointer(QK1LineFull), Line, Line.FullPrevNext);
-
-      FK1LineSmalls[B16Count] := Next;
-      Line := Next;
-      if (Next = nil) then goto new_k1line;
-    end;
-  until (
-    {$ifdef SMALLINT}
-      Line.ItemSet.VLow32 or Line.ItemSet.VHigh32 <> 0
-    {$else .LARGEINT}
-      Line.ItemSet.V64 <> 0
-    {$endif}
-    );
-
-  // get small memory
-  Result := Self.GetSmall(B16Count);
+  Result := BrainMMUnknownGetMem(None, B16Count, ErrorAddr);
+  if (Result <> nil) then
+    System.FillChar(Result^, B16Count shl 4, #0);
 end;
 
 function BrainMMAllocMem(Size: NativeUInt): Pointer;
 {$ifdef PUREPASCAL}
 label
-  thread_heap_done, thread_deferreds_done;
+  thread_deferreds_done;
 const
   ErrorAddr = nil;
 var
@@ -2665,7 +3219,6 @@ begin
   ThreadHeap := ThreadHeapInstance;
   if (ThreadHeap <> nil) then
   begin
-  thread_heap_done:
     ThreadHeap.ErrorAddr := ErrorAddr;
 
     if (not ThreadHeap.Deferreds.Assigned) then
@@ -2676,7 +3229,11 @@ begin
         MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
           Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
       else
-        Result := ThreadHeap.GetBigOrLarge(B16Count);
+        Result := MemoryManager.BrainMM.GetMemoryPages(
+          (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+          PAGESMODE_SYSTEM);
+        { if (Result = nil) then
+          Result := ThreadHeap.ErrorOutOfMemory; }
       end;
 
       if (Result <> nil) then
@@ -2688,8 +3245,7 @@ begin
     end;
   end else
   begin
-    ThreadHeap := CreateThreadHeap;
-    goto thread_heap_done;
+    Result := BrainMMUnknownAllocMem(nil, B16Count, ErrorAddr);
   end;
 end;
 {$else}
@@ -2721,8 +3277,8 @@ asm
     mov rcx, gs:[abs THREAD_HEAP]
     test rcx, rcx
   {$endif}
-  jz @penalty_thread_heap
-@thread_heap_done:
+  jz BrainMMUnknownAllocMem
+
   // ThreadHeap(v1).ErrorAddr := ErrorAddr(v3)
   {$ifdef CPUX86}
     mov [EAX].TThreadHeap.ErrorAddr, ecx
@@ -2744,7 +3300,7 @@ asm
   // case (B16Count) of
   //   call ThreadHeap.GetSmall(B16Count)
   //   call ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes))
-  //   call ThreadHeap.GetBigOrLarge(B16Count)
+  //   call MemoryManager.BrainMM.GetMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     push edx
     push offset @fill_zero
@@ -2763,7 +3319,31 @@ asm
     cmp rdx, MAX_MEDIUM_B16COUNT
     jbe TThreadHeap.GetMedium
   {$endif}
-  jmp TThreadHeap.GetBigOrLarge
+
+  {$ifdef CPUX86}
+    lea eax, [edx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr eax, B16_PER_PAGE_SHIFT
+    pop ecx
+  {$else .CPUX64}
+    lea rcx, [rdx + B16_PER_PAGE - 1]
+    mov edx, PAGESMODE_SYSTEM
+    shr rcx, B16_PER_PAGE_SHIFT
+    pop r8
+  {$endif}
+  call MemoryManager.BrainMM.GetMemoryPages
+  {$ifdef CPUX86}
+    test eax, eax
+  {$else .CPUX64}
+    test rax, rax
+  {$endif}
+  jnz @fill_zero
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  call TThreadHeap.ErrorOutOfMemory
 
 @fill_zero:
   // retrieve B16Count
@@ -2786,6 +3366,9 @@ asm
     rep STOSD
     mov ecx, [esp - 4]
   {$else .CPUX64}
+    mov rdx,rcx    //rdx = count_div_16
+    mov rcx,rax    //rcx = dest
+    jmp zeromem16
     mov r8, rcx
     mov rdx, rdi
     xchg rax, rdi
@@ -2808,7 +3391,7 @@ asm
   {$endif}
 
 @done:
-  ret
+  rep ret
 
 @penalty_thread_deferreds:
   {$ifdef CPUX86}
@@ -2822,19 +3405,62 @@ asm
     lea r9, @thread_deferreds_done
     jmp SafeProcessThreadDeferred
   {$endif}
-@penalty_thread_heap:
-  {$ifdef CPUX86}
-    lea eax, @thread_heap_done
-  {$else .CPUX64}
-    lea rcx, @thread_heap_done
-  {$endif}
-  jmp SafeThreadHeapInstance
 end;
 {$endif}
 
+function BrainMMUnknownGetMemAligned(Align: TMemoryAlign; B16Count: NativeUInt;
+  ErrorAddr: Pointer): Pointer;
+label
+  medium;
+var
+  ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
+begin
+  // inline SpinLock
+  ThreadHeap := UnknownThreadHeap;
+  repeat
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+  try
+    // allocation
+    ThreadHeap.ErrorAddr := ErrorAddr;
+    case (B16Count) of
+      0..MAX_SMALL_B16COUNT:
+      begin
+        if (Align <> ma16Bytes) then goto medium;
+        Result := ThreadHeap.GetSmall(B16Count);
+      end;
+      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+      begin
+      medium:
+        Result := ThreadHeap.GetMedium(B16Count, Ord(Align));
+      end
+    else
+      Result := MemoryManager.BrainMM.GetMemoryPages(
+        (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+        PAGESMODE_SYSTEM);
+      if (Result = nil) then
+        Result := ThreadHeap.ErrorOutOfMemory;
+    end;
+  finally
+    // inline SpinUnlock
+    ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
+  end;
+end;
+
 function BrainMMGetMemAligned(Align: TMemoryAlign; Size: NativeUInt): Pointer;
 label
-  thread_heap_done, thread_deferreds_done, medium;
+  thread_deferreds_done, medium;
 const
   ErrorAddr = nil;
 var
@@ -2845,7 +3471,6 @@ begin
   ThreadHeap := ThreadHeapInstance;
   if (ThreadHeap <> nil) then
   begin
-  thread_heap_done:
     ThreadHeap.ErrorAddr := ErrorAddr;
 
     if (not ThreadHeap.Deferreds.Assigned) then
@@ -2863,7 +3488,11 @@ begin
           Result := ThreadHeap.GetMedium(B16Count, Ord(Align));
         end
       else
-        Result := ThreadHeap.GetBigOrLarge(B16Count);
+        Result := MemoryManager.BrainMM.GetMemoryPages(
+          (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+          PAGESMODE_SYSTEM);
+        { if (Result = nil) then
+          Result := ThreadHeap.ErrorOutOfMemory; }
       end;
     end else
     begin
@@ -2872,8 +3501,89 @@ begin
     end;
   end else
   begin
-    ThreadHeap := CreateThreadHeap;
-    goto thread_heap_done;
+    Result := BrainMMUnknownGetMemAligned(Align, B16Count, ErrorAddr);
+  end;
+end;
+
+function BrainMMUnknownFreeMem(None: Pointer; P: Pointer;
+  ErrorAddr: Pointer): Integer;
+label
+  medium, error_invalid_ptr;
+var
+  ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
+  Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
+begin
+  // inline SpinLock
+  ThreadHeap := UnknownThreadHeap;
+  repeat
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+  try
+    // dispose
+    ThreadHeap.ErrorAddr := ErrorAddr;
+    if (NativeInt(P) and MASK_16_TEST = 0) then
+    begin
+      Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+
+      if (NativeInt(P) and MASK_K1_TEST <> 0) then
+      begin
+        // pool: small or medium
+        if (PK64PoolSmall(Pool).ThreadHeap = ThreadHeap) then
+        begin
+          // pool small
+          Result := ThreadHeap.FreeSmall(P);
+          Exit;
+        end else
+        if (PK64PoolSmall(Pool).ThreadHeap = nil) then
+        begin
+          // pool medium
+        medium:
+          if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
+          begin
+            Result := ThreadHeap.FreeMedium(P);
+            Exit;
+          end;
+        end;
+      end else
+      begin
+        if (NativeInt(P) and MASK_K4_TEST <> 0) then
+        begin
+          // medium or invalid pointer
+          if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
+          goto error_invalid_ptr;
+        end else
+        begin
+          // big or large
+          if (not MemoryManager.BrainMM.FreeMemoryPages(MemoryPages(P), PAGESMODE_SYSTEM)) then
+            goto error_invalid_ptr;
+
+          Result := FREEMEM_DONE;
+          Exit;
+        end;
+      end;
+
+      // "default" method
+      Result := ThreadHeap.FreeDifficult(P, ErrorAddr);
+      Exit;
+    end else
+    begin
+    error_invalid_ptr:
+      Result := ThreadHeap.ErrorInvalidPtr;
+    end;
+  finally
+    // inline SpinUnlock
+    ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
   end;
 end;
 
@@ -2884,7 +3594,7 @@ const
   ReturnAddress: Pointer = @BrainMMFreeMem;
 {$endif}
 label
-  thread_heap_done, thread_deferreds_done, medium, error_invalid_ptr;
+  thread_deferreds_done, medium, error_invalid_ptr;
 const
   ErrorAddr = nil;
 var
@@ -2894,7 +3604,6 @@ begin
   ThreadHeap := ThreadHeapInstance;
   if (ThreadHeap <> nil) then
   begin
-  thread_heap_done:
     ThreadHeap.ErrorAddr := ErrorAddr;
 
     if (not ThreadHeap.Deferreds.Assigned) then
@@ -2930,6 +3639,14 @@ begin
             // medium or invalid pointer
             if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
             goto error_invalid_ptr;
+          end else
+          begin
+            // big or large
+            if (not MemoryManager.BrainMM.FreeMemoryPages(MemoryPages(P), PAGESMODE_SYSTEM)) then
+              goto error_invalid_ptr;
+
+            Result := FREEMEM_DONE;
+            Exit;
           end;
         end;
 
@@ -2948,8 +3665,7 @@ begin
     end;
   end else
   begin
-    ThreadHeap := CreateThreadHeap;
-    goto thread_heap_done;
+    Result := BrainMMUnknownFreeMem(nil, P, ErrorAddr);
   end;
 end;
 {$else}
@@ -2979,8 +3695,8 @@ asm
     mov rcx, gs:[abs THREAD_HEAP]
     test rcx, rcx
   {$endif}
-  jz @penalty_thread_heap
-@thread_heap_done:
+  jz BrainMMUnknownFreeMem
+
   // ThreadHeap(v1).ErrorAddr := ErrorAddr(v3)
   {$ifdef CPUX86}
     mov [EAX].TThreadHeap.ErrorAddr, ecx
@@ -3053,13 +3769,14 @@ asm
   jmp @free_difficult
 
 @not_small:
-  // if (P(v2) and MASK_K4_TEST = 0) then BigOrLarge
+  // if (P(v2) and MASK_K4_TEST = 0) then
+  //   MemoryManager.BrainMM.FreeMemoryPages(P, PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     test edx, MASK_K4_TEST
   {$else .CPUX64}
     test rdx, MASK_K4_TEST
   {$endif}
-  jz @free_difficult
+  jz @free_big_large
 
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
   // else ThreadHeap.ErrorInvalidPtr
@@ -3069,6 +3786,31 @@ asm
     cmp [R8].TK64PoolSmall.ThreadHeap, 0
   {$endif}
   je @medium
+  jmp TThreadHeap.ErrorInvalidPtr
+
+@free_big_large:
+  {$ifdef CPUX86}
+    mov eax, edx
+  {$else .CPUX64}
+    mov rcx, rdx
+  {$endif}
+  mov edx, PAGESMODE_SYSTEM
+  call MemoryManager.BrainMM.FreeMemoryPages
+  test al, al
+  jz @error_invalid_ptr
+  {$ifdef CPUX86}
+    mov eax, FREEMEM_DONE
+  {$else .CPUX64}
+    mov rax, FREEMEM_DONE
+  {$endif}
+  ret
+
+@error_invalid_ptr:
+  {$ifdef CPUX86}
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
   jmp TThreadHeap.ErrorInvalidPtr
 
 @free_difficult:
@@ -3090,30 +3832,28 @@ asm
     lea r9, @thread_deferreds_done
     jmp SafeProcessThreadDeferred
   {$endif}
-@penalty_thread_heap:
-  {$ifdef CPUX86}
-    lea eax, @thread_heap_done
-  {$else .CPUX64}
-    lea rcx, @thread_heap_done
-  {$endif}
-  jmp SafeThreadHeapInstance
 end;
 {$endif}
 
 function TThreadHeap.FreeSmall(P: Pointer): Integer;
 {$ifdef PUREPASCAL}
 var
-  Line: PK1LineSmall;
-  Index: NativeInt;
+  Line, Prev, Next: PK1LineSmall;
+  Index, B16Count: NativeInt;
+
+  Mask: NativeInt;
+  {$ifdef SMALLINT}
+  PVInteger: PInteger;
+  {$endif}
 begin
   Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
   Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
 
-  if (Line.ItemSet.VLow32 and 1 = 0{not FullQueue}) then
+  if (Line.Header.ItemSet.VLow32 and 3 = 0{not FullQueue}) then
   begin
-    if (BitUnreserve(Line.ItemSet, Index)) then
+    if (BitUnreserve(Line.Header.ItemSet, Index)) then
     begin
-      if (Line.ItemSet.V64 <> DEFAULT_BITSETS_SMALL[Line.Flags and 15]) then
+      if (Line.Header.ItemSet.V64 <> DEFAULT_BITSETS_SMALL[Line.Header.Flags and 15]) then
       begin
         Result := FREEMEM_DONE;
         Exit;
@@ -3127,33 +3867,67 @@ begin
       Result := Self.ErrorInvalidPtr;
       Exit;
     end;
-  end;
+  end else
+  begin
+    // Dequeue QK1LineFull
+    Prev := Line.Header.Queue.Prev;
+    Next := Line.Header.Queue.Next;
+    if (Prev = nil) then
+    begin
+      Self.QK1LineFull := Next;
+    end else
+    begin
+      Prev.Header.Queue.Next := Next;
+    end;
+    if (Next <> nil) then
+    begin
+      Next.Header.Queue.Prev := Prev;
+    end;
 
-  // penalty (Line.FullQueue = True)
-  Result := Self.PenaltyFreeSmall(P);
+    // Enqueue
+    B16Count := NativeUInt(Line.Header.ModeSize) shr 4;
+    Next := Self.FK1LineSmalls[B16Count];
+    Self.FK1LineSmalls[B16Count] := Line;
+    Line.Header.Queue.Prev := nil;
+    Line.Header.Queue.Next := Next;
+    if (Next <> nil) then Next.Header.Queue.Prev := Line;
+
+    // full bitset, unreserve
+    Mask := 1;
+    {$ifdef LARGEINT}
+      Mask := Mask shl Index;
+      Line.Header.ItemSet.V64 := Mask;
+    {$else .SMALLINT}
+      Mask := Mask shl (Index and 31);
+      PVInteger := @Line.Header.ItemSet.VIntegers[Byte(Index > 31)];
+      Line.Header.ItemSet.VLow32{V64} := 0;
+      PVInteger^ := Mask;
+    {$endif}
+    Result := FREEMEM_DONE;
+  end;
 end;
 {$else}
 asm
   // Line := LineOf(P)
   // Index := IndexOf(Line, P)
   {$ifdef CPUX86}
-    mov ecx, MASK_K1_TEST
-    and ecx, edx
+    mov ecx, edx
     and edx, MASK_K1_CLEAR
+    and ecx, MASK_K1_TEST
     shr ecx, 4
   {$else .CPUX64}
-    mov eax, MASK_K1_TEST
-    and rax, rdx
+    mov r8, rdx
     and rdx, MASK_K1_CLEAR
-    shr rax, 4
+    and r8, MASK_K1_TEST
+    shr r8, 4
   {$endif}
 
   // if (Line.FullQueue) then Exit Self.PenaltyFreeSmall(@Line.Items[Index])
   // if (not BitUnreserve(Index)) then Exit Self.ErrorInvalidPtr
   {$ifdef CPUX86}
-    test [EDX].TK1LineSmall.ItemSet.VLow32, 1
-    jnz @penalty_free_mem
-    lea eax, [EDX].TK1LineSmall.ItemSet.VHigh32
+    test [EDX].TK1LineSmall.Header.ItemSet.VLow32, 3
+    jnz @penalty_requeue
+    lea eax, [EDX].TK1LineSmall.Header.ItemSet.VHigh32
     test ecx, 32
     DB $0F, $45, $D0 // cmovnz edx, eax
     and ecx, 31
@@ -3162,20 +3936,20 @@ asm
     mov [edx], eax
     jc @penalty_error
   {$else .CPUX64}
-    mov r8, [RDX].TK1LineSmall.ItemSet.V64
-    test r8, 1
-    jnz @penalty_free_mem
-    bts r8, rax
-    mov [RDX].TK1LineSmall.ItemSet.V64, r8
+    mov r9, [RDX].TK1LineSmall.Header.ItemSet.V64
+    test r9, 3
+    jnz @penalty_requeue
+    bts r9, r8
+    mov [RDX].TK1LineSmall.Header.ItemSet.V64, r9
     jc @penalty_error
   {$endif}
 
-  // if (Line.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
+  // if (Line.Header.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
   // Exit Self.DisposeK1LineSmall(Line)
   {$ifdef CPUX86}
     and edx, MASK_K1_CLEAR
     mov ecx, 15
-    and ecx, [EDX].TK1LineSmall.Flags
+    and ecx, [EDX].TK1LineSmall.Header.Flags
     mov eax, [offset DEFAULT_BITSETS_SMALL + ecx * 8]
     mov ecx, [offset DEFAULT_BITSETS_SMALL + ecx * 8 + 4]
     sub eax, [edx]
@@ -3183,10 +3957,10 @@ asm
     or eax, ecx
     jz @penalty_dispose_line
   {$else .CPUX64}
-    mov rax, [RDX].TK1LineSmall.Flags
+    mov rax, [RDX].TK1LineSmall.Header.Flags
     and rax, 15
-    lea r9, DEFAULT_BITSETS_SMALL
-    cmp r8, [r9 + rax * 8]
+    lea r8, DEFAULT_BITSETS_SMALL
+    cmp r9, [r8 + rax * 8]
     je @penalty_dispose_line
   {$endif}
 
@@ -3194,15 +3968,6 @@ asm
   mov eax, FREEMEM_DONE
   ret
 
-@penalty_free_mem:
-  {$ifdef CPUX86}
-    add ecx, ecx
-    lea edx, [edx + ecx * 8]
-  {$else .CPUX64}
-    add rax, rax
-    lea rdx, [rdx + rax * 8]
-  {$endif}
-  jmp TThreadHeap.PenaltyFreeSmall
 @penalty_error:
   {$ifdef CPUX86}
     and edx, MASK_K64_CLEAR
@@ -3216,31 +3981,202 @@ asm
     mov eax, [EAX].TK64PoolSmall.ThreadHeap
   {$endif}
   jmp TThreadHeap.DisposeK1LineSmall
+@penalty_requeue:
+  // store Self, x86: store esi/edi
+  // dequeue Self.QK1LineFull
+  {$ifdef CPUX86}
+    push esi
+    push edi
+    push eax
+
+    mov esi, [EDX].TK1LineSmall.Header.Queue.Prev
+    mov edi, [EDX].TK1LineSmall.Header.Queue.Next
+    lea eax, [EAX + TThreadHeap.QK1LineFull - TK1LineSmall.Header.Queue.Next]
+    test esi, esi
+    DB $0F, $45, $C6 // cmovnz eax, esi
+    mov [EAX].TK1LineSmall.Header.Queue.Next, edi
+    lea eax, [esp - 64]
+    test edi, edi
+    DB $0F, $45, $C7 // cmovnz eax, edi
+    mov [EAX].TK1LineSmall.Header.Queue.Prev, esi
+  {$else .CPUX64}
+    mov rax, rcx
+
+    mov r9, [RDX].TK1LineSmall.Header.Queue.Prev
+    mov r10, [RDX].TK1LineSmall.Header.Queue.Next
+    lea rcx, [RCX + TThreadHeap.QK1LineFull - TK1LineSmall.Header.Queue.Next]
+    test r9, r9
+    cmovnz rcx, r9
+    mov [RCX].TK1LineSmall.Header.Queue.Next, r10
+    lea rcx, [rsp - 64]
+    test r10, r10
+    cmovnz rcx, r10
+    mov [RCX].TK1LineSmall.Header.Queue.Prev, r9
+  {$endif}
+
+  // restore Self
+  // enqueue Self.FK1LineSmalls
+  // v4 := 0
+  {$ifdef CPUX86}
+    pop eax
+    add eax, 4
+    mov esi, [EDX].TK1LineSmall.Header.Flags
+    and esi, 7
+    mov edi, [EAX + esi * 4]
+    mov [EAX + esi * 4], edx
+    xor esi, esi
+    mov [EDX].TK1LineSmall.Header.Queue.Prev, esi
+    mov [EDX].TK1LineSmall.Header.Queue.Next, edi
+    lea eax, [esp - 64]
+    test edi, edi
+    DB $0F, $45, $C7 // cmovnz eax, edi
+    mov [EAX].TK1LineSmall.Header.Queue.Prev, edx
+  {$else .CPUX64}
+    lea rcx, [rax + 8]
+    mov r9, [RDX].TK1LineSmall.Header.Flags
+    and r9, 7
+    mov r10, [RCX + r9 * 8]
+    mov [RCX + r9 * 8], rdx
+    xor r9, r9
+    mov [RDX].TK1LineSmall.Header.Queue.Prev, r9
+    mov [RDX].TK1LineSmall.Header.Queue.Next, r10
+    lea rcx, [rsp - 64]
+    test r10, r10
+    cmovnz rcx, r10
+    mov [RCX].TK1LineSmall.Header.Queue.Prev, rdx
+  {$endif}
+
+  // full bitset, unreserve (v4 = 0)
+  {$ifdef CPUX86}
+    mov [EDX].TK1LineSmall.Header.ItemSet.VLow32, esi
+    lea edi, [EDX].TK1LineSmall.Header.ItemSet.VHigh32
+    { lea edx, [EDX].TK1LineSmall.Header.ItemSet.VLow32 }
+    test ecx, 32
+    DB $0F, $45, $D7 // cmovnz edx, edi
+    and ecx, 31
+    mov edi, [edx]
+    bts edi, ecx
+    mov [edx], edi
+    pop edi
+    pop esi
+  {$else .CPUX64}
+    bts r9, r8
+    mov [RDX].TK1LineSmall.Header.ItemSet.V64, r9
+  {$endif}
+
+  // Result
+  mov eax, FREEMEM_DONE
 end;
 {$endif}
 
-// Line.FullQueue = True
-function TThreadHeap.PenaltyFreeSmall(P: Pointer): Integer;
+function BrainMMUnknownRegetMem(ErrorAddr: Pointer; P: Pointer;
+  NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
+label
+  return_made_none, medium, raise_invalid_ptr;
 var
-  Line, Next: PK1LineSmall;
-  Flags, B16Count: NativeUInt;
+  ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
+  Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
+  LastB16Count: NativeUInt;
 begin
-  // dequeue
-  Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-  SupposedDequeue(Pointer(QK1LineFull), Line, Line.FullPrevNext);
+  // inline SpinLock
+  ThreadHeap := UnknownThreadHeap;
+  repeat
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+  try
+    // reget
+    ThreadHeap.ErrorAddr := ErrorAddr;
+    if (NativeInt(P) and MASK_16_TEST = 0) then
+    begin
+      Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
 
-  // full bitset
-  Line.ItemSet.V64 := 0;
+      if (NativeInt(P) and MASK_K1_TEST <> 0) then
+      begin
+        // pool: small or medium
+        if (PK64PoolSmall(Pool).ThreadHeap = ThreadHeap) then
+        begin
+          // pool small
+          NewB16Count := {NewSize}NewB16Count shl 4;
+          if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize >= {NewSize}NewB16Count) then
+          begin
+          return_made_none:
+            Result := P;
+            Exit;
+          end else
+          begin
+            NewB16Count := {retrieve}NewB16Count shr 4;
+            if (NewB16Count <= MAX_SMALL_B16COUNT) then
+            begin
+              Result := ThreadHeap.RegrowSmallToSmall(P, NewB16Count);
+              Exit;
+            end;
+          end;
+        end else
+        if (PK64PoolSmall(Pool).ThreadHeap = nil) then
+        begin
+          // pool medium
+        medium:
+          if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
+          begin
+            LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
+            if (NewB16Count <= LastB16Count) then
+            begin
+              if (NewB16Count = LastB16Count) then goto return_made_none;
+              Result := ThreadHeap.ReduceMedium(P, NewB16Count);
+              Exit;
+            end;
+            if (NewB16Count <= MAX_MEDIUM_B16COUNT) then
+            begin
+              Result := ThreadHeap.RegetMediumToMedium(P, NewB16Count);
+              Exit;
+            end;
+          end;
+        end;
+      end else
+      begin
+        if (NativeInt(P) and MASK_K4_TEST <> 0) then
+        begin
+          // medium or invalid pointer
+          if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
+          goto raise_invalid_ptr;
+        end else
+        begin
+          // big or large
+          Result := MemoryManager.BrainMM.RegetMemoryPages(MemoryPages(P),
+            (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+          if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
+          begin
+            if (Result = PTR_INVALID) then goto raise_invalid_ptr;
+            Result := ThreadHeap.ErrorOutOfMemory;
+          end;
 
-  // move to line smalls list
-  Flags := Line.Flags;
-  B16Count := (Flags and $ff) shr 4;
-  Next := FK1LineSmalls[B16Count];
-  Line.Next := NativeUInt(Next) + (Flags and MASK_K1_TEST);
-  FK1LineSmalls[B16Count] := Line;
+          Exit;
+        end;
+      end;
 
-  // free small memory
-  Result := Self.FreeSmall(P);
+      // "default" method
+      Result := ThreadHeap.RegetDifficult(P, NewB16Count, ReturnAddress);
+      Exit;
+    end else
+    begin
+    raise_invalid_ptr:
+      Result := Pointer(ThreadHeap.RaiseInvalidPtr);
+    end;
+  finally
+    // inline SpinUnlock
+    ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
+  end;
 end;
 
 function BrainMMRegetMem(P: Pointer; NewSize: NativeUInt): Pointer;
@@ -3250,7 +4186,7 @@ const
   ReturnAddress: Pointer = @BrainMMRegetMem;
 {$endif}
 label
-  thread_heap_done, thread_deferreds_done, return_made_none,
+  thread_deferreds_done, return_made_none,
   medium, raise_invalid_ptr;
 const
   ErrorAddr = nil;
@@ -3263,7 +4199,6 @@ begin
   ThreadHeap := ThreadHeapInstance;
   if (ThreadHeap <> nil) then
   begin
-  thread_heap_done:
     ThreadHeap.ErrorAddr := ErrorAddr;
 
     if (not ThreadHeap.Deferreds.Assigned) then
@@ -3280,7 +4215,7 @@ begin
           begin
             // pool small
             NewB16Count := {NewSize}NewB16Count shl 4;
-            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).ModeSize >= {NewSize}NewB16Count) then
+            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize >= {NewSize}NewB16Count) then
             begin
             return_made_none:
               Result := P;
@@ -3322,6 +4257,18 @@ begin
             // medium or invalid pointer
             if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
             goto raise_invalid_ptr;
+          end else
+          begin
+            // big or large
+            Result := MemoryManager.BrainMM.RegetMemoryPages(MemoryPages(P),
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+            if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
+            begin
+              if (Result = PTR_INVALID) then goto raise_invalid_ptr;
+              Result := ThreadHeap.ErrorOutOfMemory;
+            end;
+
+            Exit;
           end;
         end;
 
@@ -3340,8 +4287,7 @@ begin
     end;
   end else
   begin
-    ThreadHeap := CreateThreadHeap;
-    goto thread_heap_done;
+    Result := BrainMMUnknownRegetMem(ErrorAddr, P, NewB16Count, ReturnAddress);
   end;
 end;
 {$else}
@@ -3381,8 +4327,8 @@ asm
     mov rcx, gs:[abs THREAD_HEAP]
     test rcx, rcx
   {$endif}
-  jz @penalty_thread_heap
-@thread_heap_done:
+  jz @return_unknown
+
   // ThreadHeap(v1).ErrorAddr := ErrorAddr(v4)
   {$ifdef CPUX86}
     mov [EAX].TThreadHeap.ErrorAddr, ebx
@@ -3438,13 +4384,13 @@ asm
     mov ebx, edx
     and ebx, MASK_K1_CLEAR
     shl ecx, 4
-    movzx ebx, byte ptr TK1LineSmall[EBX].ModeSize
+    movzx ebx, byte ptr TK1LineSmall[EBX].Header.ModeSize
     cmp ebx, ecx
   {$else .CPUX64}
     mov r9, rdx
     and r9, MASK_K1_CLEAR
     shl r8, 4
-    movzx r9, byte ptr TK1LineSmall[R9].ModeSize
+    movzx r9, byte ptr TK1LineSmall[R9].Header.ModeSize
     cmp r9, r8
   {$endif}
   jb @small_grow
@@ -3517,9 +4463,9 @@ asm
     cmp ecx, MAX_MEDIUM_B16COUNT
   {$else .CPUX64}
     cmp r8, MAX_MEDIUM_B16COUNT
-  {$endif}  
+  {$endif}
   ja @reget_difficult
-  
+
   // Compare: PHeaderMedium(P).B16Count ~ NewB16Count
   // if = then Exit P (return made none)
   // if < then Exit ThreadHeap.RegetMediumToMedium
@@ -3547,7 +4493,7 @@ asm
   {$else .CPUX64}
     test rdx, MASK_K4_TEST
   {$endif}
-  jz @reget_difficult
+  jz @reget_big_large
 
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
   // else ThreadHeap.RaiseInvalidPtr
@@ -3558,6 +4504,38 @@ asm
   {$endif}
   je @medium
   jmp @raise_invalid_ptr
+
+@reget_big_large:
+  // Exit MemoryManager.BrainMM.RegetMemoryPages(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  {$ifdef CPUX86}
+    mov eax, edx
+    lea edx, [ecx + B16_PER_PAGE - 1]
+    mov ecx, PAGESMODE_SYSTEM
+    shr edx, B16_PER_PAGE_SHIFT
+  {$else .CPUX64}
+    mov rcx, rdx
+    lea rdx, [r8 + B16_PER_PAGE - 1]
+    mov r8d, PAGESMODE_SYSTEM
+    shr rdx, B16_PER_PAGE_SHIFT
+    push r10
+  {$endif}
+  call MemoryManager.BrainMM.RegetMemoryPages
+  {$ifdef CPUX86}
+    cmp eax, 1 // PTR_INVALID
+  {$else .CPUX64}
+    cmp rax, 1 // PTR_INVALID
+  {$endif}
+  ja @return_var_p
+  je @raise_invalid_pages
+  {$ifdef CPUX86}
+    push offset @return_var_p
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    lea r9, @return_var_p
+    push r9
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  jmp TThreadHeap.ErrorOutOfMemory
 
 @reget_difficult:
   {$ifdef CPUX86}
@@ -3577,6 +4555,23 @@ asm
     mov [rcx], rax
   {$endif}
   ret
+@return_unknown:
+  {$ifdef CPUX86}
+    mov eax, ebx
+    push dword ptr [esp + 8]
+    push offset @return_var_p
+  {$else .CPUX64}
+    mov rcx, r9
+    mov r9, [rsp]
+    push r10
+    lea r10, @return_var_p
+    push r10
+  {$endif}
+  jmp BrainMMUnknownRegetMem
+@raise_invalid_pages:
+  {$ifdef CPUX64}
+    pop r10
+  {$endif}
 @raise_invalid_ptr:
   {$ifdef CPUX86}
     pop ecx
@@ -3590,13 +4585,6 @@ asm
     lea r9, @thread_deferreds_done
   {$endif}
   jmp SafeProcessThreadDeferred
-@penalty_thread_heap:
-  {$ifdef CPUX86}
-    lea eax, @thread_heap_done
-  {$else .CPUX64}
-    lea rcx, @thread_heap_done
-  {$endif}
-  jmp SafeThreadHeapInstance
 end;
 {$endif}
 
@@ -3642,6 +4630,116 @@ asm
 end;
 {$endif}
 
+function BrainMMUnknownReallocMem(ErrorAddr: Pointer; P: Pointer;
+  NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
+label
+  return_made_none, medium, raise_invalid_ptr;
+var
+  ThreadHeap: PThreadHeap;
+  Flags: SupposedPtr;
+  Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
+  LastB16Count: NativeUInt;
+begin
+  // inline SpinLock
+  ThreadHeap := UnknownThreadHeap;
+  repeat
+    Flags := ThreadHeap.LockFlags;
+    if (Flags <> THREAD_HEAP_LOCKABLE) then
+    begin
+      if (Flags = THREAD_HEAP_LOCKED) then
+      begin
+        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
+      end else
+      begin
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+      end;
+    end;
+  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
+  try
+    // realloc
+    ThreadHeap.ErrorAddr := ErrorAddr;
+    if (NativeInt(P) and MASK_16_TEST = 0) then
+    begin
+      Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+
+      if (NativeInt(P) and MASK_K1_TEST <> 0) then
+      begin
+        // pool: small or medium
+        if (PK64PoolSmall(Pool).ThreadHeap = ThreadHeap) then
+        begin
+          // pool small
+          NewB16Count := {NewSize}NewB16Count shl 4;
+          if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize >= {NewSize}NewB16Count) then
+          begin
+          return_made_none:
+            Result := P;
+            Exit;
+          end else
+          begin
+            NewB16Count := {retrieve}NewB16Count shr 4;
+            if (NewB16Count <= MAX_SMALL_B16COUNT) then
+            begin
+              Result := ThreadHeap.GrowSmallToSmall(P, NewB16Count);
+              Exit;
+            end;
+          end;
+        end else
+        if (PK64PoolSmall(Pool).ThreadHeap = nil) then
+        begin
+          // pool medium
+        medium:
+          if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
+          begin
+            LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
+            if (NewB16Count <= LastB16Count) then
+            begin
+              if (NewB16Count = LastB16Count) then goto return_made_none;
+              Result := ThreadHeap.ReduceMedium(P, NewB16Count);
+              Exit;
+            end;
+            if (NewB16Count <= MAX_MEDIUM_B16COUNT) then
+            begin
+              Result := ThreadHeap.ReallocMediumToMedium(P, NewB16Count);
+              Exit;
+            end;
+          end;
+        end;
+      end else
+      begin
+        if (NativeInt(P) and MASK_K4_TEST <> 0) then
+        begin
+          // medium or invalid pointer
+          if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
+          goto raise_invalid_ptr;
+        end else
+        begin
+          // big or large
+          Result := MemoryManager.BrainMM.ReallocMemoryPages(MemoryPages(P),
+            (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+          if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
+          begin
+            if (Result = PTR_INVALID) then goto raise_invalid_ptr;
+            Result := ThreadHeap.ErrorOutOfMemory;
+          end;
+
+          Exit;
+        end;
+      end;
+
+      // "default" method
+      Result := ThreadHeap.ReallocDifficult(P, NewB16Count, ReturnAddress);
+      Exit;
+    end else
+    begin
+    raise_invalid_ptr:
+      Result := Pointer(ThreadHeap.RaiseInvalidPtr);
+    end;
+  finally
+    // inline SpinUnlock
+    ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
+  end;
+end;
+
 function BrainMMReallocMem(P: Pointer; NewSize: NativeUInt): Pointer;
 {$ifdef PUREPASCAL}
 {$ifNdef RETURNADDRESS}
@@ -3649,7 +4747,7 @@ const
   ReturnAddress: Pointer = @BrainMMReallocMem;
 {$endif}
 label
-  thread_heap_done, thread_deferreds_done, return_made_none,
+  thread_deferreds_done, return_made_none,
   medium, raise_invalid_ptr;
 const
   ErrorAddr = nil;
@@ -3662,7 +4760,6 @@ begin
   ThreadHeap := ThreadHeapInstance;
   if (ThreadHeap <> nil) then
   begin
-  thread_heap_done:
     ThreadHeap.ErrorAddr := ErrorAddr;
 
     if (not ThreadHeap.Deferreds.Assigned) then
@@ -3679,7 +4776,7 @@ begin
           begin
             // pool small
             NewB16Count := {NewSize}NewB16Count shl 4;
-            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).ModeSize >= {NewSize}NewB16Count) then
+            if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize >= {NewSize}NewB16Count) then
             begin
             return_made_none:
               Result := P;
@@ -3721,6 +4818,18 @@ begin
             // medium or invalid pointer
             if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
             goto raise_invalid_ptr;
+          end else
+          begin
+            // big or large
+            Result := MemoryManager.BrainMM.ReallocMemoryPages(MemoryPages(P),
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+            if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
+            begin
+              if (Result = PTR_INVALID) then goto raise_invalid_ptr;
+              Result := ThreadHeap.ErrorOutOfMemory;
+            end;
+
+            Exit;
           end;
         end;
 
@@ -3739,8 +4848,7 @@ begin
     end;
   end else
   begin
-    ThreadHeap := CreateThreadHeap;
-    goto thread_heap_done;
+    Result := BrainMMUnknownReallocMem(ErrorAddr, P, NewB16Count, ReturnAddress);
   end;
 end;
 {$else}
@@ -3780,8 +4888,8 @@ asm
     mov rcx, gs:[abs THREAD_HEAP]
     test rcx, rcx
   {$endif}
-  jz @penalty_thread_heap
-@thread_heap_done:
+  jz @return_unknown
+
   // ThreadHeap(v1).ErrorAddr := ErrorAddr(v4)
   {$ifdef CPUX86}
     mov [EAX].TThreadHeap.ErrorAddr, ebx
@@ -3837,13 +4945,13 @@ asm
     mov ebx, edx
     and ebx, MASK_K1_CLEAR
     shl ecx, 4
-    movzx ebx, byte ptr TK1LineSmall[EBX].ModeSize
+    movzx ebx, byte ptr TK1LineSmall[EBX].Header.ModeSize
     cmp ebx, ecx
   {$else .CPUX64}
     mov r9, rdx
     and r9, MASK_K1_CLEAR
     shl r8, 4
-    movzx r9, byte ptr TK1LineSmall[R9].ModeSize
+    movzx r9, byte ptr TK1LineSmall[R9].Header.ModeSize
     cmp r9, r8
   {$endif}
   jb @small_grow
@@ -3916,9 +5024,9 @@ asm
     cmp ecx, MAX_MEDIUM_B16COUNT
   {$else .CPUX64}
     cmp r8, MAX_MEDIUM_B16COUNT
-  {$endif}  
+  {$endif}
   ja @realloc_difficult
-  
+
   // Compare: PHeaderMedium(P).B16Count ~ NewB16Count
   // if = then Exit P (return made none)
   // if < then Exit ThreadHeap.ReallocMediumToMedium
@@ -3946,7 +5054,7 @@ asm
   {$else .CPUX64}
     test rdx, MASK_K4_TEST
   {$endif}
-  jz @realloc_difficult
+  jz @realloc_big_large
 
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
   // else ThreadHeap.RaiseInvalidPtr
@@ -3957,6 +5065,38 @@ asm
   {$endif}
   je @medium
   jmp @raise_invalid_ptr
+
+@realloc_big_large:
+  // Exit MemoryManager.BrainMM.ReallocMemoryPages(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  {$ifdef CPUX86}
+    mov eax, edx
+    lea edx, [ecx + B16_PER_PAGE - 1]
+    mov ecx, PAGESMODE_SYSTEM
+    shr edx, B16_PER_PAGE_SHIFT
+  {$else .CPUX64}
+    mov rcx, rdx
+    lea rdx, [r8 + B16_PER_PAGE - 1]
+    mov r8d, PAGESMODE_SYSTEM
+    shr rdx, B16_PER_PAGE_SHIFT
+    push r10
+  {$endif}
+  call MemoryManager.BrainMM.ReallocMemoryPages
+  {$ifdef CPUX86}
+    cmp eax, 1 // PTR_INVALID
+  {$else .CPUX64}
+    cmp rax, 1 // PTR_INVALID
+  {$endif}
+  ja @return_var_p
+  je @raise_invalid_pages
+  {$ifdef CPUX86}
+    push offset @return_var_p
+    mov eax, fs:[THREAD_HEAP]
+  {$else .CPUX64}
+    lea r9, @return_var_p
+    push r9
+    mov rcx, gs:[abs THREAD_HEAP]
+  {$endif}
+  jmp TThreadHeap.ErrorOutOfMemory
 
 @realloc_difficult:
   {$ifdef CPUX86}
@@ -3976,6 +5116,23 @@ asm
     mov [rcx], rax
   {$endif}
   ret
+@return_unknown:
+  {$ifdef CPUX86}
+    mov eax, ebx
+    push dword ptr [esp + 8]
+    push offset @return_var_p
+  {$else .CPUX64}
+    mov rcx, r9
+    mov r9, [rsp]
+    push r10
+    lea r10, @return_var_p
+    push r10
+  {$endif}
+  jmp BrainMMUnknownReallocMem
+@raise_invalid_pages:
+  {$ifdef CPUX64}
+    pop r10
+  {$endif}
 @raise_invalid_ptr:
   {$ifdef CPUX86}
     pop ecx
@@ -3989,13 +5146,6 @@ asm
     lea r9, @thread_deferreds_done
   {$endif}
   jmp SafeProcessThreadDeferred
-@penalty_thread_heap:
-  {$ifdef CPUX86}
-    lea eax, @thread_heap_done
-  {$else .CPUX64}
-    lea rcx, @thread_heap_done
-  {$endif}
-  jmp SafeThreadHeapInstance
 end;
 {$endif}
 
@@ -4008,7 +5158,7 @@ begin
   Result := Self.GetSmall(NewB16Count);
   if (Result <> nil) then
   begin
-    LastB16Count := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).ModeSize shr 4;
+    LastB16Count := NativeUInt(PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize) shr 4;
     Result := NcMoveB16Small(P16(P)^, P16(Result)^, LastB16Count);
   end;
 
@@ -4056,9 +5206,9 @@ asm
   // if (Line.FullQueue) then Exit Self.PenaltyGrowSmallToSmall(mode FullQueue)
   // if (not BitUnreserve(Index)) then Exit Self.ErrorInvalidPtr
   {$ifdef CPUX86}
-    test [EDX].TK1LineSmall.ItemSet.VLow32, 1
+    test [EDX].TK1LineSmall.Header.ItemSet.VLow32, 3
     jnz @penalty_copy_freemem
-    lea eax, [EDX].TK1LineSmall.ItemSet.VHigh32
+    lea eax, [EDX].TK1LineSmall.Header.ItemSet.VHigh32
     test ecx, 32
     DB $0F, $45, $D0 // cmovnz edx, eax
     and ecx, 31
@@ -4067,20 +5217,20 @@ asm
     mov [edx], eax
     jc @penalty_error
   {$else .CPUX64}
-    mov r8, [RDX].TK1LineSmall.ItemSet.V64
-    test r8, 1
+    mov r8, [RDX].TK1LineSmall.Header.ItemSet.V64
+    test r8, 3
     jnz @penalty_copy_freemem
     bts r8, rax
-    mov [RDX].TK1LineSmall.ItemSet.V64, r8
+    mov [RDX].TK1LineSmall.Header.ItemSet.V64, r8
     jc @penalty_error
   {$endif}
 
-  // if (Line.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
+  // if (Line.Header.ItemSet.V64 = DEFAULT_BITSETS_SMALL[BitSetKind(Line)]) then
   // Exit Self.PenaltyGrowSmallToSmall(mode DisposeK1LineSmall)
   {$ifdef CPUX86}
     and edx, MASK_K1_CLEAR
     mov ecx, 15
-    and ecx, [EDX].TK1LineSmall.Flags
+    and ecx, [EDX].TK1LineSmall.Header.Flags
     mov eax, [offset DEFAULT_BITSETS_SMALL + ecx * 8]
     mov ecx, [offset DEFAULT_BITSETS_SMALL + ecx * 8 + 4]
     sub eax, [edx]
@@ -4088,7 +5238,7 @@ asm
     or eax, ecx
     jz @penalty_copy_freemem
   {$else .CPUX64}
-    mov rax, [RDX].TK1LineSmall.Flags
+    mov rax, [RDX].TK1LineSmall.Header.Flags
     and rax, 15
     lea r9, DEFAULT_BITSETS_SMALL
     cmp r8, [r9 + rax * 8]
@@ -4100,7 +5250,7 @@ asm
     pop edx
     mov eax, ebx
     and ebx, MASK_K1_CLEAR
-    movzx ecx, [EBX].TK1LineSmall.ModeSize
+    movzx ecx, [EBX].TK1LineSmall.Header.ModeSize
     shr ecx, 4
     pop ebx
   {$else .CPUX64}
@@ -4108,7 +5258,7 @@ asm
     mov rdx, r10
     mov rcx, r8
     and r8, MASK_K1_CLEAR
-    movzx r8, [R8].TK1LineSmall.ModeSize
+    movzx r8, [R8].TK1LineSmall.Header.ModeSize
     shr r8, 4
   {$endif}
   jmp NcMoveB16Small
@@ -4180,22 +5330,59 @@ end;
 {$ifNdef PUREPASCAL}
 function TThreadHeap.PenaltyGrowSmallToSmall(P: Pointer; Dest: Pointer): Pointer;
 var
-  Line: PK1LineSmall;
-  R: Integer;
+  Line, Prev, Next: PK1LineSmall;
+  Index, B16Count: NativeInt;
+
+  Mask: NativeInt;
+  {$ifdef SMALLINT}
+  PVInteger: PInteger;
+  {$endif}
 begin
   Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-  Result := NcMoveB16Small(P16(P)^, P16(Dest)^, {LastB16Count}Line.ModeSize shr 4);
+  Result := NcMoveB16Small(P16(P)^, P16(Dest)^, {LastB16Count}NativeUInt(Line.Header.ModeSize) shr 4);
 
-  if (Line.ItemSet.VLow32 and 1 <> 0{FullQueue}) then
+  if (Line.Header.ItemSet.VLow32 and 3 <> 0{FullQueue}) then
   begin
-    R := Self.PenaltyFreeSmall(P);
+    // Dequeue QK1LineFull
+    Prev := Line.Header.Queue.Prev;
+    Next := Line.Header.Queue.Next;
+    if (Prev = nil) then
+    begin
+      Self.QK1LineFull := Next;
+    end else
+    begin
+      Prev.Header.Queue.Next := Next;
+    end;
+    if (Next <> nil) then
+    begin
+      Next.Header.Queue.Prev := Prev;
+    end;
+
+    // Enqueue
+    B16Count := NativeUInt(Line.Header.ModeSize) shr 4;
+    Next := FK1LineSmalls[B16Count];
+    FK1LineSmalls[B16Count] := Line;
+    Line.Header.Queue.Prev := nil;
+    Line.Header.Queue.Next := Next;
+    if (Next <> nil) then Next.Header.Queue.Prev := Line;
+
+    // full bitset, unreserve
+    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    Mask := 1;
+    {$ifdef LARGEINT}
+      Mask := Mask shl Index;
+      Line.Header.ItemSet.V64 := Mask;
+    {$else .SMALLINT}
+      Mask := Mask shl (Index and 31);
+      PVInteger := @Line.Header.ItemSet.VIntegers[Byte(Index > 31)];
+      Line.Header.ItemSet.VLow32{V64} := 0;
+      PVInteger^ := Mask;
+    {$endif}
   end else
   begin
-    R := Self.DisposeK1LineSmall(Line);
+    if (Self.DisposeK1LineSmall(Line) = FREEMEM_INVALID) then
+      Result := Pointer(Self.RaiseInvalidPtr);
   end;
-
-  if (R = FREEMEM_INVALID) then
-    Self.RaiseInvalidPtr;
 end;
 {$endif}
 
@@ -4245,6 +5432,7 @@ begin
 end;
 
 function TThreadHeap.ReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -4292,6 +5480,105 @@ begin
 
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyReduceMedium(Pointer(Header), NewB16Count);
 end;
+{$else}
+asm
+  // if (not Allocated(P)) then PenaltyReduceMedium
+  // Size := SizeOf(P)
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    push ebx
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, eax
+    movzx eax, ax
+    shl eax, 4
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, rcx
+    movzx rcx, cx
+    shl rcx, 4
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @penalty_reducemem
+
+  // if (not Next.Empty) then PenaltyReduceMedium
+  {$ifdef CPUX86}
+    add edx, eax
+    mov ebx, [EDX].THeaderMedium.Flags
+    cmp [EDX].THeaderMedium.PreviousSize, eax
+    jne @penalty_reducemem_restore
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reducemem_restore
+  {$else .CPUX64}
+    add rdx, rcx
+    mov r9, [RDX].THeaderMedium.Flags
+    cmp [RDX].THeaderMedium.PreviousSize, rcx
+    jne @penalty_reducemem_restore
+    test r9, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reducemem_restore
+  {$endif}
+
+  // empty grow routine, result
+  {$ifdef CPUX86}
+    shl ebx, 4
+    shl ecx, 4
+    add edx, ebx
+    sub eax, ecx
+    add eax, ebx
+    mov [EDX].THeaderMediumEmptyEx.Size, eax
+
+    sub edx, eax
+    shr eax, 4
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    mov [EDX].THeaderMedium.Flags, eax
+
+    sub edx, ecx
+    shr ecx, 4
+    pop ebx
+    mov [EDX - 16].THeaderMedium.B16Count, cx
+    xchg eax, edx
+  {$else .CPUX64}
+    shl r9, 4
+    shl r8, 4
+    add rdx, r9
+    sub rcx, r8
+    add rcx, r9
+    mov [RDX].THeaderMediumEmptyEx.Size, rcx
+
+    sub rdx, rcx
+    shr rcx, 4
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    mov [RDX].THeaderMedium.Flags, rcx
+
+    sub rdx, r8
+    shr r8, 4
+    mov [RDX - 16].THeaderMedium.B16Count, r8w
+    xchg rax, rdx
+  {$endif}
+
+  // Exit
+  ret
+@penalty_reducemem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+  {$endif}
+@penalty_reducemem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+    pop ebx
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyReduceMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
 label
@@ -4417,6 +5704,7 @@ ptr_invalid:
 end;
 
 function TThreadHeap.GetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
+{$ifdef PUREPASCAL}
 var
   Pool: PK64PoolMedium;
   Header: PHeaderMedium;
@@ -4482,6 +5770,146 @@ begin
     Result := Self.PenaltyGetMedium(B16Count, Align);
   end;
 end;
+{$else}
+asm
+  // if (Align <> ma16Bytes) then Self.PenaltyGetMedium(..., ...)
+  {$ifdef CPUX86}
+    test ecx, ecx
+  {$else .CPUX64}
+    test r8, r8
+  {$endif}
+  jnz TThreadHeap.PenaltyGetMedium
+
+  // if (Self.QK64PoolMedium = nil) then Self.PenaltyGetMedium(..., 0)
+  {$ifdef CPUX86}
+    mov ecx, [EAX].TThreadHeap.QK64PoolMedium
+    test ecx, ecx
+  {$else .CPUX64}
+    mov r8, [RCX].TThreadHeap.QK64PoolMedium
+    test r8, r8
+  {$endif}
+  jz TThreadHeap.PenaltyGetMedium
+
+  // if (not Contains(Empty)) then Self.PenaltyGetMedium(..., 0)
+  {$ifdef CPUX86}
+    mov eax, [ECX].TK64PoolMedium.Empties.First.Next
+    lea ecx, [ECX].TK64PoolMedium.Empties.Last
+    cmp eax, ecx
+  {$else .CPUX64}
+    mov rcx, [R8].TK64PoolMedium.Empties.First.Next
+    lea r8, [R8].TK64PoolMedium.Empties.Last
+    cmp rcx, r8
+  {$endif}
+  je @penalty_getmem_thread
+
+  // Size := SizeOf(Empty), check bits
+  // Header := HeaderOf(Empty), check 4kb align
+  {$ifdef CPUX86}
+    mov ecx, [EAX].THeaderMediumEmptyEx.Size
+    add eax, 16
+    sub eax, ecx
+    test ecx, MASK_MEDIUM_SIZE_TEST
+    jnz @penalty_getmem_thread
+    test eax, MASK_K4_TEST
+    jz @penalty_getmem_thread
+  {$else .CPUX64}
+    mov r8, [RCX].THeaderMediumEmptyEx.Size
+    add rcx, 16
+    sub rcx, r8
+    test r8, MASK_MEDIUM_SIZE_TEST
+    jnz @penalty_getmem_thread
+    test rcx, MASK_K4_TEST
+    jz @penalty_getmem_thread
+  {$endif}
+
+  // if (Size shr 4 <> Header.Flags) or (Size shr 4 >= B16Count + 2) then
+  //   Self.PenaltyGetMedium(..., 0)
+  {$ifdef CPUX86}
+    shr ecx, 4
+    add edx, 2
+    sub eax, 16
+    cmp ecx, edx
+    jb @penalty_getmem_b16count
+    cmp ecx, [EAX].THeaderMedium.Flags
+    jne @penalty_getmem_b16count
+  {$else .CPUX64}
+    shr r8, 4
+    add rdx, 2
+    sub rcx, 16
+    cmp r8, rdx
+    jb @penalty_getmem_b16count
+    cmp r8, [RCX].THeaderMedium.Flags
+    jne @penalty_getmem_b16count
+  {$endif}
+
+  // allocate and empty reduce routine
+  {$ifdef CPUX86}
+    sub ecx, edx
+    sub edx, 2
+    add ecx, 1
+    shl edx, 4
+
+    add eax, edx
+    mov [EAX + 16].THeaderMedium.PreviousSize, edx
+    mov [EAX + 16].THeaderMedium.Flags, ecx
+    shl ecx, 4
+    add eax, ecx
+    mov [EAX + 32].THeaderMedium.PreviousSize, ecx
+
+    add ecx, edx
+    shr edx, 4
+    sub eax, ecx
+    add edx, MASK_MEDIUM_ALLOCATED
+    mov [EAX].THeaderMedium.Flags, edx
+    lea eax, [EAX + 16]
+  {$else .CPUX64}
+    sub r8, rdx
+    sub rdx, 2
+    add r8, 1
+    shl rdx, 4
+
+    add rcx, rdx
+    mov [RCX + 16].THeaderMedium.PreviousSize, rdx
+    mov [RCX + 16].THeaderMedium.Flags, r8
+    shl r8, 4
+    add rcx, r8
+    mov [RCX + 32].THeaderMedium.PreviousSize, r8
+
+    add r8, rdx
+    shr rdx, 4
+    sub rcx, r8
+    add rdx, MASK_MEDIUM_ALLOCATED
+    mov [RCX].THeaderMedium.Flags, rdx
+    lea rax, [RCX + 16]
+  {$endif}
+
+  // Exit
+  ret
+@penalty_getmem_b16count:
+  // Dec(B16Count, 2)
+  {$ifdef CPUX86}
+    sub edx, 2
+  {$else .CPUX64}
+    sub rdx, 2
+  {$endif}
+@penalty_getmem_thread:
+  // Self := ThreadHeapOf(Header/Empty)
+  {$ifdef CPUX86}
+    and eax, MASK_K64_CLEAR
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+  {$else .CPUX64}
+    and rcx, MASK_K64_CLEAR
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+@penalty_getmem:
+  {$ifdef CPUX86}
+    xor ecx, ecx
+  {$else .CPUX64}
+    xor r8, r8
+  {$endif}
+  jmp TThreadHeap.PenaltyGetMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyGetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
 label
@@ -4523,7 +5951,7 @@ begin
         Empty := Empty.Next;
       until (Empty = @Pool.Empties.Last);
 
-      Pool := Pointer(Pool.PrevNext.Next and MASK_K64_CLEAR);
+      Pool := Pool.Queue.Next;
     until (Pool = nil);
 
     Pool := Self.NewK64PoolMedium;
@@ -4649,6 +6077,9 @@ begin
 end;
 
 function TThreadHeap.FreeMedium(P: Pointer): Integer;
+const
+  MAX_MEDIUMEMPTY_SIZE = SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium);
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -4679,7 +6110,7 @@ begin
         Inc(Flags, 16);
         Inc(NativeUInt(Header{Empty}), EmptyFlags);
         Inc(Flags, EmptyFlags);
-        if (Flags <> SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium)) then
+        if (Flags <> MAX_MEDIUMEMPTY_SIZE) then
         begin
           PHeaderMediumEmptyEx(Header{Empty}).Size := Flags;
 
@@ -4708,6 +6139,120 @@ begin
   Inc(Header);
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyFreeMedium(Pointer(Header));
 end;
+{$else}
+asm
+  // if (not Self.Allocated) or (not Prev.Allocated) or
+  //  (not Next.Allocated) then PenaltyFreeMedium
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    mov ecx, MASK_MEDIUM_ALLOCATED_TEST
+    and ecx, eax
+    cmp ecx, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem
+
+    lea ecx, [edx - 32]
+    sub ecx, [EDX - 16].THeaderMedium.PreviousSize
+    movzx eax, ax
+    mov ecx, [ECX].THeaderMedium.Flags
+    shl eax, 4
+    and ecx, MASK_MEDIUM_ALLOCATED_TEST
+    add edx, eax
+    cmp ecx, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem_restore
+
+    mov ecx, [EDX].THeaderMedium.Flags
+    test ecx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_freemem_restore
+    shl ecx, 4
+    cmp eax, [EDX].THeaderMedium.PreviousSize
+    jne @penalty_freemem_restore
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r8, MASK_MEDIUM_ALLOCATED_TEST
+    and r8, rcx
+    cmp r8, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem
+
+    lea r8, [rdx - 32]
+    sub r8, [RDX - 16].THeaderMedium.PreviousSize
+    movzx rcx, cx
+    mov r8, [R8].THeaderMedium.Flags
+    shl rcx, 4
+    and r8, MASK_MEDIUM_ALLOCATED_TEST
+    add rdx, rcx
+    cmp r8, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @penalty_freemem_restore
+
+    mov r8, [RDX].THeaderMedium.Flags
+    test r8, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_freemem_restore
+    shl r8, 4
+    cmp rcx, [RDX].THeaderMedium.PreviousSize
+    jne @penalty_freemem_restore
+  {$endif}
+
+  // if (MediumEmpty.Size + Size + 16 = MAX_MEDIUMEMPTY_SIZE) then
+  //   Pool.ThreadHeap.DisposeK64PoolMedium(Pool)
+  {$ifdef CPUX86}
+    add eax, ecx
+    add edx, ecx
+    cmp eax, MAX_MEDIUMEMPTY_SIZE - 16
+    lea eax, [eax + 16]
+  {$else .CPUX64}
+    add rcx, r8
+    add rdx, r8
+    cmp rcx, MAX_MEDIUMEMPTY_SIZE - 16
+    lea rcx, [rcx + 16]
+  {$endif}
+  je @dispose_pool
+
+  // result
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMediumEmptyEx.Size, eax
+    sub edx, eax
+    shr eax, 4
+    mov [EDX].THeaderMedium.Flags, eax
+
+    mov eax, FREEMEM_DONE
+  {$else .CPUX64}
+    mov [RDX].THeaderMediumEmptyEx.Size, rcx
+    sub rdx, rcx
+    shr rcx, 4
+    mov [RDX].THeaderMedium.Flags, rcx
+
+    mov rax, FREEMEM_DONE
+  {$endif}
+
+  // Exit
+  ret
+@dispose_pool:
+  {$ifdef CPUX86}
+    and edx, MASK_K64_CLEAR
+    mov eax, [EDX].TK64PoolMedium.ThreadHeap
+  {$else .CPUX64}
+    and rdx, MASK_K64_CLEAR
+    mov rcx, [RDX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.DisposeK64PoolMedium
+@penalty_freemem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+  {$endif}
+@penalty_freemem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyFreeMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyFreeMedium(P: Pointer): Integer;
 var
@@ -4773,6 +6318,7 @@ end;
 
 function TThreadHeap.RegetMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -4828,6 +6374,125 @@ begin
 
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyRegetMediumToMedium(Pointer(Header), NewB16Count);
 end;
+{$else}
+asm
+  // if (not Allocated(P)) then PenaltyRegetMediumToMedium
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    push ebx
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, eax
+    movzx eax, ax
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, rcx
+    movzx rcx, cx
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @penalty_regetmem
+
+  // GrowCount := NewB16Count - Header(P).P16Count
+  // if (not Next.Empty) then PenaltyRegetMediumToMedium
+  {$ifdef CPUX86}
+    sub ecx, eax
+    shl eax, 4
+    cmp [EDX + eax].THeaderMedium.PreviousSize, eax
+    lea edx, [edx + eax]
+    jne @penalty_regetmem_restore
+    mov ebx, [EDX].THeaderMedium.Flags
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_regetmem_restore
+  {$else .CPUX64}
+    sub r8, rcx
+    shl rcx, 4
+    cmp [RDX + rcx].THeaderMedium.PreviousSize, rcx
+    lea rdx, [rdx + rcx]
+    jne @penalty_regetmem_restore
+    mov r9, [RDX].THeaderMedium.Flags
+    test r9, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_regetmem_restore
+  {$endif}
+
+  // if (EmptyFlags < NewB16Count + 2) then PenaltyRegetMediumToMedium
+  {$ifdef CPUX86}
+    add ecx, 2
+    cmp ebx, ecx
+    lea ecx, [ecx - 2]
+  {$else .CPUX64}
+    add r8, 2
+    cmp r9, r8
+    lea r8, [r8 - 2]
+  {$endif}
+  jb @penalty_regetmem_restore
+
+  // empty reduce routine, result
+  {$ifdef CPUX86}
+    shl ebx, 4
+    shl ecx, 4
+    add edx, ebx
+
+    sub ebx, ecx
+    add ecx, eax
+    mov [EDX].THeaderMediumEmptyEx.Size, ebx
+
+    sub edx, ebx
+    shr ebx, 4
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    mov [EDX].THeaderMedium.Flags, ebx
+
+    sub edx, ecx
+    shr ecx, 4
+    pop ebx
+    mov [EDX - 16].THeaderMedium.B16Count, cx
+    xchg eax, edx
+  {$else .CPUX64}
+    shl r9, 4
+    shl r8, 4
+    add rdx, r9
+
+    sub r9, r8
+    add r8, rcx
+    mov [RDX].THeaderMediumEmptyEx.Size, r9
+
+    sub rdx, r9
+    shr r9, 4
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    mov [RDX].THeaderMedium.Flags, r9
+
+    sub rdx, r8
+    shr r8, 4
+    mov [RDX - 16].THeaderMedium.B16Count, r8w
+    xchg rax, rdx
+  {$endif}
+
+  // Exit
+  ret
+@penalty_regetmem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+    shr eax, 4
+    add ecx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+    shr rcx, 4
+    add r8, rcx
+  {$endif}
+@penalty_regetmem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+    pop ebx
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyRegetMediumToMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyRegetMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
@@ -4961,6 +6626,7 @@ end;
 
 function TThreadHeap.ReallocMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
+{$ifdef PUREPASCAL}
 var
   Header: PHeaderMedium;
   Flags, EmptyFlags: NativeUInt;
@@ -5016,6 +6682,125 @@ begin
 
   Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyReallocMediumToMedium(Pointer(Header), NewB16Count);
 end;
+{$else}
+asm
+  // if (not Allocated(P)) then PenaltyReallocMediumToMedium
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    push ebx
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, eax
+    movzx eax, ax
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, rcx
+    movzx rcx, cx
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @penalty_reallocmem
+
+  // GrowCount := NewB16Count - Header(P).P16Count
+  // if (not Next.Empty) then PenaltyReallocMediumToMedium
+  {$ifdef CPUX86}
+    sub ecx, eax
+    shl eax, 4
+    cmp [EDX + eax].THeaderMedium.PreviousSize, eax
+    lea edx, [edx + eax]
+    jne @penalty_reallocmem_restore
+    mov ebx, [EDX].THeaderMedium.Flags
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reallocmem_restore
+  {$else .CPUX64}
+    sub r8, rcx
+    shl rcx, 4
+    cmp [RDX + rcx].THeaderMedium.PreviousSize, rcx
+    lea rdx, [rdx + rcx]
+    jne @penalty_reallocmem_restore
+    mov r9, [RDX].THeaderMedium.Flags
+    test r9, MASK_MEDIUM_EMPTY_TEST
+    jnz @penalty_reallocmem_restore
+  {$endif}
+
+  // if (EmptyFlags < NewB16Count + 2) then PenaltyReallocMediumToMedium
+  {$ifdef CPUX86}
+    add ecx, 2
+    cmp ebx, ecx
+    lea ecx, [ecx - 2]
+  {$else .CPUX64}
+    add r8, 2
+    cmp r9, r8
+    lea r8, [r8 - 2]
+  {$endif}
+  jb @penalty_reallocmem_restore
+
+  // empty reduce routine, result
+  {$ifdef CPUX86}
+    shl ebx, 4
+    shl ecx, 4
+    add edx, ebx
+
+    sub ebx, ecx
+    add ecx, eax
+    mov [EDX].THeaderMediumEmptyEx.Size, ebx
+
+    sub edx, ebx
+    shr ebx, 4
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    mov [EDX].THeaderMedium.Flags, ebx
+
+    sub edx, ecx
+    shr ecx, 4
+    pop ebx
+    mov [EDX - 16].THeaderMedium.B16Count, cx
+    xchg eax, edx
+  {$else .CPUX64}
+    shl r9, 4
+    shl r8, 4
+    add rdx, r9
+
+    sub r9, r8
+    add r8, rcx
+    mov [RDX].THeaderMediumEmptyEx.Size, r9
+
+    sub rdx, r9
+    shr r9, 4
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    mov [RDX].THeaderMedium.Flags, r9
+
+    sub rdx, r8
+    shr r8, 4
+    mov [RDX - 16].THeaderMedium.B16Count, r8w
+    xchg rax, rdx
+  {$endif}
+
+  // Exit
+  ret
+@penalty_reallocmem_restore:
+  {$ifdef CPUX86}
+    sub edx, eax
+    shr eax, 4
+    add ecx, eax
+  {$else .CPUX64}
+    sub rdx, rcx
+    shr rcx, 4
+    add r8, rcx
+  {$endif}
+@penalty_reallocmem:
+  {$ifdef CPUX86}
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+    pop ebx
+  {$else .CPUX64}
+    mov rcx, MASK_K64_CLEAR
+    and rcx, rdx
+    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.PenaltyReallocMediumToMedium
+end;
+{$endif}
 
 function TThreadHeap.PenaltyReallocMediumToMedium(P: Pointer;
   NewB16Count: NativeUInt): Pointer;
@@ -5164,67 +6949,60 @@ var
   Index: NativeInt;
   Flags, B16Count: NativeUInt;
 begin
-  if (NativeInt(P) and MASK_K4_TEST <> 0) then
+  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+  PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
+  if (PoolThreadHeap <> nil) then
   begin
-    Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-    PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
-    if (PoolThreadHeap <> nil) then
+    // pool small
+    if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
     begin
-      // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // check pointer
-      Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-      repeat
-        ItemSet := Line.ItemSet;
-      until (ItemSet.V64 = Line.ItemSet.V64);
-      Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-      if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
-        (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // thread deffered
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, True);
-    end else
-    begin
-      // pool medium
-      PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // check pointer
-      Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-      B16Count := Word(Flags);
-      if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
-      begin
-        Result := Self.ErrorInvalidPtr;
-        Exit;
-      end;
-
-      // thread deffered
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, False);
+      Result := Self.ErrorInvalidPtr;
+      Exit;
     end;
 
-    // after thread deffered result
-    Result := FREEMEM_DONE;
+    // check pointer
+    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
+    repeat
+      ItemSet := Line.Header.ItemSet;
+    until (ItemSet.V64 = Line.Header.ItemSet.V64);
+    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
+      (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
+    begin
+      Result := Self.ErrorInvalidPtr;
+      Exit;
+    end;
+
+    // thread deffered
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, True);
   end else
   begin
-    // big or large
-    Result := Self.FreeBigOrLarge(P);
+    // pool medium
+    PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
+    if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+    begin
+      Result := Self.ErrorInvalidPtr;
+      Exit;
+    end;
+
+    // check pointer
+    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+    B16Count := Word(Flags);
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
+      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+    begin
+      Result := Self.ErrorInvalidPtr;
+      Exit;
+    end;
+
+    // thread deffered
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, False);
   end;
+
+  // after thread deffered result
+  Result := FREEMEM_DONE;
 end;
 
 function TThreadHeap.RegetDifficult(P: Pointer; NewB16Count: NativeUInt;
@@ -5240,79 +7018,76 @@ var
   R: Integer;
   Flags, B16Count: NativeUInt;
 begin
-  if (NativeInt(P) and MASK_K4_TEST <> 0) then
+  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+  PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
+  if (PoolThreadHeap <> nil) then
   begin
-    Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-    PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
-    if (PoolThreadHeap <> nil) then
-    begin
-      // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
+    // pool small
+    if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
 
-      // check pointer
-      Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-      repeat
-        ItemSet := Line.ItemSet;
-      until (ItemSet.V64 = Line.ItemSet.V64);
-      Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-      if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
-        (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
-        Self.RaiseInvalidPtr;
+    // check pointer
+    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
+    repeat
+      ItemSet := Line.Header.ItemSet;
+    until (ItemSet.V64 = Line.Header.ItemSet.V64);
+    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
+      (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
+      Self.RaiseInvalidPtr;
 
-      // small flags
-      IsSmall := True;
-      Align := ma16Bytes;
-    end else
-    begin
-      // pool medium
-      PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
-
-      // check pointer
-      Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-      B16Count := Word(Flags);
-      if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
-        Self.RaiseInvalidPtr;
-
-      // medium flags
-      IsSmall := False;
-      Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-    end;
-
-    // free small/medium
-    if (PoolThreadHeap = @Self) then
-    begin
-      if (IsSmall) then R := Self.FreeSmall(P)
-      else R := Self.FreeMedium(P);
-
-      if (R = FREEMEM_INVALID) then
-        Self.RaiseInvalidPtr;
-    end else
-    begin
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
-    end;
-
-    // allocate
-    case (NewB16Count) of
-      0..MAX_SMALL_B16COUNT:
-      begin
-        if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
-        else Result := Self.GetMedium(NewB16Count, Ord(Align));
-      end;
-      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-        Result := Self.GetMedium(NewB16Count, Ord(Align));
-    else
-      Result := Self.GetBigOrLarge(NewB16Count);
-    end;
+    // small flags
+    IsSmall := True;
+    Align := ma16Bytes;
   end else
   begin
-    // big or large
-    Result := Self.RegetBigOrLarge(P, NewB16Count);
+    // pool medium
+    PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
+    if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
+
+    // check pointer
+    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+    B16Count := Word(Flags);
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
+      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+      Self.RaiseInvalidPtr;
+
+    // medium flags
+    IsSmall := False;
+    Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
+  end;
+
+  // free small/medium
+  if (PoolThreadHeap = @Self) then
+  begin
+    if (IsSmall) then R := Self.FreeSmall(P)
+    else R := Self.FreeMedium(P);
+
+    if (R = FREEMEM_INVALID) then
+      Self.RaiseInvalidPtr;
+  end else
+  begin
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
+  end;
+
+  // allocate
+  case (NewB16Count) of
+    0..MAX_SMALL_B16COUNT:
+    begin
+      if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
+      else Result := Self.GetMedium(NewB16Count, Ord(Align));
+    end;
+    MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+      Result := Self.GetMedium(NewB16Count, Ord(Align));
+  else
+    Result := MemoryManager.BrainMM.GetMemoryPages(
+      (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+      PAGESMODE_SYSTEM);
+    if (Result = nil) then
+      Result := Self.ErrorOutOfMemory;
   end;
 end;
 
@@ -5330,119 +7105,139 @@ var
   R: Integer;
   Flags, B16Count: NativeUInt;
 begin
-  if (NativeInt(P) and MASK_K4_TEST <> 0) then
+  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+  PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
+  if (PoolThreadHeap <> nil) then
   begin
-    Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-    PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
-    if (PoolThreadHeap <> nil) then
-    begin
-      // pool small
-      if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
+    // pool small
+    if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
 
-      // check pointer
-      Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-      repeat
-        ItemSet := Line.ItemSet;
-      until (ItemSet.V64 = Line.ItemSet.V64);
-      Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-      if (ItemSet.VLow32 and 1 = 0{not FullQueue}) and
-        (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
-        Self.RaiseInvalidPtr;
+    // check pointer
+    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
+    repeat
+      ItemSet := Line.Header.ItemSet;
+    until (ItemSet.V64 = Line.Header.ItemSet.V64);
+    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
+      (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
+      Self.RaiseInvalidPtr;
 
-      // small size/flags
-      LastB16Count := Line.ModeSize shr 4;
-      Align := ma16Bytes;
-      IsSmall := True;
-    end else
-    begin
-      // pool medium
-      PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-      if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-        (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-        Self.RaiseInvalidPtr;
-
-      // check pointer
-      Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-      B16Count := Word(Flags);
-      if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-        (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
-        Self.RaiseInvalidPtr;
-
-      // medium size/flags
-      LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
-      Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-      IsSmall := False;
-    end;
-
-    // allocate
-    case (NewB16Count) of
-      0..MAX_SMALL_B16COUNT:
-      begin
-        if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
-        else Result := Self.GetMedium(NewB16Count, Ord(Align));
-      end;
-      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-        Result := Self.GetMedium(NewB16Count, Ord(Align));
-    else
-      Result := Self.GetBigOrLarge(NewB16Count);
-    end;
-
-    // copy (minimum)
-    if (Result <> nil) then
-    begin
-      if (LastB16Count > NewB16Count) then LastB16Count := NewB16Count;
-      NcMoveB16(P16(P)^, P16(Result)^, LastB16Count);
-    end;
-
-    // free small/medium
-    if (PoolThreadHeap = @Self) then
-    begin
-      if (IsSmall) then R := Self.FreeSmall(P)
-      else R := Self.FreeMedium(P);
-
-      if (R = FREEMEM_INVALID) then
-        Self.RaiseInvalidPtr;
-    end else
-    begin
-      PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
-    end;
+    // small size/flags
+    LastB16Count := NativeUInt(Line.Header.ModeSize) shr 4;
+    Align := ma16Bytes;
+    IsSmall := True;
   end else
   begin
-    // big or large
-    Result := Self.ReallocBigOrLarge(P, NewB16Count);
+    // pool medium
+    PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
+    if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
+      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
+      Self.RaiseInvalidPtr;
+
+    // check pointer
+    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+    B16Count := Word(Flags);
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
+      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+      Self.RaiseInvalidPtr;
+
+    // medium size/flags
+    LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
+    Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
+    IsSmall := False;
+  end;
+
+  // allocate
+  case (NewB16Count) of
+    0..MAX_SMALL_B16COUNT:
+    begin
+      if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
+      else Result := Self.GetMedium(NewB16Count, Ord(Align));
+    end;
+    MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+      Result := Self.GetMedium(NewB16Count, Ord(Align));
+  else
+    Result := MemoryManager.BrainMM.GetMemoryPages(
+      (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+      PAGESMODE_SYSTEM);
+    if (Result = nil) then
+      Result := Self.ErrorOutOfMemory;
+  end;
+
+  // copy (minimum)
+  if (Result <> nil) then
+  begin
+    if (LastB16Count > NewB16Count) then LastB16Count := NewB16Count;
+    NcMoveB16(P16(P)^, P16(Result)^, LastB16Count);
+  end;
+
+  // free small/medium
+  if (PoolThreadHeap = @Self) then
+  begin
+    if (IsSmall) then R := Self.FreeSmall(P)
+    else R := Self.FreeMedium(P);
+
+    if (R = FREEMEM_INVALID) then
+      Self.RaiseInvalidPtr;
+  end else
+  begin
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
   end;
 end;
 
-function TThreadHeap.GetPagesMode: NativeUInt;
-begin
-  Result := PAGESMODE_SYSTEM + Byte(FNextHeap = JITHEAP_MARKER);
-end;
-
 function TThreadHeap.NewK64PoolSmall: PK64PoolSmall;
+var
+  PagesMode: NativeUInt;
+  Next: PK64PoolSmall;
 begin
-  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, Self.GetPagesMode);
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, PagesMode);
   if (Result = nil) then
   begin
     Result := Self.ErrorOutOfMemory;
     Exit;
   end;
 
+  Result.Header.Flags := 0{not FullQueue};
   Result.ThreadHeap := @Self;
   Result.LineSet.V64 := -1{Empty};
-  Result.PrevNext.Prev := 0{not FullQueue};
-  SupposedEnqueue(Pointer(QK64PoolSmall), Result, Result.PrevNext);
+
+  // Enqueue
+  Next := Self.QK64PoolSmall;
+  Self.QK64PoolSmall := Result;
+  Result.Queue.Prev := nil;
+  Result.Queue.Next := Next;
+  if (Next <> nil) then Next.Queue.Prev := Result;
 end;
 
 function TThreadHeap.DisposeK64PoolSmall(PoolSmall: PK64PoolSmall): Integer;
+var
+  PagesMode: NativeUInt;
+  Prev, Next: PK64PoolSmall;
 begin
-  SupposedDequeue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
+  // Dequeue
+  Prev := PoolSmall.Queue.Prev;
+  Next := PoolSmall.Queue.Next;
+  if (Prev = nil) then
+  begin
+    Self.QK64PoolSmall := Next;
+  end else
+  begin
+    Prev.Queue.Next := Next;
+  end;
+  if (Next <> nil) then
+  begin
+    Next.Queue.Prev := Prev;
+  end;
+
   PoolSmall.LineSet.V64 := 0{none available lines};
   PoolSmall.ThreadHeap := nil;
   PK64PoolMedium(PoolSmall).ThreadHeap := nil;
 
-  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, Self.GetPagesMode)) then
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, PagesMode)) then
   begin
     Result := FREEMEM_DONE;
   end else
@@ -5451,80 +7246,161 @@ begin
   end;
 end;
 
-function TThreadHeap.NewK1LineSmall(B16Count: NativeUInt): PK1LineSmall;
+function TThreadHeap.GetNewK1LineSmall(B16Count: NativeUInt): Pointer;
+label
+  allocated_pool, new_k64pool;
 var
   Index: NativeUInt;
-  PoolSmall: PK64PoolSmall;
+  Line: PK1LineSmall;
+  PoolSmall, Next, NextFull: PK64PoolSmall;
+
+  P: PInteger;
+  VInteger: Integer;
+  BitSet: PBitSet8;
+
+  {$ifdef CPUX86}
+  ThreadHeap: PThreadHeap;
+  {$endif}
 begin
-  // take small pool
-  repeat
-    PoolSmall := QK64PoolSmall;
-    if (PoolSmall <> nil) then
-    begin
-      if ({has available lines}PoolSmall.LineSet.V64 <> 0) then Break;
-      // Full not FullQueue --> FullQueue
-      PoolSmall.PrevNext.Prev := PoolSmall.PrevNext.Prev or 1;
-      SupposedDequeue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
-      SupposedEnqueue(Pointer(QK64PoolSmallFull), PoolSmall, PoolSmall.PrevNext);
-      // Continue;
-    end else
-    begin
-      PoolSmall := NewK64PoolSmall;
-      if (PoolSmall = nil{failure}) then
+  // take small pool, reserve line, get first
+  Next := Self.QK64PoolSmall;
+  if (Next <> nil) then
+  begin
+    repeat
+      PoolSmall := Next;
+    allocated_pool:
+      P := Pointer(@PoolSmall.LineSet);
+      P := @PBitSet8(P).VIntegers[Byte(PoolSmall.LineSet.VLow32 = 0)];
+      VInteger := P^;
+      if ({has available lines}VInteger <> 0) then
       begin
-        Result := nil;
+        // reserve line
+        Inc(PWord(P), Byte(VInteger and $ffff = 0));
+        Inc(NativeUInt(P), Byte(PByte(P)^ = 0));
+        Index := (NativeUInt(P) - NativeUInt(@PoolSmall.LineSet)) shl 3 + BIT_SCANS[PByte(P)^];
+        PInteger(NativeInt(P) and -4)^ := VInteger xor (1 shl (Index and 31));
+
+        // store line
+        {$ifdef CPUX86}
+        ThreadHeap := PoolSmall.ThreadHeap;
+        {$endif}
+        Index := Index shl 10;
+        Line := Pointer(PoolSmall);
+        Inc(NativeUInt(Line), Index);
+        {$ifdef CPUX86}
+          ThreadHeap.FK1LineSmalls[B16Count] := Line;
+        {$else}
+          Self.FK1LineSmalls[B16Count] := Line;
+        {$endif}
+        Line.Header.Queue.Prev := nil;
+        Line.Header.Queue.Next := nil;
+
+        // parameters
+        Index := {8 * IsFirst: Boolean}((Index - 1) shr ({$ifdef LARGEINT}63{$else}31{$endif} - 3)) and 8;
+        Index := Index + {BaseIndex}(B16Count - 1);
+        Line.Header.Flags := {ModeSizeBits}(B16Count shl 4) + Index;
+
+        // item set, get first
+        BitSet := Pointer(@DEFAULT_BITSETS_SMALL[Index]);
+        Index := FIRST_BITSETS_SMALL[Index];
+        {$ifdef LARGEINT}
+          Line.Header.ItemSet.V64 := BitSet.V64 xor NativeInt(Word(Index));
+        {$else .SMALLINT}
+          Line.Header.ItemSet.VHigh32 := BitSet.VHigh32;
+          Line.Header.ItemSet.VLow32 := BitSet.VLow32 xor NativeInt(Word(Index));
+        {$endif}
+        Inc(NativeUInt(Line), Index shr 16);
+        Result := Line;
+
         Exit;
       end;
-      Break;
-    end;
-  until (False);
 
-  // reserve line
-  Result := @PoolSmall.Lines[BitReserve(PoolSmall.LineSet)];
+      // Full (QK64PoolSmall) --> (QK64PoolSmallFull)
+      begin
+        PoolSmall.Header.InQK64PoolSmallFull := True;
+        // Dequeue
+        Next := {Self.QK64}PoolSmall.Queue.Next;
+        Self.QK64PoolSmall := Next;
+        // Enqueue
+        NextFull := Self.QK64PoolSmallFull;
+        Self.QK64PoolSmallFull := PoolSmall;
+        { PoolSmall.Queue.Prev := already nil; }
+        PoolSmall.Queue.Next := NextFull;
+        if (Next <> nil) then
+        begin
+          Next.Queue.Prev := nil;
+          if (NextFull <> nil) then NextFull.Queue.Prev := PoolSmall;
+          // Continue;
+        end else
+        begin
+          if (NextFull <> nil) then NextFull.Queue.Prev := PoolSmall;
+          goto new_k64pool;
+        end;
+      end;
+    until (False)
+  end else
+  begin
+  new_k64pool:
+    PoolSmall := Self.NewK64PoolSmall;
+    if (PoolSmall <> nil) then goto allocated_pool;
+  end;
 
-  // parameters
-  Index := {BaseIndex}(B16Count - 1) + {IsFirst: Boolean}(Byte(Pointer(PoolSmall) = Pointer(Result)) shl 3);
-  Result.ItemSet.V64 := DEFAULT_BITSETS_SMALL[Index];
-  Result.Flags := {ModeSizeBits}(B16Count shl 4) + Index;
-
-  // store line
-  { Result.Next := nil; }
-  FK1LineSmalls[B16Count] := Result;
+  // failure
+  Result := nil;
 end;
 
 function TThreadHeap.DisposeK1LineSmall(Line: PK1LineSmall): Integer;
+{$ifdef PUREPASCAL}
 var
-  Current, Next: PK1LineSmall;
   Index: NativeUInt;
   PoolSmall: PK64PoolSmall;
+  Prev, Next: Pointer;
 begin
-  Current := Self.FK1LineSmalls[(Line.Flags and 7) + 1];
-  if (Current = Line) then
+  // Dequeue
+  Prev := Line.Header.Queue.Prev;
+  Next := Line.Header.Queue.Next;
+  if (Prev = nil) then
   begin
-    Self.FK1LineSmalls[(Line.Flags and 7) + 1] := Pointer(Line.Next and MASK_K1_CLEAR);
+    Self.FK1LineSmalls[(Line.Header.Flags and 7) + 1] := Next;
   end else
   begin
-    Next := Pointer(Current.Next and MASK_K1_CLEAR);
-    if (Next <> Line) then
-    repeat
-      Current := Next;
-      Next := Pointer(Current.Next and MASK_K1_CLEAR);
-    until (Next = Line);
-
-    Current.Next := (Current.Next and MASK_K1_TEST) + (Line.Next and MASK_K1_CLEAR);
+    PK1LineSmall(Prev).Header.Queue.Next := Next;
   end;
-
-  Line.ItemSet.V64 := 0{non available items};
-  Line.Flags := 0;
-  PoolSmall := Pointer(NativeUInt(Line) and MASK_K64_CLEAR);
-  Index := (NativeUInt(Line) and MASK_K64_TEST) shr 10;
-
-  if (PoolSmall.PrevNext.Prev and 1 <> 0{FullQueue --> Standard}) then
+  if (Next <> nil) then
   begin
-    PoolSmall.PrevNext.Prev := PoolSmall.PrevNext.Prev and -2{FullQueue := False};
-    SupposedDequeue(Pointer(QK64PoolSmallFull), PoolSmall, PoolSmall.PrevNext);
-    SupposedEnqueue(Pointer(QK64PoolSmall), PoolSmall, PoolSmall.PrevNext);
+    PK1LineSmall(Next).Header.Queue.Prev := Prev;
   end;
+
+  PoolSmall := Pointer(NativeUInt(Line) and MASK_K64_CLEAR);
+  if (PoolSmall.Header.InQK64PoolSmallFull) then
+  begin
+    // QK64PoolSmallFull --> QK64PoolSmall
+    PoolSmall.Header.InQK64PoolSmallFull := False;
+    // Dequeue
+    Prev := PoolSmall.Queue.Prev;
+    Next := PoolSmall.Queue.Next;
+    if (Prev = nil) then
+    begin
+      Self.QK64PoolSmallFull := Next;
+    end else
+    begin
+      PK64PoolSmall(Prev).Queue.Next := Next;
+    end;
+    if (Next <> nil) then
+    begin
+      PK64PoolSmall(Next).Queue.Prev := Prev;
+    end;
+    // Enqueue
+    Next := Self.QK64PoolSmall;
+    Self.QK64PoolSmall := PoolSmall;
+    PoolSmall.Queue.Prev := nil;
+    PoolSmall.Queue.Next := Next;
+    if (Next <> nil) then PK64PoolSmall(Next).Queue.Prev := PoolSmall;
+  end;
+
+  Line.Header.ItemSet.V64 := 0{non available items};
+  Line.Header.Flags := 0;
+  Index := (NativeUInt(Line) and MASK_K64_TEST) shr 10;
 
   if (not BitUnreserve(PoolSmall.LineSet, Index)) then
   begin
@@ -5540,13 +7416,205 @@ begin
     Result := FREEMEM_DONE;
   end;
 end;
+{$else}
+asm
+  // v1 := @Self.FK1LineSmalls[(Line.Header.Flags and 7) + 1] - TK1LineSmall.Header.Queue.Next
+  // x86: store (v4)
+  {$ifdef CPUX86}
+    mov ecx, [EDX].TK1LineSmall.Header.Flags
+    and ecx, 7
+    lea eax, [eax + TThreadHeap.FK1LineSmalls - TK1LineSmall.Header.Queue.Next]
+    push ebx
+    lea eax, [eax + 4 * ecx]
+  {$else .CPUX64}
+    mov r8, [RDX].TK1LineSmall.Header.Flags
+    and r8, 7
+    lea rcx, [rcx + TThreadHeap.FK1LineSmalls - TK1LineSmall.Header.Queue.Next]
+    lea rcx, [rcx + 8 * r8]
+  {$endif}
+
+  // dequeue
+  {$ifdef CPUX86}
+    mov ecx, [EDX].TK1LineSmall.Header.Queue.Prev
+    mov ebx, [EDX].TK1LineSmall.Header.Queue.Next
+    test ecx, ecx
+    DB $0F, $45, $C1 // cmovnz eax, ecx
+    mov [EAX].TK1LineSmall.Header.Queue.Next, ebx
+    lea eax, [esp - 64]
+    test ebx, ebx
+    DB $0F, $45, $C3 // cmovnz eax, ebx
+    mov [EAX].TK1LineSmall.Header.Queue.Prev, ecx
+  {$else .CPUX64}
+    mov r8, [RDX].TK1LineSmall.Header.Queue.Prev
+    mov r9, [RDX].TK1LineSmall.Header.Queue.Next
+    test r8, r8
+    cmovnz rcx, r8
+    mov [RCX].TK1LineSmall.Header.Queue.Next, r9
+    lea rcx, [rsp - 64]
+    test r9, r9
+    cmovnz rcx, r9
+    mov [RCX].TK1LineSmall.Header.Queue.Prev, r8
+  {$endif}
+
+  // v3 := PoolSmalOf(Line)
+  // if PoolSmall(v3).Header.InQK64PoolSmallFull then goto Requeue(QK64PoolSmallFull, QK64PoolSmall);
+  {$ifdef CPUX86}
+    mov ecx, MASK_K64_CLEAR
+    and ecx, edx
+    cmp [ECX].TK1LineSmall.Header.Flags, $00ffffff
+  {$else .CPUX64}
+    mov r8, MASK_K64_CLEAR
+    and r8, rdx
+    cmp [R8].TK1LineSmall.Header.Flags, $00ffffff
+  {$endif}
+  ja @pool_small_requeue
+
+  // clear line flags
+  // Index (v2) := IndexOf(Line)
+@dispose_line:
+  {$ifdef CPUX86}
+    xor eax, eax
+    mov [EDX].TK1LineSmall.Header.ItemSet.VLow32, eax
+    mov [EDX].TK1LineSmall.Header.ItemSet.VHigh32, eax
+    mov [EDX].TK1LineSmall.Header.Flags, eax
+    and edx, MASK_K64_TEST
+    shr edx, 10
+  {$else .CPUX64}
+    xor rcx, rcx
+    mov [RDX].TK1LineSmall.Header.ItemSet.V64, rcx
+    mov [RDX].TK1LineSmall.Header.Flags, rcx
+    and rdx, MASK_K64_TEST
+    shr rdx, 10
+  {$endif}
+
+  // if (not BitUnreserve(PoolSmall.LineSet, Index)) then Exit Self.ErrorInvalidPtr;
+  {$ifdef CPUX86}
+    lea eax, [ECX].TK64PoolSmall.LineSet.VLow32
+    lea ebx, [ECX].TK64PoolSmall.LineSet.VHigh32
+    test edx, 32
+    DB $0F, $45, $C3 // cmovnz eax, ebx
+    and edx, 31
+    mov ebx, [eax]
+    bts ebx, edx
+    mov [eax], ebx
+    pop ebx
+  {$else .CPUX64}
+    mov rax, [R8].TK64PoolSmall.LineSet.V64
+    bts rax, rdx
+    mov [R8].TK64PoolSmall.LineSet.V64, rax
+  {$endif}
+  jc @error_invalid_ptr
+
+  // if (PoolSmall(v3).LineSet.V64 = -1{Empty}) then Exit Self.DisposeK64PoolSmall(PoolSmall);
+  {$ifdef CPUX86}
+    mov edx, [ECX].TK64PoolSmall.LineSet.VLow32
+    mov eax, [ECX].TK64PoolSmall.LineSet.VHigh32
+    add edx, 1
+    add eax, 1
+    or edx, eax
+    mov eax, [ECX].TK64PoolSmall.ThreadHeap
+    xchg edx, ecx
+  {$else .CPUX64}
+    cmp rax, -1
+    mov rcx, [R8].TK64PoolSmall.ThreadHeap
+    xchg rdx, r8
+  {$endif}
+  je TThreadHeap.DisposeK64PoolSmall
+
+  // result
+  mov eax, FREEMEM_DONE
+  ret
+
+@pool_small_requeue:
+  // PoolSmall.Header.InQK64PoolSmallFull := False
+  {$ifdef CPUX86}
+    mov [ECX].TK64PoolSmall.Header.InQK64PoolSmallFull, 0
+  {$else .CPUX64}
+    mov [R8].TK64PoolSmall.Header.InQK64PoolSmallFull, 0
+  {$endif}
+
+  // retrieve Self, store line
+  // x64: store Self
+  {$ifdef CPUX86}
+    mov eax, [ECX].TK64PoolSmall.ThreadHeap
+    push edx
+  {$else .CPUX64}
+    mov rcx, [R8].TK64PoolSmall.ThreadHeap
+    xchg rax, rdx
+    mov r11, rcx
+  {$endif}
+
+  // dequeue
+  {$ifdef CPUX86}
+    lea eax, [EAX + TK64PoolSmall.QK64PoolSmallFull - TK64PoolSmall.Queue.Next]
+    mov edx, [ECX].TK64PoolSmall.Queue.Prev
+    mov ebx, [ECX].TK64PoolSmall.Queue.Next
+    test edx, edx
+    DB $0F, $45, $C2 // cmovnz eax, edx
+    mov [EAX].TK64PoolSmall.Queue.Next, ebx
+    lea eax, [esp - 64]
+    test ebx, ebx
+    DB $0F, $45, $C3 // cmovnz eax, ebx
+    mov [EAX].TK64PoolSmall.Queue.Prev, edx
+  {$else .CPUX64}
+    lea rcx, [RCX + TK64PoolSmall.QK64PoolSmallFull - TK64PoolSmall.Queue.Next]
+    mov rdx, [R8].TK64PoolSmall.Queue.Prev
+    mov r9, [R8].TK64PoolSmall.Queue.Next
+    test rdx, rdx
+    cmovnz rcx, rdx
+    mov [RCX].TK64PoolSmall.Queue.Next, r9
+    lea rcx, [rsp - 64]
+    test r9, r9
+    cmovnz rcx, r9
+    mov [RCX].TK64PoolSmall.Queue.Prev, rdx
+  {$endif}
+
+  // retrieve Self, enqueue, retrieve Line
+  {$ifdef CPUX86}
+    mov eax, [ECX].TK64PoolSmall.ThreadHeap
+    mov edx, [EAX].TThreadHeap.QK64PoolSmall
+    mov [EAX].TThreadHeap.QK64PoolSmall, ecx
+    mov [ECX].TK64PoolSmall.Queue.Prev, 0
+    mov [ECX].TK64PoolSmall.Queue.Next, edx
+    lea ebx, [esp - 64]
+    test edx, edx
+    DB $0F, $45, $DA // cmovnz ebx, edx
+    mov [EBX].TK64PoolSmall.Queue.Prev, ecx
+    pop edx
+  {$else .CPUX64}
+    xchg rcx, r11
+    mov rdx, [RCX].TThreadHeap.QK64PoolSmall
+    mov [RCX].TThreadHeap.QK64PoolSmall, r8
+    xor r11, r11
+    mov [R8].TK64PoolSmall.Queue.Prev, r11
+    mov [R8].TK64PoolSmall.Queue.Next, rdx
+    lea r9, [rsp - 64]
+    test rdx, rdx
+    cmovnz r9, rdx
+    mov [R9].TK64PoolSmall.Queue.Prev, r8
+    xchg rdx, rax
+  {$endif}
+
+  jmp @dispose_line
+@error_invalid_ptr:
+  {$ifdef CPUX86}
+    mov eax, [ECX].TK64PoolSmall.ThreadHeap
+  {$else .CPUX64}
+    mov rcx, [R8].TK64PoolSmall.ThreadHeap
+  {$endif}
+  jmp TThreadHeap.ErrorInvalidPtr
+end;
+{$endif}
 
 function TThreadHeap.NewK64PoolMedium: PK64PoolMedium;
 var
+  PagesMode: NativeUInt;
   Start: PHeaderMedium;
   Empty: PHeaderMediumEmpty;
+  Next: PK64PoolMedium;
 begin
-  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, Self.GetPagesMode);
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, PagesMode);
   if (Result = nil) then
   begin
     Result := Self.ErrorOutOfMemory;
@@ -5556,11 +7624,14 @@ begin
   Result.MarkerNil := nil;
   Result.ThreadHeap := @Self;
 
+  Result.FakeAllocated.PreviousSize := NativeUInt(-1);
+  Result.FakeAllocated.Flags := MASK_MEDIUM_ALLOCATED;
+
   Start := @Result.Items[Low(Result.Items)];
   Start.PreviousSize := 0;
   Start.Flags := {B16Count}(High(Result.Items) + 1) + {Align: ma16Bytes, Allocated: False}0;
   Result.Finish.PreviousSize := (High(Result.Items) + 1) * SizeOf(THeaderMedium);
-  Result.Finish.Flags := {failure B16Count}0 + (Ord(ma16Bytes) shl 16) + ({Allocated}1 shl 24);
+  Result.Finish.Flags := {failure B16Count}0 + (Ord(ma16Bytes) shl 16) + MASK_MEDIUM_ALLOCATED;
 
   Empty := Pointer(@Result.Items[High(Result.Items)]);
   Result.Empties.First.Prev := nil;
@@ -5570,71 +7641,45 @@ begin
   Result.Empties.Last.Prev := Empty;
   Result.Empties.Last.Next := nil;
 
-  SupposedEnqueue(Pointer(QK64PoolMedium), Result, Result.PrevNext);
+  // Enqueue
+  Next := QK64PoolMedium;
+  QK64PoolMedium := Result;
+  Result.Queue.Prev := nil;
+  Result.Queue.Next := Next;
+  if (Next <> nil) then Next.Queue.Prev := Result;
 end;
 
 function TThreadHeap.DisposeK64PoolMedium(PoolMedium: PK64PoolMedium): Integer;
+var
+  PagesMode: NativeUInt;
+  Prev, Next: PK64PoolMedium;
 begin
-  SupposedDequeue(Pointer(QK64PoolMedium), PoolMedium, PoolMedium.PrevNext);
+  // Dequeue
+  Prev := PoolMedium.Queue.Prev;
+  Next := PoolMedium.Queue.Next;
+  if (Prev = nil) then
+  begin
+    QK64PoolMedium := Next;
+  end else
+  begin
+    Prev.Queue.Next := Next;
+  end;
+  if (Next <> nil) then
+  begin
+    Next.Queue.Prev := Prev;
+  end;
+
   PoolMedium.ThreadHeap := nil;
   PK64PoolSmall(PoolMedium).ThreadHeap := nil;
 
-  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, Self.GetPagesMode)) then
+  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  if (MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, PagesMode)) then
   begin
     Result := FREEMEM_DONE;
   end else
   begin
     Result := Self.ErrorInvalidPtr;
   end;
-end;
-
-function TThreadHeap.GetBigOrLarge(B16Count: NativeUInt): Pointer;
-var
-  PagesCount: NativeUInt;
-begin
-  PagesCount := (B16Count + (B16_PER_PAGE - 1)) {div B16_PER_PAGE} shr (12 - 4);
-  Result := Pointer(MemoryManager.BrainMM.GetMemoryPages(PagesCount, Self.GetPagesMode));
-  if (Result = nil) then
-    Result := Self.ErrorOutOfMemory;
-end;
-
-function TThreadHeap.FreeBigOrLarge(P: Pointer): Integer;
-begin
-  if (MemoryManager.BrainMM.FreeMemoryPages(MemoryPages(P), Self.GetPagesMode)) then
-  begin
-    Result := FREEMEM_DONE;
-  end else
-  begin
-    Result := Self.ErrorInvalidPtr;
-  end;
-end;
-
-function TThreadHeap.RegetBigOrLarge(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-var
-  NewPagesCount: NativeUInt;
-begin
-  NewPagesCount := (NewB16Count + (B16_PER_PAGE - 1)) {div B16_PER_PAGE} shr (12 - 4);
-  Result := Pointer(MemoryManager.BrainMM.RegetMemoryPages(MemoryPages(P), NewPagesCount, Self.GetPagesMode));
-  if (Result = PTR_INVALID) then
-    Self.RaiseInvalidPtr
-  else
-  if (Result = nil) then
-    Result := Self.ErrorOutOfMemory;
-end;
-
-function TThreadHeap.ReallocBigOrLarge(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-var
-  NewPagesCount: NativeUInt;
-begin
-  NewPagesCount := (NewB16Count + (B16_PER_PAGE - 1)) {div B16_PER_PAGE} shr (12 - 4);
-  Result := Pointer(MemoryManager.BrainMM.ReallocMemoryPages(MemoryPages(P), NewPagesCount, Self.GetPagesMode));
-  if (Result = PTR_INVALID) then
-    Self.RaiseInvalidPtr
-  else
-  if (Result = nil) then
-    Result := Self.ErrorOutOfMemory;
 end;
 
 
@@ -5757,7 +7802,11 @@ begin
     begin
       Self.FBigOrLargeHash[Index] := nil;
       repeat
-        Heap.FreeBigOrLarge(HashItem.Pages);
+        if (not MemoryManager.BrainMM.FreeMemoryPages(HashItem.Pages, PAGESMODE_JIT)) then
+        begin
+          Heap.RaiseInvalidPtr;
+        end;
+
         HashItem := HashItem.Next;
       until (HashItem = nil);
     end;
@@ -5774,7 +7823,7 @@ begin
   begin
     Heap.QK64PoolSmall := nil;
     repeat
-      Next := Pointer(PoolSmall.PrevNext.Next and MASK_K64_CLEAR);
+      Next := PoolSmall.Queue.Next;
 
       if (not MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, PAGESMODE_JIT)) then
       begin
@@ -5791,7 +7840,7 @@ begin
   begin
     Heap.QK64PoolSmallFull := nil;
     repeat
-      Next := Pointer(PoolSmall.PrevNext.Next and MASK_K64_CLEAR);
+      Next := PoolSmall.Queue.Next;
 
       if (not MemoryManager.BrainMM.FreeMemoryBlock(PoolSmall, PAGESMODE_JIT)) then
       begin
@@ -5808,7 +7857,7 @@ begin
   begin
     Heap.QK64PoolMedium := nil;
     repeat
-      Next := Pointer(PoolMedium.PrevNext.Next and MASK_K64_CLEAR);
+      Next := PoolMedium.Queue.Next;
 
       if (not MemoryManager.BrainMM.FreeMemoryBlock(PoolMedium, PAGESMODE_JIT)) then
       begin
@@ -5853,7 +7902,13 @@ begin
       MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
         Result := Heap.GetMedium(B16Count, Ord(ma16Bytes));
     else
-      Result := Heap.GetBigOrLarge(B16Count);
+      Result := MemoryManager.BrainMM.GetMemoryPages(
+        (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_JIT);
+      if (Result = nil) then
+      begin
+        Heap.RaiseOutOfMemory;
+      end;
+
       Self.EnqueueBigOrLarge(MemoryPages(Result));
     end;
   end else
@@ -5920,7 +7975,10 @@ begin
         begin
           // big or large
           if (Self.DequeueBigOrLarge(MemoryPages(P))) then
-            Heap.FreeBigOrLarge(P);
+          begin
+            if (MemoryManager.BrainMM.FreeMemoryPages(MemoryPages(P), PAGESMODE_JIT)) then
+              Exit;
+          end;
         end else
         begin
           // medium or invalid pointer
@@ -5938,11 +7996,14 @@ function TJITHeap.SyncGetMemory(Size: NativeInt): Pointer;
 begin
   if (Size > 0) then
   begin
-    SpinLock(SupposedPtr(FSpin));
+    // inline SpinLock
+    repeat
+      if (Self.FSpin <> 0) then SpinWait(SupposedPtr(Self.FSpin), High(NativeUInt));
+    until (0 = AtomicCmpExchange(SupposedPtr(Self.FSpin), 1, 0));
     try
       Result := Self.GetMemory(Size);
     finally
-      FSpin := 0; // SpinUnlock(FSpin)
+      FSpin := 0; // inline SpinUnlock
     end;
   end else
   begin
@@ -5954,11 +8015,14 @@ procedure TJITHeap.SyncFreeMemory(P: Pointer);
 begin
   if (P <> nil) then
   begin
-    SpinLock(SupposedPtr(FSpin));
+    // inline SpinLock
+    repeat
+      if (Self.FSpin <> 0) then SpinWait(SupposedPtr(Self.FSpin), High(NativeUInt));
+    until (0 = AtomicCmpExchange(SupposedPtr(Self.FSpin), 1, 0));
     try
       Self.FreeMemory(P);
     finally
-      FSpin := 0; // SpinUnlock(FSpin)
+      FSpin := 0; // inline SpinUnlock
     end;
   end;
 end;
@@ -5979,17 +8043,55 @@ begin
 end;
 
 
+{$ifdef MSWINDOWS}
+type
+  TJumpInfo = packed record
+    CodeOffset: Cardinal;
+    Jump: Pointer;
+    JumpOffset: Cardinal;
+  end;
+
+procedure PatchCode(const AddrProc: Pointer; const CodeSize: NativeUInt;
+  const Code: Pointer);
+var
+  OldProtect: Cardinal;
+begin
+  VirtualProtect(AddrProc, CodeSize, PAGE_EXECUTE_READWRITE, OldProtect);
+  Move(Code^, AddrProc^, CodeSize);
+  FlushInstructionCache(GetCurrentProcess, AddrProc, CodeSize);  //http://stackoverflow.com/questions/7581321/how-to-make-fastcodepatch-work-in-delphi-xe2-win64-platform
+  VirtualProtect(AddrProc, CodeSize, OldProtect, OldProtect);
+end;
+
+procedure PatchRedirect(const AddrProc: Pointer; const CodeSize: NativeUInt;
+  const Code: Pointer; const Jumps: array of TJumpInfo);
+var
+  i: Integer;
+  Buffer: array[0..33] of Byte;
+begin
+  Move(Code^, Buffer, CodeSize);
+
+  for i := Low(Jumps) to High(Jumps) do
+  with Jumps[i] do
+  begin
+    PInteger(@Buffer[CodeOffset])^ := NativeInt(Jump) -
+      (NativeInt(AddrProc) + NativeInt(CodeOffset) + 4) + NativeInt(JumpOffset);
+  end;
+
+  PatchCode(AddrProc, CodeSize, @Buffer);
+end;
+{$endif}
+
 {$ifdef BRAINMM_REDIRECT}
 // Size: 14/17
 // BrainMMGetMem: 7/9
 function RedirectGetMem(Size: NativeInt): Pointer;
 asm
   {$ifdef CPUX86}
-    mov ecx, [esp]
     test eax, eax
+    mov ecx, [esp]
   {$else .CPUX64}
+    test rcx, rcx   //faster on ATOM which does not allow OoO execution.
     mov r8, [rsp]
-    test rcx, rcx
   {$endif}
   jg BrainMMGetMem // + 4
   {$ifdef CPUX86}
@@ -6018,13 +8120,15 @@ asm
   {$endif}
 end;
 
-// Size: 14/15
-// BrainMMFreeMem: 4/5
+// Size: 17/19
+// BrainMMFreeMem: 7/9
 function RedirectFreeMem(P: Pointer): Integer;
 asm
   {$ifdef CPUX86}
+    mov ecx, [esp]
     test eax, eax
   {$else .CPUX64}
+    mov r8, [rsp]
     test rcx, rcx
   {$endif}
   jnz BrainMMFreeMem // + 4
@@ -6094,6 +8198,7 @@ asm
   {$endif}
 end;
 
+
 function AddrFreeMem: Pointer;
 asm
   {$ifdef CPUX86}
@@ -6112,41 +8217,6 @@ asm
   {$endif}
 end;
 
-type
-  TJumpInfo = packed record
-    CodeOffset: Cardinal;
-    Jump: Pointer;
-    JumpOffset: Cardinal;
-  end;
-
-procedure PatchCode(const AddrProc: Pointer; const CodeSize: NativeUInt;
-  const Code: Pointer);
-var
-  OldProtect: Cardinal;
-begin
-  VirtualProtect(AddrProc, CodeSize, PAGE_EXECUTE_READWRITE, OldProtect);
-  Move(Code^, AddrProc^, CodeSize);
-  VirtualProtect(AddrProc, CodeSize, OldProtect, OldProtect);
-end;
-
-procedure PatchRedirect(const AddrProc: Pointer; const CodeSize: NativeUInt;
-  const Code: Pointer; const Jumps: array of TJumpInfo);
-var
-  i: Integer;
-  Buffer: array[0..33] of Byte;
-begin
-  Move(Code^, Buffer, CodeSize);
-
-  for i := Low(Jumps) to High(Jumps) do
-  with Jumps[i] do
-  begin
-    PInteger(@Buffer[CodeOffset])^ := NativeInt(Jump) -
-      (NativeInt(AddrProc) + NativeInt(CodeOffset) + 4) + NativeInt(JumpOffset);
-  end;
-
-  PatchCode(AddrProc, CodeSize, @Buffer);
-end;
-
 procedure BrainMMRedirectInitialize;
 const
   JUMPS_GETMEM: array[0..0] of TJumpInfo = (
@@ -6158,7 +8228,7 @@ const
       Jump: @BrainMMAllocMem; JumpOffset: 4)
   );
   JUMPS_FREEMEM: array[0..0] of TJumpInfo = (
-    ( CodeOffset: {$ifdef CPUX86}4{$else .CPUX64}5{$endif};
+    ( CodeOffset: {$ifdef CPUX86}7{$else .CPUX64}9{$endif};
       Jump: @BrainMMFreeMem; JumpOffset: 4)
   );
   JUMPS_REALLOCMEM: array[0..2] of TJumpInfo = (
@@ -6178,29 +8248,37 @@ const
       Jump: @BrainMMRegetMem; JumpOffset: 8)
   );
 begin
-  PatchRedirect(AddrGetMem, {$ifdef CPUX86}14{$else .CPUX64}17{$endif},
-    @RedirectGetMem, JUMPS_GETMEM);
-  PatchRedirect(AddrAllocMem, {$ifdef CPUX86}14{$else .CPUX64}17{$endif},
-    @RedirectAllocMem, JUMPS_ALLOCMEM);
-  PatchRedirect(AddrFreeMem, {$ifdef CPUX86}14{$else .CPUX64}15{$endif},
-    @RedirectFreeMem, JUMPS_FREEMEM);
-  PatchRedirect(AddrReallocMem, {$ifdef CPUX86}30{$else .CPUX64}33{$endif},
-    @RedirectReallocRegetMem, JUMPS_REALLOCMEM);
-  PatchRedirect(@RegetMem, {$ifdef CPUX86}30{$else .CPUX64}33{$endif},
-    @RedirectReallocRegetMem, JUMPS_REGETMEM);
+  //On x64 {$CodeAlign 16} applies, so SizeOf(RTL_Routine) is always a multiple of 16.
+  //We can use this knowledge to simplify the patching requirements, so that code does not
+  //break if we tweak the Redirect* routines.
+  PatchRedirect(AddrGetMem, {$IFDEF CPUX86}14{$ELSE .CPUX64}17{$ENDIF}, @RedirectGetMem, JUMPS_GETMEM);
+  PatchRedirect(AddrAllocMem, {$IFDEF CPUX86}14{$ELSE .CPUX64}17{$ENDIF}, @RedirectAllocMem, JUMPS_ALLOCMEM);
+  PatchRedirect(AddrFreeMem, {$IFDEF CPUX86}17{$ELSE .CPUX64}19{$ENDIF}, @RedirectFreeMem, JUMPS_FREEMEM);
+  PatchRedirect(AddrReallocMem, {$IFDEF CPUX86}30{$ELSE .CPUX64}33{$ENDIF}, @RedirectReallocRegetMem, JUMPS_REALLOCMEM);
+  PatchRedirect(@RegetMem, {$IFDEF CPUX86}30{$ELSE .CPUX64}33{$ENDIF}, @RedirectReallocRegetMem, JUMPS_REGETMEM);
 end;
 {$endif}
 
 procedure BrainMMInitialize;
-{$if Defined(BRAINMM_REDIRECT) and Defined(CPUX86)}
+{$ifdef THREAD_FUNCS_EMULATE}
+const
+  JUMP_BYTES: array[1..5] of Byte = ($E9, 0, 0, 0, 0);
+  JUMP_BEGIN_THREAD: array[0..0] of TJumpInfo = (
+    (CodeOffset: 1; Jump: @__BeginThread; JumpOffset: 0)
+  );
+  JUMP_END_THREAD: array[0..0] of TJumpInfo = (
+    (CodeOffset: 1; Jump: @__EndThread; JumpOffset: 0)
+  );
+{$endif}
+{$ifdef BRAINMM_REDIRECT}{$ifdef CPUX86}
 const
   NOP_9BYTES: array[1..9] of Byte = ($66, $0F, $1F, $84, $00, $00, $00, $00, $00);
-{$ifend}
+{$endif}{$endif}
 type
   PMemoryMgr = {$ifdef MEMORYMANAGEREX}^TMemoryManagerEx{$else}^TMemoryManager{$endif};
 {$ifdef MSWINDOWS}
 const
-  BRAINMM_MARKER: array[1..15] of AnsiChar = 'BrainMM_Marker_';
+  BRAINMM_MARKER: array[1..25] of AnsiChar = 'BRAIN_MEMORY_MANAGER_PID_';
   HEX_CHARS: array[0..15] of AnsiChar = '0123456789ABCDEF';
 var
   i: Integer;
@@ -6212,6 +8290,8 @@ var
 begin
   InitializeOffsetsMedium;
 
+  MemoryManager.BrainMM.ThreadFuncEvent := BrainMMThreadFuncEvent;
+  MemoryManager.BrainMM.EndThreadEvent := BrainMMEndThreadEvent;
   MemoryManager.BrainMM.GetMemoryBlock := BrainMMGetMemoryBlock;
   MemoryManager.BrainMM.FreeMemoryBlock := BrainMMFreeMemoryBlock;
   MemoryManager.BrainMM.GetMemoryPages := BrainMMGetMemoryPages;
@@ -6244,9 +8324,17 @@ begin
       Handle := CreateWindowA('STATIC', Buffer, WS_POPUP, 0, 0, 0, 0, 0, 0, HInstance, nil);
       SetWindowLong(Handle, GWL_USERDATA, NativeInt(@MemoryManager));
 
-     {$ifdef BRAINMM_REDIRECT}
-       BrainMMRedirectInitialize;
-     {$endif}
+      UnknownThreadHeap := CreateThreadHeap(False);
+      UnknownThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
+      {$ifdef PUREPASCAL}
+        MainThreadHeap := CreateThreadHeap(True);
+      {$else}
+        MainThreadHeap := ThreadHeapInstance;
+      {$endif}
+
+      {$ifdef BRAINMM_REDIRECT}
+        BrainMMRedirectInitialize;
+      {$endif}
     end else
     begin
       BrainMMRegistered := Pointer(GetWindowLong(Handle, GWL_USERDATA));
@@ -6258,17 +8346,30 @@ begin
   end;
   {$endif}
 
-  {$if Defined(BRAINMM_REDIRECT) and Defined(CPUX86)}
+  {$ifdef MSWINDOWS}
+    {$ifdef THREAD_FUNCS_EMULATE}
+      PatchRedirect(@System.BeginThread, SizeOf(JUMP_BYTES), @JUMP_BYTES, JUMP_BEGIN_THREAD);
+      PatchRedirect(@System.EndThread, SizeOf(JUMP_BYTES), @JUMP_BYTES, JUMP_END_THREAD);
+    {$endif}
+    SystemThreadFuncProc := MemoryManager.BrainMM.ThreadFuncEvent;
+    SystemThreadEndProc := MemoryManager.BrainMM.EndThreadEvent;
+  {$else .POSIX}
+    BeginThreadProc := MemoryManager.BrainMM.ThreadFuncEvent;
+    EndThreadProc := MemoryManager.BrainMM.EndThreadEvent;
+  {$endif}
+
+  {$ifdef BRAINMM_REDIRECT}{$ifdef CPUX86}
   if (SSE_SUPPORT <> 0) then
   begin
     PatchCode(@BackwardSSEMove, SizeOf(NOP_9BYTES), @NOP_9BYTES);
     PatchCode(@NcMoveB16, SizeOf(NOP_9BYTES), @NOP_9BYTES);
     PatchCode(@NcMoveB16Small, SizeOf(NOP_9BYTES), @NOP_9BYTES);
   end;
-  {$ifend}
+  {$endif}{$endif}
 
   SetMemoryManager(PMemoryMgr(@MemoryManager.Standard)^);
 end;
+
 
 
 initialization
@@ -6279,7 +8380,6 @@ initialization
     @SwitchToThreadFunc := GetProcAddress(LoadLibrary(kernel32), 'SwitchToThread');
   {$endif}
   BrainMMInitialize;
-
 finalization
 
 end.
