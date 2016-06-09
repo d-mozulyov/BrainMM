@@ -985,7 +985,7 @@ begin
       begin
         {$ifdef MSWINDOWS}
           //If we're (done) manipulating executable pages, make sure to Flush the cache so self-modifing code does not mess up.
-          if ((Rights and $4) > 0) then FlushInstructionCache(GetCurrentProcess, Pages, SIZE_K4 * Count);
+          if (marExecute in Rights) then FlushInstructionCache(GetCurrentProcess, Pages, SIZE_K4 * Count);
           if (not VirtualProtect(Pages, SIZE_K4 * Count, ACCESS_RIGHTS[Byte(Rights)], Protect)) then
             {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
         {$else .POSIX}
