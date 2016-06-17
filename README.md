@@ -1,45 +1,45 @@
 # BrainMM
 ![](http://dmozulyov.ucoz.net/BrainMM/Logo/Logo.png)
 
-Несколько лет назад я начал изучать алгоритмы сборки мусора и принципы менеджмента памяти в таких системах. Считается, что редкая дефрагментация и быстрое выделение памяти в конце пула - делают менеджеры памяти с принципом сборки мусора эффективнее традиционных подходов, когда выделение и освобождение памяти требует сложных медленных манипуляций. Однако на самом деле менеджеры памяти с принципом сборки мусора сложно назвать эффективными, потому что:
-* Realloc памяти гарантированно приводит к выделению нового куска памяти и копированию данных в него, что не обязательно происходит в менеджерах с традиционным подходом
-* Происходит перерасход памяти, т.к. в пуле содержатся так же ранее выделенные, но не используемые (освобождённые) куски памяти
-* Дефрагментация приводит к блокировке всех потоков, длительным операциям анализа и копирования данных - что нередко приводит к неприятному эффекту "зависания" приложения
-* Требуются дополнительные ресурсы на синхронизацию и обслуживание указателей, т.к. после дефрагментации данные могут находиться по другому физическому адресу
-* Принцип быстрого выделения памяти в конце пула за редким исключением применим и в традиционных менеджерах памяти
+Several years ago, I started studying garbage collection algorithms and memory management principles in such systems. Rare defragmentation and fast memory allocation at the end of the pool are considered to be performed by the memory manager with a more effective principle of garbage collection than the one used in traditional approaches, when allocation and release of memory require complicated slow manipulations. However, as a matter of fact, memory managers with garbage collection principle can hardly be called effective due to the following:
+* Realloc always leads to the new memory piece allocation and data copying in it, which does not always take place in traditional-approach managers
+* Memory overconsumption takes place, as the pool also contains the memory pieces that have been previously allocated, but not used (released)
+* Defragmentation leads to the locking of all threads, long analysis and data copying operations, often leading to an unpleasant application "freezing" effect
+* Additional resources are required for the alignment and maintenance of pointers, as after defragmentation the data may be situated at another physical address
+* Fast memory allocation principle in the end of the pool is, with rare exception, also applied in traditional memory managers
  
-С другой стороны популярный менеджер памяти FastMM со временем перестаёт удовлетворять требованиям современных приложений, т.к. работает с блокировками на многопоточных приложениях, не содержит API для выровненных данных и расходует минимум, в зависимости от платформы, 8/16 байт служебной информации, даже на малых кусках памяти.
+On the other side, as the time goes by, popular memory manager FastMM fails to comply with the requirements of modern applications as it works with locks on multi-thread applications, does not contain API to aligned data, and, depending on the platform, uses minimum 8/16 bytes of service information, even on small memory pieces.
 
-Поэтому я начал работу над проектом BrainMM - менеджером памяти, спроектированным под современные требования приложений. Искренне верю, что со временем проект вырастет до такого уровня, что войдёт в стандартную поставку Delphi/C++ Builder наряду с другими замечательными библиотеками. Для менеджера памяти BrainMM характерно следующее:
-* Экстремально высокая производительность (*реализовано не полностью*)
-* Без блокировок для кусков памяти до 32Кб
-* Поддержка всех операционных систем, предусмотренных в Delphi/C++ Builder
-* Разделяемая с DLL память
-* Гарантированно выровненный адрес на 16 байт. Это полезно для lock-free алгоритмов, SSE-команд и в целом при чтении/записи/копировании памяти
-* Функция RegetMem. По функциональности похожа на ReallocMem, но не гарантирует сохранности данных, поэтому в некоторых случаях может работать быстрее
-* Функция GetMemAligned. Позволяет выделить память с определённым выравниванием. Освобождается такая память стандартно по FreeMem. При изменении размера с помощью ReallocMem/RegetMem выравнивание сохраняется. Исключение составляют ситуации, когда NewSize равен нулю, в этом случае вызывается FreeMem и информация о выравнивании теряется
-* API для выделения блоков памяти (*реализовано не польностью*). Под блоками памяти BrainMM подразумеваются куски памяти определённой гранулярности, чей размер изменить нельзя. Блоки памяти полезны для узкоспециализированного требовательного к производительности менеджмента памяти. Служебную информацию можно хранить в начале блока и получать доступ к ней, применяя к указателю операцию логического умножения. Менеджмент малыми (до 128 байт) и средними (до 32Кб) кусками памяти в BrainMM, например, осуществляется с помощью блоков размером 64Кб
-* API для работы со страницами памяти (*реализовано не польностью*)
+That is why I started working on project BrainMM, i.e. the memory manager designed on the basis of modern application requirements. I sincerely believe that with time the project will grow to the level of standard Delphi/C++ Builder supply, along with other great libraries. BrainMM memory manager features:
+* Extremely high performance (*not fully implemented*)
+* No locks for memory pieces up to 32Kb
+* Support of all operating systems envisaged by Delphi/C++ Builder
+* DLL-shared memory
+* Guaranteed aligned address for 16 bytes. It is useful for lock-free algorithms, SEE operations and in general at memory reading/writing/copying
+* RegetMem function. Functionally similar to ReallocMem, but does not guarantee data safety, that is why in some cases it can work faster
+* GetMemAligned function. Allows allocating memory with specific alignment. This memory is released in a standard way, via FreeMem. When the size is changed using ReallocMem/RegetMem, the alignment is preserved. The exception is when NewSize equals zero, in this case, FreeMem shall be induced and alignment information will be lost
+* API for memory block allocation (*not fully implemented*). BrainMM memory blocks are memory pieces of specific granularity, the size of which is unchangeable. Memory blocks are useful for highly specialized performance-demanding memory management. Service information can be stored at the beginning of the block, access to this information may be received by applying the logical multiplication (`and`) operation to the pointer. The management of small (up to 128 bytes) and medium (up to 32Kb) memory pieces in BrainMM is performed, for example, with the help of blocks of 64Kb
+* API for work with memory pages (*not fully implemented*)
  
-Несмотря на то, что библиотека успешно прошла ряд юнит-тестов, на данный момент она находится в состоянии **неофициального релиза** и её **не рекомендуется** использовать в коммерческих приложениях.
+Despite the fact that the library underwent a range of unit-tests, at the moment it is on the **unofficial release** stage and it is **not recommended** to use it in commercial applications.
 
-##### Производительность
-Данный тест был осуществлён на основе [статьи Стива Моэна](http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/). Исходные коды теста находятся в репозитории, но Вы можете также [скачать бинарные файлы]( http://dmozulyov.ucoz.net/BrainMM/Demo.rar).
+##### Performance
+This test was conducted on the basis of [Steve Maughan's article](http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/). Source codes are in the repository, but you can also [download binary files]( http://dmozulyov.ucoz.net/BrainMM/Demo.rar).
 
 ![](http://dmozulyov.ucoz.net/BrainMM/SpeedTest.png)
-##### Расход системной памяти
-Расход системной памяти всегда больше, чем программист попытался выделить, т.к. необходимо хранить служебную информацию по каждому выделенному куску. Кроме служебной информации на расход памяти влияет так же понятие гранулярности. К примеру, если вы выделяете 20 байт, а гранулярность равна 16 - то размер будет округлён до 32 байт.
+##### System memory consumption
+System memory consumption is always larger than the developer tried to allocate as it is necessary to store service information on each allocated piece. Besides service information, the notion of granularity also influences memory consumption. For example, if you allocate 20 bytes and the granularity equals 16, the size shall be rounded off to 32 bytes.
 
-Исходные коды данного теста находятся в репозитори. Результаты приведены в мегабайтах из рассчёта на 100Мб полезных данных. Сравниваются BrainMM и два популярных менеджера: FastMM, ScaleMM2. Разница потребления системной памяти объясняется особенностями архитектуры каждого менеджера. Гранулярность FastMM x86 по-умолчанию равна 8 байтам, опционально можно выставить 16 байт, для x64 - всегда 16 байт. Размер служебной информации примерно равен 8 байтам на каждый кусок. В BrainMM для малых кусков (до 128 байт) используются компактные битовые маски, поэтому среднее потребление системной памяти ниже. Однако гранулярность BrainMM всегда равна 16 байтам, поэтому, например, для кусков 8 и 24 байт, хоть и незначительно, но вперёд вырывается FastMM. Большой расход менеджером ScaleMM2 объясняется скорее всего менее экономным хранением служебной информации. 
+Source codes of this test are in the repository. The results are presented in megabytes at the rate of 100 Mb of useful data. BrainMM was compared to two popular managers: FastMM, ScaleMM2. The difference of system memory consumption is explained by architecture peculiarities of each manager. Default FastMM x86 granularity is 8 bytes, optionally 16 bytes can be adjusted, for x64 - always 16 bytes. The approximate size of service information is 8 bytes for each piece. In BrainMM, for small pieces (up to 128 bytes), compact bit masks are used, that is why the average system memory consumption is lower. However, BrainMM granularity is always 16 bytes, that is why, for example, for pieces of 8 and 24 bytes, FastMM steals a march, although insignificantly. Large consumption by ScaleMM2 manager is most probably explained by the less economical service information storage. 
 
 ![](http://dmozulyov.ucoz.net/BrainMM/MemoryUsageTest.png)
 
-##### Что необходимо доработать
-* Менеджмент больших кусков памяти (больше 32Кб)
-* Средства поиска утечек памяти и отладки
-* Эффективное взаимодействие с операционными системами
+##### What shall be improved
+* Management of large memory pieces (more than 32Kb)
+* Memory leakage and debugging search methods
+* Effective interconnection with operating systems
 
-В качестве примера приведу одну из важных задач, которую предстоит решить. Допустим наш кусок памяти состоит из 2 страниц, слева свободно 4 страницы, справа свободно 3. Если необходимо увеличить размер куска памяти до 5 страниц - то страницы справа помечаются как занятые, и ассоциируются с этим куском. Если необходимо увеличить размер до 6 страниц - то количества свободных страниц справа не хватает, но можно занять 4 страницы слева и скопировать 2 страницы данных, которые имеются на данный момент. Оба подхода успешно реализованы в менеджере памяти FastMM, но нет подхода, позволяющего задействовать как 4 страницы слева, так и 3 страницы справа. Кроме того, насколько я осведомлён, операционные системы содержат API, позволяющие избежать копирования данных путём изменения адреса страниц.
+As an example, I will outline one of the most important tasks to be solved. Let's say, our memory piece consists of 2 pages, on the left 4 pages are free, on the right - 3 pages. If we need to increase memory piece up to 5 pages, right pages shall be tagged as occupied and associated with this piece. If the size should be increased to 6 pages and the number of right pages is not enough, 4 pages on the left can be borrowed and 2 available pages of data can be copied. Both approaches are successfully implemented in FastMM memory manager, but there is no approach that would allow to occupy both 4 pages on the left and 3 pages on the right. Besides, as far as I am aware, operating systems possess APIs allowing to avoid data copying by changing the page address.
 ```
 ---0000XX000---
 ```
