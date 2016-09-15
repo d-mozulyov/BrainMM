@@ -19,6 +19,16 @@ var
   TEST_NUMBER: Integer = 1;
 
 type
+  TCountSize = object
+    Count: Integer;
+    Size: Integer;
+
+    procedure Clear;
+    procedure Add(const ASize: Integer); overload;
+    procedure Add(const ACountSize: TCountSize); overload;
+  end;
+  PCountSize = ^TCountSize;
+
   TBitSetInfo = object
     Value: TBitSet8;
 
@@ -39,8 +49,8 @@ type
     Size, Index: Integer;
     InFullQueue: Boolean;
     Items: TBitSetInfo;
-    EmptiesCount, EmptiesSize: Integer;
-    AllocatedCount, AllocatedSize: Integer;
+    Empties: TCountSize;
+    Allocated: TCountSize;
 
     procedure Init(const V: PK1LineSmall);
   end;
@@ -60,8 +70,8 @@ type
 
     InFullQueue: Boolean;
     Lines: TBitSetInfo;
-    EmptiesCount, EmptiesSize: Integer;
-    AllocatedCount, AllocatedSize: Integer;
+    Empties: TCountSize;
+    Allocated: TCountSize;
 
     procedure Init(const V: PK64PoolSmall);
   end;
@@ -79,11 +89,12 @@ type
     Value: PK64PoolMedium;
     ValueThreadHeap: PThreadHeap;
 
-    EmptiesCount, EmptiesSize: Integer;
-    AllocatedCount, AllocatedSize: Integer;
+    Allocated: TCountSize;
+    Empties: array[0..31] of TCountSize;
+    EmptiesTotal: TCountSize;
 
     procedure Init(const V: PK64PoolMedium);
-    procedure CheckEmpty(const VEmpty: PHeaderMediumEmpty);
+    procedure CheckEmpty(const VEmpty: PHeaderMediumEmpty; const AIndex: Integer);
   end;
   PPoolMediumCompactInfo = ^TPoolMediumCompactInfo;
 
@@ -112,18 +123,20 @@ type
       AvailableNonFull: Integer;
       AvailableFull: Integer;
       FullQueue: Integer;
-      EmptiesCount, EmptiesSize: Integer;
-      AllocatedCount, AllocatedSize: Integer;
+      Empties: TCountSize;
+      Allocated: TCountSize;
     end;
     PoolMediums: record
       Count: Integer;
       CountNonFull: Integer;
       CountFull: Integer;
-      EmptiesCount, EmptiesSize: Integer;
-      AllocatedCount, AllocatedSize: Integer;
+      Allocated: TCountSize;
+      Empties: array[0..31] of TCountSize;
+      EmptiesTotal: TCountSize;
     end;
 
     procedure Init(const V: PThreadHeap);
+    procedure InitMain;
   end;
   PThreadHeapInfo = ^TThreadHeapInfo;
 
@@ -217,6 +230,11 @@ type
   TMediumBytes = array[0..MAX_MEDIUM_SIZE - 1] of Byte;
   PMediumBytes = ^TMediumBytes;
 
+
+var
+  HeapInfo: TThreadHeapInfo;
+  Info: TPointerInfo;
+
 implementation
 
 
@@ -229,6 +247,49 @@ begin
   if (TEST_NUMBER = BREAKPOINT) then
     TEST_NUMBER := TEST_NUMBER;
 end;
+
+procedure GetMem(var P: Pointer; Size: NativeInt);
+begin
+  INC_TEST;
+  System.GetMem(P, Size);
+end;
+
+procedure GetMemAligned(var P: Pointer; Align: TMemoryAlign; Size: NativeInt);
+begin
+  INC_TEST;
+  BrainMM.GetMemAligned(P, Align, Size);
+end;
+
+function AllocMem(Size: NativeInt): Pointer;
+begin
+  INC_TEST;
+  Result := System.AllocMem(Size);
+end;
+
+procedure FreeMem(var P: Pointer);
+begin
+  INC_TEST;
+  System.FreeMem(P);
+end;
+
+procedure FreeMemNil(var P: Pointer);
+begin
+  FreeMem(P);
+  P := nil;
+end;
+
+procedure ReallocMem(var P: Pointer; NewSize: NativeInt);
+begin
+  INC_TEST;
+  System.ReallocMem(P, NewSize);
+end;
+
+procedure RegetMem(var P: Pointer; NewSize: NativeInt);
+begin
+  INC_TEST;
+  BrainMM.RegetMem(P, NewSize);
+end;
+
 
 const
   PTR_FAILURE = Pointer(High(NativeInt));
@@ -407,25 +468,14 @@ asm
 end;
 {$endif}
 
-procedure FreeMemNil(var P: Pointer);
-begin
-  FreeMem(P);
-  P := nil;
-end;
-
-procedure SystemReallocMem(var P: Pointer; NewSize: NativeInt);
-begin
-  System.ReallocMem(P, NewSize);
-end;
-
 type
   TResizeMem = procedure(var P: Pointer; NewSize: NativeInt);
   PResizeMem = ^TResizeMem;
 
 var
   RESIZEMEM_PROCS: array[Boolean{Realloc}] of TResizeMem = (
-    BrainMM.RegetMem,
-    SystemReallocMem
+    RegetMem,
+    ReallocMem
   );
 
 procedure Mix2kPtrs(const List: PPointerList; const Count: Integer);
@@ -523,6 +573,55 @@ begin
   // todo
 end;
 
+procedure InitPBytes(P: Pointer; Size: Integer; XorByte: Byte);
+var
+  j: Integer;
+begin
+  for j := 0 to Size - 1 do
+   PMediumBytes(P)[j] := Byte(j) xor XorByte;
+end;
+
+procedure CheckPBytes(P: Pointer; Size: Integer; XorByte: Byte);
+var
+  j: Integer;
+begin
+  for j := 0 to Size - 1 do
+  if (PMediumBytes(P)[j] <> Byte(j) xor XorByte) then SystemError;
+end;
+
+procedure CheckPBytesAlign(P: Pointer; Size: Integer; XorByte: Byte; Align: TMemoryAlign);
+begin
+  Info.Init(P);
+  if (Info.Size < Size) then SystemError;
+  if (Info.AsMedium.Align <> Align) then SystemError;
+  CheckPBytes(P, Size, XorByte);
+end;
+
+procedure GetThreeMediumP(var P1, P2, P3: Pointer; const Size: Integer; const InitHeapInfo: Boolean);
+begin
+  GetMemAligned(P1, ma32Bytes, Size);
+  GetMemAligned(P2, ma32Bytes, Size);
+  GetMemAligned(P3, ma32Bytes, Size);
+
+  InitPBytes(P1, Size, 1);
+  InitPBytes(P2, Size, 2);
+  InitPBytes(P3, Size, 3);
+
+  if (InitHeapInfo) then
+    HeapInfo.InitMain;
+end;
+
+procedure FreeThreeP(var P1, P2, P3: Pointer; const CheckEmpty: Boolean);
+begin
+  FreeMemNil(P1);
+  FreeMemNil(P2);
+  FreeMemNil(P3);
+
+  if (CheckEmpty) then
+    CheckEmptyHeap;
+end;
+
+
 
 procedure TestSizes;
 
@@ -538,10 +637,9 @@ begin
   CheckSize(SizeOf(TK1LineSmall), 1024);
   CheckSize(SizeOf(TK64PoolSmall), 64 * 1024);
   CheckSize(SizeOf(THeaderMedium), 16);
-  CheckSize(SizeOf(THeaderMediumEmpty), 16);
   CheckSize(SizeOf(TK64PoolMedium), 64 * 1024);
   CheckSize(SizeOf(TSyncStack64), 64);
-  CheckSize(SizeOf(TThreadHeap), {$ifdef CPUX64}3{$else}2{$endif} * 64);
+  CheckSize(SizeOf(TThreadHeap), {$ifdef CPUX64}7{$else}4{$endif} * 64);
   CheckSize(SizeOf(TK4Page), 4 * 1024);
 end;
 
@@ -560,19 +658,15 @@ var
   P2: Pointer;
 
   i, Size: Integer;
-  Info: TPointerInfo;
 begin
-  INC_TEST;
   P := PTR_FAILURE;
   GetMem(P, 0);
   Check(nil, P);
 
-  INC_TEST;
   P := PTR_FAILURE;
   GetMem(P, -1);
   Check(nil, P);
 
-  INC_TEST;
   P := PTR_FAILURE;
   GetMem(P, -100500);
   Check(nil, P);
@@ -580,7 +674,6 @@ begin
   // small
   for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
   begin
-    INC_TEST;
     Size := BASIC_SMALL_SIZES[i];
 
     P := PTR_FAILURE;
@@ -597,7 +690,6 @@ begin
   // medium
   for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
   begin
-    INC_TEST;
     Size := BASIC_MEDIUM_SIZES[i];
 
     P := PTR_FAILURE;
@@ -613,11 +705,11 @@ begin
 
   // 4kb-aligned medium
   begin
-    GetMem(P, (4 * 1024) - 6 * 16 - SizeOf(THeaderMedium));
+    GetMem(P, (4 * 1024) - 3 * 16 - 2 * SizeOf(THeaderMedium));
     GetMem(P2, MAX_SMALL_SIZE + 1);
     if (NativeInt(P2) and MASK_K4_TEST = 0) then SystemError;
     Info.Init(P);
-    if (Info.AsMedium = nil) or (Info.Size <> (4 * 1024) - 6 * 16) then SystemError;
+    if (Info.AsMedium = nil) or (Info.Size <> (4 * 1024) - 4 * 16) then SystemError;
     FreeMem(P);
     FreeMem(P2);
     CheckEmptyHeap;
@@ -627,7 +719,6 @@ begin
 
   for i := Low(BASIC_BIG_SIZES) to High(BASIC_BIG_SIZES) do
   begin
-    INC_TEST;
     Size := BASIC_BIG_SIZES[i];
 
     P := PTR_FAILURE;
@@ -648,19 +739,15 @@ var
 
   i, Size: Integer;
   Align: TMemoryAlign;
-  Info: TPointerInfo;
 begin
-  INC_TEST;
   P := PTR_FAILURE;
   GetMemAligned(P, ma16Bytes, 0);
   Check(nil, P);
 
-  INC_TEST;
   P := PTR_FAILURE;
   GetMemAligned(P, ma512Bytes,  -1);
   Check(nil, P);
 
-  INC_TEST;
   P := PTR_FAILURE;
   GetMemAligned(P, ma1024Bytes, -100500);
   Check(nil, P);
@@ -669,7 +756,6 @@ begin
   for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
   for Align := Low(TMemoryAlign) to High(TMemoryAlign) do
   begin
-    INC_TEST;
     Size := BASIC_SMALL_SIZES[i];
 
     P := PTR_FAILURE;
@@ -694,7 +780,6 @@ begin
   for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
   for Align := Low(TMemoryAlign) to High(TMemoryAlign) do
   begin
-    INC_TEST;
     Size := BASIC_MEDIUM_SIZES[i];
 
     P := PTR_FAILURE;
@@ -714,7 +799,6 @@ begin
   for i := Low(BASIC_BIG_SIZES) to High(BASIC_BIG_SIZES) do
   for Align := Low(TMemoryAlign) to High(TMemoryAlign) do
   begin
-    INC_TEST;
     Size := BASIC_BIG_SIZES[i];
 
     P := PTR_FAILURE;
@@ -736,19 +820,15 @@ var
   PN, P2: Pointer;
 
   i, j, Size: Integer;
-  Info: TPointerInfo;
 begin
-  INC_TEST;
   P := AllocMem(0);
   Check(nil, P);
 
-  INC_TEST;
   {$if (not Defined(PUREPASCAL)) and (not Defined(BRAINMM_NOREDIRECT))}
   P := AllocMem(-1);
   Check(nil, P);
   {$ifend}
 
-  INC_TEST;
   {$if (not Defined(PUREPASCAL)) and (not Defined(BRAINMM_NOREDIRECT))}
   P := AllocMem(-100500);
   Check(nil, P);
@@ -757,7 +837,6 @@ begin
   // small(zero)
   for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
   begin
-    INC_TEST;
     Size := BASIC_SMALL_SIZES[i];
 
     P := AllocMem(Size);
@@ -787,25 +866,21 @@ end;
 procedure TestFreeMem;
 var
   P: Pointer;
-  ThreadHeap: PThreadHeap;
 
   SmallPtrs: array[Low(BASIC_SMALL_SIZES)..High(BASIC_SMALL_SIZES)] of Pointer;
   MediumPtrs: array[Low(BASIC_MEDIUM_SIZES)..High(BASIC_MEDIUM_SIZES)] of Pointer;
   i, Size: Integer;
 begin
-  INC_TEST;
   P := nil;
   FreeMem(P);
   CheckEmptyHeap;
 
   INC_TEST;
-  ThreadHeap := MainThreadHeap;
-  if (ThreadHeap = nil) then SystemError;
+  if (MainThreadHeap = nil) then SystemError;
 
   // small
   for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
   begin
-    INC_TEST;
     Size := BASIC_SMALL_SIZES[i];
     GetMem(SmallPtrs[i], Size);
   end;
@@ -813,13 +888,11 @@ begin
   // medium
   for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
   begin
-    INC_TEST;
     Size := BASIC_MEDIUM_SIZES[i];
     GetMem(MediumPtrs[i], Size);
   end;
 
   // big
-  INC_TEST;
   Size := BASIC_BIG_SIZES[Low(BASIC_BIG_SIZES)];
   GetMem(P, Size);
 
@@ -827,18 +900,17 @@ begin
   for i := Low(BASIC_SMALL_SIZES) to High(BASIC_SMALL_SIZES) do
   begin
     INC_TEST;
-    ThreadHeap.PushThreadDeferred(SmallPtrs[i], @TestFreeMem, True);
+    MainThreadHeap.PushThreadDeferred(SmallPtrs[i], @TestFreeMem, True);
   end;
 
   // medium deferred
   for i := Low(BASIC_MEDIUM_SIZES) to High(BASIC_MEDIUM_SIZES) do
   begin
     INC_TEST;
-    ThreadHeap.PushThreadDeferred(MediumPtrs[i], @TestFreeMem, False);
+    MainThreadHeap.PushThreadDeferred(MediumPtrs[i], @TestFreeMem, False);
   end;
 
   // each free
-  INC_TEST;
   FreeMem(P);
   CheckEmptyHeap;
 end;
@@ -846,8 +918,6 @@ end;
 procedure TestSmall;
 var
   i: Integer;
-  ThreadHeap: PThreadHeap;
-  HeapInfo: TThreadHeapInfo;
 
   P: Pointer;
   PTRS_16_FIRST: array[4..63] of Pointer;
@@ -856,31 +926,26 @@ var
   PTRS_128_MANY: array[0..7 * 64 - 1] of Pointer;
 
   Index, Size, j: Integer;
-  Info: TPointerInfo;
   PTRS: array[0..2000 - 1] of Pointer;
 begin
   INC_TEST;
-  ThreadHeap := MainThreadHeap;
-  if (ThreadHeap = nil) then SystemError;
+  if (MainThreadHeap = nil) then SystemError;
 
   // first line
   for i := Low(PTRS_16_FIRST) to High(PTRS_16_FIRST) do
   begin
-    INC_TEST;
     GetMem(PTRS_16_FIRST[i], 16);
     if ((NativeInt(PTRS_16_FIRST[i]) shr 4) and 63 <> i) then
       SystemError;
   end;
 
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
   Check(1, HeapInfo.K1LineSmalls[1].Count);
   Check(1, HeapInfo.K1LineSmalls[1].AvailableFull);
 
-  INC_TEST;
   i := Low(PTRS_16_SECOND);
   GetMem(PTRS_16_SECOND[i], 16);
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
   Check(2, HeapInfo.K1LineSmalls[1].Count);
   Check(1, HeapInfo.K1LineSmalls[1].AvailableNonFull);
   Check(0, HeapInfo.K1LineSmalls[1].AvailableFull);
@@ -889,38 +954,33 @@ begin
   // second line
   for i := Low(PTRS_16_SECOND) + 1 to High(PTRS_16_SECOND) do
   begin
-    INC_TEST;
     GetMem(PTRS_16_SECOND[i], 16);
     if ((NativeInt(PTRS_16_SECOND[i]) shr 4) and 63 <> i) then
       SystemError;
   end;
 
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
   Check(2, HeapInfo.K1LineSmalls[1].Count);
   Check(1, HeapInfo.K1LineSmalls[1].AvailableFull);
   Check(1, HeapInfo.K1LineSmalls[1].FullQueue);
 
   // free: available full
-  INC_TEST;
   FreeMem(PTRS_16_SECOND[Low(PTRS_16_SECOND)]);
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
   Check(2, HeapInfo.K1LineSmalls[1].Count);
   Check(1, HeapInfo.K1LineSmalls[1].AvailableNonFull);
   Check(0, HeapInfo.K1LineSmalls[1].AvailableFull);
   Check(1, HeapInfo.K1LineSmalls[1].FullQueue);
 
   // free: full queue
-  INC_TEST;
   FreeMem(PTRS_16_FIRST[Low(PTRS_16_FIRST)]);
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
   Check(2, HeapInfo.K1LineSmalls[1].Count);
   Check(2, HeapInfo.K1LineSmalls[1].AvailableNonFull);
   Check(0, HeapInfo.K1LineSmalls[1].AvailableFull);
   Check(0, HeapInfo.K1LineSmalls[1].FullQueue);
 
   // free: 2 lines
-  INC_TEST;
   for i := Low(PTRS_16_FIRST) + 1 to High(PTRS_16_FIRST) do
     FreeMem(PTRS_16_FIRST[i]);
   for i := Low(PTRS_16_SECOND) + 1 to High(PTRS_16_SECOND) do
@@ -930,27 +990,23 @@ begin
   // another size: 128 bytes
   for i := Low(PTRS_128) to High(PTRS_128) do
   begin
-    INC_TEST;
     GetMem(PTRS_128[i], 128);
     if ((NativeInt(PTRS_128[i]) shr 7) and 7 <> i) then
       SystemError;
   end;
 
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
   Check(1, HeapInfo.K1LineSmalls[8].Count);
   Check(1, HeapInfo.K1LineSmalls[8].AvailableFull);
 
-  INC_TEST;
   GetMem(P, 128);
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
   Check(2, HeapInfo.K1LineSmalls[8].Count);
   Check(1, HeapInfo.K1LineSmalls[8].AvailableNonFull);
   Check(0, HeapInfo.K1LineSmalls[8].AvailableFull);
   Check(1, HeapInfo.K1LineSmalls[8].FullQueue);
 
   // free 128
-  INC_TEST;
   FreeMem(P);
   for i := Low(PTRS_128) to High(PTRS_128) do FreeMem(PTRS_128[i]);
   CheckEmptyHeap;
@@ -959,19 +1015,17 @@ begin
   begin
     for i := Low(PTRS_128_MANY) to High(PTRS_128_MANY) do
     begin
-      INC_TEST;
       GetMem(PTRS_128_MANY[i], 128);
     end;
-    HeapInfo.Init(ThreadHeap);
+    HeapInfo.InitMain;
     Check(1, HeapInfo.PoolSmalls.Count);
     Check(1, HeapInfo.PoolSmalls.AvailableFull);
     Check(64, HeapInfo.K1LineSmalls[8].Count);
     Check(1, HeapInfo.K1LineSmalls[8].AvailableFull);
     Check(63, HeapInfo.K1LineSmalls[8].FullQueue);
 
-    INC_TEST;
     GetMem(P, 128);
-    HeapInfo.Init(ThreadHeap);
+    HeapInfo.InitMain;
     Check(2, HeapInfo.PoolSmalls.Count);
     Check(1, HeapInfo.PoolSmalls.AvailableNonFull);
     Check(1, HeapInfo.PoolSmalls.FullQueue);
@@ -979,7 +1033,6 @@ begin
     Check(1, HeapInfo.K1LineSmalls[8].AvailableNonFull);
     Check(64, HeapInfo.K1LineSmalls[8].FullQueue);
 
-    INC_TEST;
     FreeMem(P);
     for i := Low(PTRS_128_MANY) to High(PTRS_128_MANY) do FreeMem(PTRS_128_MANY[i]);
     CheckEmptyHeap;
@@ -988,8 +1041,6 @@ begin
   // allocate random
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
-
     Index := Random(8);
     Size := (Index + 1) shl 4;
     GetMem(P, Size);
@@ -1000,8 +1051,7 @@ begin
   end;
 
   // try heap analize
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
 
   // mixup
   MixPointers(PTRS);
@@ -1009,7 +1059,6 @@ begin
   // free random
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
     P := PTRS[i];
     Info.Init(P);
     Index := PByte(P)^;
@@ -1026,175 +1075,440 @@ begin
   end;
 
   // check empty
-  INC_TEST;
   CheckEmptyHeap;
 end;
 
 procedure TestMedium;
+const
+  TEST_SIZE = 256 - 16;
 var
-  ThreadHeap: PThreadHeap;
-  HeapInfo: TThreadHeapInfo;
-
-  P1, P2, P3, P4, P5, P6, P7, P8, P9: Pointer;
-  Info: TPointerInfo;
-
+  PoolInfo: TPoolMediumCompactInfo;
+  P1, P2, P3, P4, StoredP: Pointer;
   Size, i, j: Integer;
   Align: TMemoryAlign;
   PTRS: array[0..2000 - 1] of Pointer;
+
+  procedure InitPool;
+  var
+    P: Pointer;
+  begin
+    P := P1;
+    if (P = nil) then P := P2;
+    if (P = nil) then P := P3;
+
+    PoolInfo.Init(Pointer(NativeInt(P) and MASK_K64_CLEAR));
+  end;
+
+  procedure GetThreeP;
+  begin
+    UTBrainMM.GetThreeMediumP(P1, P2, P3, TEST_SIZE, True);
+    InitPool;
+  end;
+
+  procedure FreeThreeP;
+  begin
+    UTBrainMM.FreeThreeP(P1, P2, P3, True);
+  end;
+
 begin
-  // push back
   INC_TEST;
-  ThreadHeap := MainThreadHeap;
-  if (ThreadHeap = nil) then SystemError;
+  if (MainThreadHeap = nil) then SystemError;
 
-  INC_TEST;
-  GetMemAligned(P1, ma32Bytes, 16);
-  Info.Init(P1);
-  Check(@Info.AsMedium.Pool.Value.Items[0], P1);
+  // free: current
+  begin
+    GetThreeP;
+    Check(1, HeapInfo.PoolMediums.Count);
+    Check(3, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.EmptiesTotal.Count);
+    Check(@PoolInfo.Value.Items[1 + $00], P1);
+    Check(@PoolInfo.Value.Items[1 + $10], P2);
+    Check(@PoolInfo.Value.Items[1 + $20], P3);
 
-  INC_TEST;
-  GetMemAligned(P2, ma32Bytes, 16);
-  Info.Init(P2);
-  Check(@Info.AsMedium.Pool.Value.Items[2], P2);
+    FreeMemNil(P2);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
 
-  INC_TEST;
-  GetMemAligned(P3, ma2048Bytes, MAX_MEDIUM_SIZE - 10 * 16);
-  Info.Init(P3);
-  if (Info.Align < align2K) then SystemError;
-  Check(@Info.AsMedium.Pool.Value.Items[$80 - 6{122}], P3);
+    CheckPBytesAlign(P1, TEST_SIZE, 1, ma32Bytes);
+    CheckPBytesAlign(P3, TEST_SIZE, 3, ma32Bytes);
 
-  INC_TEST;
-  GetMemAligned(P4, ma512Bytes, 28 * 1024 + 26 * 16);
-  Info.Init(P4);
-  if (Info.Align < align512B) then SystemError;
-  Check(@Info.AsMedium.Pool.Value.Items[$880 - 6{2170}], P4);
+    FreeThreeP;
+  end;
 
-  INC_TEST;
-  GetMemAligned(P5, ma128Bytes, 117 * 16);
-  Info.Init(P5);
-  if (Info.Align < align128B) then SystemError;
-  Check(@Info.AsMedium.Pool.Value.Items[$8 - 6], P5);
+  // free: current + right (not full, index not changed)
+  begin
+    GetThreeP;
+    FreeMemNil(P3);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[31].Count);
 
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
-  Check(2, HeapInfo.PoolMediums.Count);
-  Check(2, HeapInfo.PoolMediums.CountNonFull);
+    CheckPBytesAlign(P1, TEST_SIZE, 1, ma32Bytes);
+    CheckPBytesAlign(P2, TEST_SIZE, 2, ma32Bytes);
 
-  // push current
-  INC_TEST;
-  GetMemAligned(P6, ma16Bytes, MAX_SMALL_SIZE + 16);
-  Info.Init(P6);
-  Check(@Info.AsMedium.Pool.Value.Items[($8 - 6) + 117 + 1], P6);
+    FreeThreeP;
+  end;
 
-  // single pool again
-  INC_TEST;
-  FreeMem(P5);
-  FreeMem(P6);
-  HeapInfo.Init(ThreadHeap);
-  Check(1, HeapInfo.PoolMediums.Count);
-  Check(1, HeapInfo.PoolMediums.CountNonFull);
+  // free: current + right (not full, index changed)
+  begin
+    GetThreeP;
+    FreeMemNil(P2);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[8].Count);
+    Check(TEST_SIZE, PoolInfo.Empties[8].Size);
+    Check(1, PoolInfo.Empties[31].Count);
 
-  // alloc 116 --> 117
-  INC_TEST;
-  GetMemAligned(P7, ma16Bytes, 116 * 16);
-  Info.Init(P7);
-  Check(@Info.AsMedium.Pool.Value.Items[$A - 6], P7);
-  Check(117 * 16, Info.Size);
+    FreeMemNil(P1);
+    InitPool;
+    Check(1, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[12].Count);
+    Check(TEST_SIZE * 2 + 16, PoolInfo.Empties[12].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+    CheckPBytesAlign(P3, TEST_SIZE, 3, ma32Bytes);
+  end;
 
-  // push back (clear top)
-  INC_TEST;
-  GetMemAligned(P8, ma16Bytes, 100 * 16);
-  Info.Init(P8);
-  Check(@Info.AsMedium.Pool.Value.Items[$F9B - 6], P8);
+  // free: left + current + right (full)
+  begin
+    FreeMem(P3);
+    CheckEmptyHeap;
+  end;
 
-  // alloc middle (full pool)
-  INC_TEST;
-  GetMemAligned(P9, ma16Bytes, 9 * 16);
-  Info.Init(P9);
-  Check(@Info.AsMedium.Pool.Value.Items[$876 - 6], P9);
+  // free: left + current (not full)
+  begin
+    GetThreeP;
+    FreeMemNil(P1);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[8].Count);
+    Check(TEST_SIZE, PoolInfo.Empties[8].Size);
+    Check(1, PoolInfo.Empties[31].Count);
 
-  HeapInfo.Init(ThreadHeap);
-  Check(1, HeapInfo.PoolMediums.Count);
-  Check(0, HeapInfo.PoolMediums.CountNonFull);
-  Check(1, HeapInfo.PoolMediums.CountFull);
+    FreeMemNil(P2);
+    InitPool;
+    Check(1, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[12].Count);
+    Check(TEST_SIZE * 2 + 16, PoolInfo.Empties[12].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+    CheckPBytesAlign(P3, TEST_SIZE, 3, ma32Bytes);
 
-  // make empty
-  INC_TEST;
-  Info.Init(P1);
-  FreeMem(P1);
-  Info.Init(P2);
-  FreeMem(P2);
-  Info.Init(P3);
-  FreeMem(P3);
-  Info.Init(P4);
-  FreeMem(P4);
-  Info.Init(P7);
-  FreeMem(P7);
-  Info.Init(P8);
-  FreeMem(P8);
-  HeapInfo.Init(ThreadHeap);
-  Info.Init(P9);
-  FreeMem(P9);
-  CheckEmptyHeap;
+    // clear
+    FreeMem(P3);
+    CheckEmptyHeap;
+  end;
 
-  // left allocated grow
-  INC_TEST;
-  GetMemAligned(P1, ma32Bytes, 32);
-  Info.Init(P1);
-  Check(32, Info.Size);
-  INC_TEST;
-  GetMemAligned(P2, ma32Bytes, 32);
-  Info.Init(P1);
-  Check(32 + 16, Info.Size);
+  // get: (margin <= 32) --> take full piece
+  begin
+    GetThreeP;
 
-  FreeMem(P2);
-  FreeMem(P1);
-  CheckEmptyHeap;
+    FreeMemNil(P2);
+    GetMem(P2, TEST_SIZE - 16);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[31].Count);
 
-  // left empty grow
-  INC_TEST;
-  GetMemAligned(P1, ma32Bytes, 16);
-  GetMemAligned(P2, ma32Bytes, 16);
-  GetMemAligned(P3, ma32Bytes, 16);
-  FreeMem(P1);
-  FreeMem(P2);
-  HeapInfo.Init(ThreadHeap);
-  Check(2, HeapInfo.PoolMediums.EmptiesCount);
-  Check(1, HeapInfo.PoolMediums.AllocatedCount);
-  FreeMem(P3);
-  CheckEmptyHeap;
+    FreeMemNil(P2);
+    GetMem(P2, TEST_SIZE - 32);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[31].Count);
 
-  // right empty grow
-  INC_TEST;
-  GetMemAligned(P1, ma32Bytes, 16);
-  GetMemAligned(P2, ma32Bytes, 16);
-  FreeMem(P2);
-  HeapInfo.Init(ThreadHeap);
-  Check(1, HeapInfo.PoolMediums.EmptiesCount);
-  Check(1, HeapInfo.PoolMediums.AllocatedCount);
-  FreeMem(P1);
-  CheckEmptyHeap;
+    FreeThreeP;
+  end;
+
+  // get: (margin > 32) --> leave empty (index changed)
+  begin
+    GetThreeP;
+
+    FreeMemNil(P2);
+    GetMem(P2, TEST_SIZE - 48);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[0].Count);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    FreeThreeP;
+  end;
+
+  // get: (margin > 32) --> leave empty (index not changed)
+  begin
+    GetMemAligned(P1, ma32Bytes, TEST_SIZE);
+    GetMem(P2, 1328);
+    GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+
+    FreeMemNil(P2);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[17].Count);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    GetMem(P2, (MAX_SMALL_B16COUNT + 1) * 16);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[17].Count);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    FreeThreeP;
+  end;
+
+  // get advanced: (align offset) skip available
+  begin
+    GetMemAligned(P1, ma32Bytes, TEST_SIZE - 64);
+    {aligned 256}GetMemAligned(P2, ma32Bytes, TEST_SIZE);
+    {aligned 256}GetMemAligned(P3, ma32Bytes, TEST_SIZE - 64);
+    {aligned 256}GetMemAligned(P4, ma32Bytes, TEST_SIZE);
+
+    // Empties[6] = (P1, P3)
+    StoredP := P3;
+    FreeMemNil(P3);
+    FreeMemNil(P1);
+
+    GetMemAligned(P3, ma128Bytes, TEST_SIZE - 64);
+    Check(StoredP, P3);
+    Info.Init(P3);
+    Check(TEST_SIZE - 64, Info.Size);
+
+    FreeMem(P4);
+    FreeThreeP;
+  end;
+
+  // get advanced: (align offset) skip all Empties[Index] availables
+  begin
+    GetMemAligned(P1, ma32Bytes, TEST_SIZE - 64);
+    {aligned 256}GetMemAligned(P2, ma32Bytes, TEST_SIZE);
+    {aligned 256}GetMemAligned(P3, ma32Bytes, TEST_SIZE - 64);
+    {aligned 256}GetMemAligned(P4, ma32Bytes, TEST_SIZE + 256 - $C0);
+
+    // Empties[6] = (P1, P3)
+    StoredP := Pointer(NativeUInt(P4) + TEST_SIZE + 256 - $C0 + 16);
+    FreeMemNil(P3);
+    FreeMemNil(P1);
+
+    GetMemAligned(P3, ma1024Bytes, TEST_SIZE - 64);
+    Check(StoredP, P3);
+    Info.Init(P3);
+    Check(TEST_SIZE - 64, Info.Size);
+
+    FreeMem(P4);
+    FreeThreeP;
+  end;
+
+  // left allocated AlignOffsetEmpty: (margin = 16) --> grow allocated
+  begin
+    GetMemAligned(P1, ma32Bytes, TEST_SIZE - 16);
+    Info.Init(P1);
+    Check(TEST_SIZE - 16, Info.Size);
+    InitPBytes(P1, TEST_SIZE - 16, 1);
+
+    GetMemAligned(P2, ma32Bytes, TEST_SIZE);
+    Info.Init(P1);
+    Check(TEST_SIZE, Info.Size);
+    CheckPBytes(P1, TEST_SIZE - 16, 1);
+
+    HeapInfo.InitMain;
+    Check(1, HeapInfo.PoolMediums.EmptiesTotal.Count);
+    Check(2, HeapInfo.PoolMediums.Allocated.Count);
+
+    FreeThreeP;
+  end;
+
+  // left allocated AlignOffsetEmpty: (margin >= 32) --> new empty
+  begin
+    GetMemAligned(P1, ma32Bytes, TEST_SIZE - 32);
+    Info.Init(P1);
+    Check(TEST_SIZE - 32, Info.Size);
+    InitPBytes(P1, TEST_SIZE - 32, 1);
+
+    GetMemAligned(P2, ma64Bytes, TEST_SIZE);
+    Info.Init(P1);
+    Check(TEST_SIZE - 32, Info.Size);
+    CheckPBytes(P1, TEST_SIZE - 32, 1);
+
+    HeapInfo.InitMain;
+    Check(16, HeapInfo.PoolMediums.Empties[0].Size);
+    Check(2, HeapInfo.PoolMediums.EmptiesTotal.Count);
+    Check(2, HeapInfo.PoolMediums.Allocated.Count);
+
+    FreeThreeP;
+  end;
+
+  // get advanced: (margin <= 32) --> take full piece (exclude empty)
+  begin
+    // magin = 0
+    begin
+      GetMem(P1, TEST_SIZE - 16);
+      {[8]}GetMem(P2, 224);
+      GetMem(P3, TEST_SIZE);
+
+      Info.Init(P2);
+      Check(224, Info.Size);
+      FreeMemNil(P2);
+      InitPool;
+      Check(2, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[8].Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      GetMemAligned(P2, ma32Bytes, 224 - 16 - 0);
+      Info.Init(P1);
+      Check(TEST_SIZE, Info.Size);
+      Info.Init(P2);
+      Check(224 - 16, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[31].Count);
+      FreeThreeP;
+    end;
+
+    // magin = 16
+    begin
+      GetMem(P1, TEST_SIZE - 16);
+      {[8]}GetMem(P2, 224);
+      GetMem(P3, TEST_SIZE);
+
+      Info.Init(P2);
+      Check(224, Info.Size);
+      FreeMemNil(P2);
+      InitPool;
+      Check(2, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[8].Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      GetMemAligned(P2, ma32Bytes, 224 - 16 - 16);
+      Info.Init(P1);
+      Check(TEST_SIZE, Info.Size);
+      Info.Init(P2);
+      Check(224 - 16, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[31].Count);
+      FreeThreeP;
+    end;
+
+    // magin = 32
+    begin
+      GetMem(P1, TEST_SIZE - 16);
+      {[8]}GetMem(P2, 224);
+      GetMem(P3, TEST_SIZE);
+
+      Info.Init(P2);
+      Check(224, Info.Size);
+      FreeMemNil(P2);
+      InitPool;
+      Check(2, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[8].Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      GetMemAligned(P2, ma32Bytes, 224 - 16 - 32);
+      Info.Init(P1);
+      Check(TEST_SIZE, Info.Size);
+      Info.Init(P2);
+      Check(224 - 16, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[31].Count);
+      FreeThreeP;
+    end;
+  end;
+
+  // get advanced: (margin > 32) --> leave empty (index changed)
+  begin
+    GetMem(P1, TEST_SIZE - 16);
+    {[14]}GetMem(P2, 576);
+    GetMem(P3, TEST_SIZE);
+
+    FreeMemNil(P2);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[14].Count);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    GetMemAligned(P2, ma32Bytes, 16);
+    Info.Init(P1);
+    Check(TEST_SIZE, Info.Size);
+    Info.Init(P2);
+    Check(16, Info.Size);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[13].Count);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    FreeThreeP;
+  end;
+
+  // get advanced: (margin > 32) --> leave empty (index not changed)
+  begin
+    GetMem(P1, TEST_SIZE - 16);
+    {[13]}GetMem(P2, 576 - 16);
+    GetMem(P3, TEST_SIZE);
+
+    FreeMemNil(P2);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[13].Count);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    GetMemAligned(P2, ma32Bytes, 16);
+    Info.Init(P1);
+    Check(TEST_SIZE, Info.Size);
+    Info.Init(P2);
+    Check(16, Info.Size);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[13].Count);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    FreeThreeP;
+  end;
 
   // allocate random
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
-
     repeat
       Align := TMemoryAlign(Random(Ord(High(TMemoryAlign)) + 1));
       Size := Random(MAX_MEDIUM_SIZE) + 1;
     until (Align <> ma16Bytes) or (Size > MAX_SMALL_SIZE);
 
-    GetMemAligned(P1, Align, Size);
+    if (Align <> ma16Bytes) or (Random(10) < 3) then
+    begin
+      GetMemAligned(P1, Align, Size);
+    end else
+    begin
+      GetMem(P1, Size);
+    end;
     PTRS[i] := P1;
 
+    j := PHeaderMedium(NativeInt(P1) - SizeOf(THeaderMedium)).WSize;
+    if (j > (Size + 15) and -16) then
+    begin
+      if (Cardinal(j - ((Size + 15) and -16)) > 32) then SystemError;
+      Size := j;
+    end;
     FillChar(P1^, Size, Byte(i));
     PInteger(P1)^ := Size;
   end;
 
   // try heap analize
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
 
   // mixup
   MixPointers(PTRS);
@@ -1202,7 +1516,6 @@ begin
   // free random
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
     P1 := PTRS[i];
     Info.Init(P1);
 
@@ -1219,30 +1532,23 @@ begin
   end;
 
   // check empty
-  INC_TEST;
   CheckEmptyHeap;
 end;
 
 procedure TestSmallResize(const Realloc: Boolean);
 var
   ResizeMem: TResizeMem;
-  ThreadHeap: PThreadHeap;
-  HeapInfo: TThreadHeapInfo;
-
   i, j, k, Size: Integer;
   P, LastP: Pointer;
 
-  Info: TPointerInfo;
   LineP, LineLastP: Integer;
   PTRS: array[0..2000 - 1] of Pointer;
 begin
   INC_TEST;
-  ThreadHeap := MainThreadHeap;
-  if (ThreadHeap = nil) then SystemError;
+  if (MainThreadHeap = nil) then SystemError;
 
   // initialize
   ResizeMem := RESIZEMEM_PROCS[Realloc];
-  INC_TEST;
   GetMem(P, MAX_SMALL_SIZE);
   Info.Init(P);
   Check(MAX_SMALL_SIZE, Info.Size);
@@ -1252,7 +1558,6 @@ begin
   // reduce
   for i := MAX_SMALL_SIZE downto 1 do
   begin
-    INC_TEST;
     ResizeMem(P, i);
     Info.Init(P);
     Check(MAX_SMALL_SIZE, Info.Size);
@@ -1265,7 +1570,6 @@ begin
   // grow (maximum)
   for i := 1 to MAX_SMALL_SIZE do
   begin
-    INC_TEST;
     ResizeMem(P, i);
     Info.Init(P);
     Check(MAX_SMALL_SIZE, Info.Size);
@@ -1276,14 +1580,12 @@ begin
   end;
 
   // clear
-  INC_TEST;
   FreeMem(P);
   CheckEmptyHeap;
 
   // grow
   for k := 1 to MAX_SMALL_B16COUNT do
   begin
-    INC_TEST;
     Size := k shl 4;
     GetMem(P, Size);
     LineLastP := (NativeInt(P) and MASK_K64_TEST) shr 10;
@@ -1291,7 +1593,6 @@ begin
 
     for i := Size + 1 to MAX_SMALL_SIZE do
     begin
-      INC_TEST;
       ResizeMem(P, i);
       Info.Init(P);
       Check((i + 15) and -16, Info.Size);
@@ -1315,7 +1616,6 @@ begin
       end;
     end;
 
-    INC_TEST;
     FreeMem(P);
     CheckEmptyHeap;
   end;
@@ -1323,522 +1623,865 @@ begin
   // allocate random
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
     GetMem(PTRS[i], Random(MAX_SMALL_SIZE) + 1);
   end;
 
   // try heap analize
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
 
   // mixup, realloc random
   MixPointers(PTRS);
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
     ResizeMem(PTRS[i], Random(MAX_SMALL_SIZE) + 1);
   end;
 
   // try heap analize
-  INC_TEST;
-  HeapInfo.Init(ThreadHeap);
+  HeapInfo.InitMain;
 
   // mixup, free random
   MixPointers(PTRS);
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
     FreeMem(PTRS[i]);
   end;
 
   // check empty
-  INC_TEST;
   CheckEmptyHeap;
 end;
 
 
 procedure TestMediumResize(const Realloc: Boolean);
 const
-  TEST_SIZE = 256;
+  TEST_SIZE = 256 - 16;
 var
   ResizeMem: TResizeMem;
-  ThreadHeap: PThreadHeap;
-  HeapInfo: TThreadHeapInfo;
-
-  i, j, k, Size: Integer;
-  P, LastP, P2, P3: Pointer;
-
-  Info: TPointerInfo;
+  PoolInfo: TPoolMediumCompactInfo;
+  P1, P2, P3, StoredP: Pointer;
+  i, j, Size: Integer;
   Align: TMemoryAlign;
   PTRS: array[0..2000 - 1] of Pointer;
 
-  procedure InitPBytes(P: Pointer; Size: Integer; XorByte: Byte);
+  procedure InitPool;
   var
-    j: Integer;
+    P: Pointer;
   begin
-    for j := 0 to Size - 1 do
-     PMediumBytes(P)[j] := Byte(j) xor XorByte;
+    P := P1;
+    if (P = nil) then P := P2;
+    if (P = nil) then P := P3;
+
+    PoolInfo.Init(Pointer(NativeInt(P) and MASK_K64_CLEAR));
   end;
 
   procedure CheckPBytes(P: Pointer; Size: Integer; XorByte: Byte);
-  var
-    j: Integer;
   begin
     if (Realloc) then
-    begin
-      for j := 0 to Size - 1 do
-      if (PMediumBytes(P)[j] <> Byte(j) xor XorByte) then SystemError;
-    end;
+      UTBrainMM.CheckPBytes(P, Size, XorByte);
   end;
 
   procedure GetThreeP;
   begin
-    GetMemAligned(P, ma32Bytes, TEST_SIZE - 16);
-    GetMemAligned(P2, ma32Bytes, TEST_SIZE - 16);
-    GetMemAligned(P3, ma32Bytes, TEST_SIZE - 16);
-
-    LastP := P;
-    InitPBytes(P, TEST_SIZE - 16, 1);
-    InitPBytes(P2, TEST_SIZE - 16, 2);
-    InitPBytes(P3, TEST_SIZE - 16, 3);
+    UTBrainMM.GetThreeMediumP(P1, P2, P3, TEST_SIZE, True);
+    StoredP := P1;
   end;
 
   procedure FreeThreeP;
   begin
-    FreeMem(P);
-    FreeMem(P2);
-    FreeMem(P3);
-    CheckEmptyHeap;
+    UTBrainMM.FreeThreeP(P1, P2, P3, True);
   end;
 
   function ResizeOneP(var P: Pointer; const NewSize: NativeInt): Integer;
   begin
-    INC_TEST;
     ResizeMem(P, NewSize);
     Info.Init(P);
-    HeapInfo.Init(ThreadHeap);
-    Result := HeapInfo.PoolMediums.EmptiesCount;
+    HeapInfo.InitMain;
+    Result := HeapInfo.PoolMediums.EmptiesTotal.Count;
   end;
 
   function FreeOneP(var P: Pointer): Integer;
   begin
-    INC_TEST;
     Info.Init(P);
     FreeMem(P);
     P := nil;
-    HeapInfo.Init(ThreadHeap);
-    Result := HeapInfo.PoolMediums.EmptiesCount;
+    HeapInfo.InitMain;
+    Result := HeapInfo.PoolMediums.EmptiesTotal.Count;
   end;
 
 begin
-  INC_TEST;
-  ThreadHeap := MainThreadHeap;
-  if (ThreadHeap = nil) then SystemError;
-
   // initialize
+  INC_TEST;
+  if (MainThreadHeap = nil) then SystemError;
   ResizeMem := RESIZEMEM_PROCS[Realloc];
-  INC_TEST;
-  GetMem(P, TEST_SIZE);
-  Info.Init(P);
-  Check(TEST_SIZE, Info.Size);
-  LastP := P;
-  for j := 0 to TEST_SIZE - 1 do PMediumBytes(P)[j] := j;
 
-  // reduce
-  for i := TEST_SIZE downto 1 do
+  // reduce: ptr/data not changed
   begin
-    INC_TEST;
-    ResizeMem(P, i);
-    Info.Init(P);
-    Check((i + 15) and -16, Info.Size);
-    Check(LastP, P);
-    HeapInfo.Init(ThreadHeap);
+    GetMem(P1, TEST_SIZE);
+    StoredP := P1;
+    InitPBytes(P1, TEST_SIZE, 1);
 
-    for j := 0 to Info.Size - 1 do
-    if (PMediumBytes(P)[j] <> j) then SystemError;
+    for i := TEST_SIZE downto 1 do
+    begin
+      ResizeMem(P1, i);
+      Check(StoredP, P1);
+      Info.Init(P1);
+      if (Cardinal(Info.Size - ((i + 15) and -16)) > 16) then
+        SystemError;
 
-    Check(1, HeapInfo.PoolMediums.EmptiesCount);
-    Check(SizeOf(TK64PoolMedium) - 96 - Info.Size - 16 * 2, HeapInfo.PoolMediums.EmptiesSize);
-  end;
+      UTBrainMM.CheckPBytes(P1, Info.Size, 1);
+      HeapInfo.InitMain;
+    end;
 
-  // grow
-  for i := 1 to TEST_SIZE do
-  begin
-    INC_TEST;
-    ResizeMem(P, i);
-    Info.Init(P);
-    Check((i + 15) and -16, Info.Size);
-    Check(LastP, P);
-    HeapInfo.Init(ThreadHeap);
-
-    for j := 0 to 15 do
-    if (PMediumBytes(P)[j] <> j) then SystemError;
-
-    Check(1, HeapInfo.PoolMediums.EmptiesCount);
-    Check(SizeOf(TK64PoolMedium) - 96 - Info.Size - 16 * 2, HeapInfo.PoolMediums.EmptiesSize);
-  end;
-
-  // clear
-  INC_TEST;
-  FreeMem(P);
-  CheckEmptyHeap;
-
-  // non-resized
-  INC_TEST;
-  GetMem(P, TEST_SIZE);
-  GetMem(P2, TEST_SIZE);
-  ResizeMem(P, TEST_SIZE - 16);
-  Info.Init(P);
-  Check(TEST_SIZE, Info.Size);
-  HeapInfo.Init(ThreadHeap);
-
-  // clear
-  INC_TEST;
-  FreeMem(P);
-  FreeMem(P2);
-  CheckEmptyHeap;
-
-  // grow right (reduce/remove empty)
-  begin
-    INC_TEST;
-    GetMem(P, TEST_SIZE);
-    LastP := P;
-    GetMem(P2, TEST_SIZE);
-    HeapInfo.Init(ThreadHeap);
-    Check(1, HeapInfo.PoolMediums.EmptiesCount);
-    ResizeMem(P, TEST_SIZE - 64);
-    Info.Init(P);
-    Check(TEST_SIZE - 64, Info.Size);
-    Check(LastP, P);
-    HeapInfo.Init(ThreadHeap);
-    Check(2, HeapInfo.PoolMediums.EmptiesCount);
-
-    INC_TEST;
-    ResizeMem(P, TEST_SIZE - 48);
-    Info.Init(P);
-    Check(TEST_SIZE - 48, Info.Size);
-    Check(LastP, P);
-    HeapInfo.Init(ThreadHeap);
-    Check(2, HeapInfo.PoolMediums.EmptiesCount);
-
-    INC_TEST;
-    ResizeMem(P, TEST_SIZE);
-    Info.Init(P);
-    Check(TEST_SIZE, Info.Size);
-    Check(LastP, P);
-    HeapInfo.Init(ThreadHeap);
-    Check(1, HeapInfo.PoolMediums.EmptiesCount);
-
-    INC_TEST;
-    ResizeMem(P, TEST_SIZE - 48);
-    Check(LastP, P);
-    HeapInfo.Init(ThreadHeap);
-    Check(2, HeapInfo.PoolMediums.EmptiesCount);
-    ResizeMem(P, TEST_SIZE - 16);
-    Info.Init(P);
-    Check(TEST_SIZE, Info.Size);
-    Check(LastP, P);
-    HeapInfo.Init(ThreadHeap);
-    Check(1, HeapInfo.PoolMediums.EmptiesCount);
-
-    // clear
-    INC_TEST;
-    FreeMem(P);
-    FreeMem(P2);
+    FreeMem(P1);
     CheckEmptyHeap;
   end;
 
-  // grow left: full left + current
+  // reduce: right is empty, index not changed
   begin
-    INC_TEST;
-    GetThreeP;
-    HeapInfo.Init(ThreadHeap);
-    Check(1, HeapInfo.PoolMediums.EmptiesCount);
+    GetMem(P1, TEST_SIZE);
+    {[8]}GetMem(P2, 224);
+    GetMem(P3, TEST_SIZE);
 
-    k := FreeOneP(P);
-    Check(2, k);
+    FreeMemNil(P2);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.Empties[8].Count);
+    Check(224, PoolInfo.Empties[8].Size);
+    Check(1, PoolInfo.Empties[31].Count);
 
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16);
-    Check(1, k);
-    Check(LastP, P2);
-    Check(TEST_SIZE + TEST_SIZE - 16, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+    StoredP := P1;
+    ResizeMem(P1, TEST_SIZE - 32);
+    Check(StoredP, P1);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.Empties[8].Count);
+    Check(224 + 32, PoolInfo.Empties[8].Size);
+    Check(1, PoolInfo.Empties[31].Count);
 
-    // clear
     FreeThreeP;
   end;
 
-  // grow left: full - 16 left + current --> full
+  // reduce: right is empty, index changed
   begin
-    GetThreeP;
-    FreeOneP(P);
+    GetMem(P1, TEST_SIZE);
+    {[8]}GetMem(P2, 224);
+    GetMem(P3, TEST_SIZE);
 
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 - 16);
-    Check(1, k);
-    Check(LastP, P2);
-    Check(TEST_SIZE + TEST_SIZE - 16, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+    FreeMemNil(P2);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.Empties[8].Count);
+    Check(224, PoolInfo.Empties[8].Size);
+    Check(1, PoolInfo.Empties[31].Count);
 
-    // clear
+    StoredP := P1;
+    ResizeMem(P1, TEST_SIZE - 48);
+    Check(StoredP, P1);
+    InitPool;
+    Check(2, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.Empties[9].Count);
+    Check(224 + 48, PoolInfo.Empties[9].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+
     FreeThreeP;
   end;
 
-  // grow left: full - 32 left + current --> full - 32
+  // reduce: right is allocated, new empty
   begin
     GetThreeP;
-    FreeOneP(P);
 
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 - 32);
-    Check(2, k);
-    Check(LastP, P2);
-    Check(TEST_SIZE + TEST_SIZE - 16 - 32, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(1, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[31].Count);
 
-    // clear
+    StoredP := P1;
+    ResizeMem(P1, TEST_SIZE - 32);
+    Check(StoredP, P1);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[0].Count);
+    Check(16, PoolInfo.Empties[0].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+
     FreeThreeP;
   end;
 
-  // grow left: offset = 1, realign right
+  // grow right: (margin <= 32) --> take full piece (exclude empty)
+  begin
+    // margin = 0
+    begin
+      GetThreeP;
+      StoredP := P2;
+
+      ResizeMem(P2, 16);
+      Check(StoredP, P2);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[7].Count);
+      Check(208, PoolInfo.Empties[7].Size);
+
+      ResizeMem(P2, TEST_SIZE);
+      Check(StoredP, P2);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Info.Init(P2);
+      Check(TEST_SIZE, Info.Size);
+
+      FreeThreeP;
+    end;
+
+    // margin = 16
+    begin
+      GetThreeP;
+      StoredP := P2;
+
+      ResizeMem(P2, 16);
+      Check(StoredP, P2);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[7].Count);
+      Check(208, PoolInfo.Empties[7].Size);
+
+      ResizeMem(P2, TEST_SIZE - 16);
+      Check(StoredP, P2);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Info.Init(P2);
+      Check(TEST_SIZE, Info.Size);
+
+      FreeThreeP;
+    end;
+
+    // margin = 32
+    begin
+      GetThreeP;
+      StoredP := P2;
+
+      ResizeMem(P2, 16);
+      Check(StoredP, P2);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[7].Count);
+      Check(208, PoolInfo.Empties[7].Size);
+
+      ResizeMem(P2, TEST_SIZE - 32);
+      Check(StoredP, P2);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Info.Init(P2);
+      Check(TEST_SIZE, Info.Size);
+
+      FreeThreeP;
+    end;
+  end;
+
+  // grow right: (margin > 32) --> empty resize (index not changed)
   begin
     GetThreeP;
+    StoredP := P2;
 
-    k := ResizeOneP(P, 32);
-    Check(2, k);
-    CheckPBytes(P, 32, 1);
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 64 - 32);
-    Check(1, k);
-    Check(TEST_SIZE + TEST_SIZE - 64 - 16, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
-    Info.Init(P);
+    ResizeMem(P2, 16);
+    Check(StoredP, P2);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[7].Count);
+    Check(208, PoolInfo.Empties[7].Size);
+
+    ResizeMem(P2, 32);
+    Check(StoredP, P2);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[7].Count);
+    Check(192, PoolInfo.Empties[7].Size);
+    Info.Init(P2);
+    Check(32, Info.Size);
+
+    FreeThreeP;
+  end;
+
+  // grow right: (margin > 32) --> empty resize (index changed)
+  begin
+    GetThreeP;
+    StoredP := P2;
+
+    ResizeMem(P2, 16);
+    Check(StoredP, P2);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[7].Count);
+    Check(208, PoolInfo.Empties[7].Size);
+
+    ResizeMem(P2, 48);
+    Check(StoredP, P2);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[6].Count);
+    Check(176, PoolInfo.Empties[6].Size);
+    Info.Init(P2);
     Check(48, Info.Size);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
 
-    // clear
     FreeThreeP;
   end;
 
-  // grow left: offset = 1, store align
+  // grow penalty: (left is allocated) --> new place
   begin
-    // GetThreeP (align64 P2)
-    GetMemAligned(P, ma32Bytes, TEST_SIZE + 16);
-    GetMemAligned(P2, ma64Bytes, TEST_SIZE - 16);
-    GetMemAligned(P3, ma32Bytes, TEST_SIZE - 16);
-    InitPBytes(P2, TEST_SIZE - 16, 2);
-
-    k := ResizeOneP(P, TEST_SIZE + 16 - 64 - 16);
-    Check(2, k);
-    Info.Init(P);
-    Check(TEST_SIZE + 16 - 64 - 16, Info.Size);
-
-    k := ResizeOneP(P2, TEST_SIZE - 16 + 64);
-    Check(1, k);
-    if (Info.AsMedium.Align <> ma64Bytes) then SystemError;
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
-    Info.Init(P);
-    Check(TEST_SIZE + 16 - 64{ - 16}, Info.Size);
-
-    // clear
-    FreeThreeP;
-  end;
-
-  // grow left-right: full
-  begin
-    // make P2, left-right empty
     GetThreeP;
-    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
-    FreeMemNil(P3);
-    P3 := LastP;
-    LastP := P;
-    FreeMemNil(P);
 
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE);
-    Check(1, k);
-    Check(LastP, P2);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
-    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    StoredP := Pointer(NativeUInt(P3) + TEST_SIZE + SizeOf(THeaderMedium));
+    ResizeMem(P2, TEST_SIZE + 16);
+    Check(StoredP, P2);
+    Info.Init(P2);
+    Check(ma32Bytes, Info.AsMedium.Align);
+    Check(TEST_SIZE + 16, Info.Size);
+    CheckPBytes(P2, TEST_SIZE, 2);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[8].Count);
+    Check(TEST_SIZE, PoolInfo.Empties[8].Size);
 
-    // clear
     FreeThreeP;
   end;
 
-  // grow left-right: full - 16 --> full
+  // grow penalty: (left is empty, align offset = 0, size is not suitable) --> new place
   begin
-    // make P2, left-right empty
     GetThreeP;
-    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
-    FreeMemNil(P3);
-    P3 := LastP;
-    LastP := P;
-    FreeMemNil(P);
 
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE - 16);
-    Check(1, k);
-    Check(LastP, P2);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
-    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    StoredP := Pointer(NativeUInt(P3) + TEST_SIZE + SizeOf(THeaderMedium));
+    ResizeMem(P1, TEST_SIZE - 32);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[0].Count);
+    Check(16, PoolInfo.Empties[0].Size);
 
-    // clear
+    ResizeMem(P2, TEST_SIZE + 48);
+    Check(StoredP, P2);
+    Info.Init(P2);
+    Check(ma32Bytes, Info.AsMedium.Align);
+    Check(TEST_SIZE + 48, Info.Size);
+    CheckPBytes(P2, TEST_SIZE, 2);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[9].Count);
+    Check(TEST_SIZE + 32, PoolInfo.Empties[9].Size);
+
     FreeThreeP;
   end;
 
-  // grow left-right: full - 32
+  // grow penalty: (left is empty, align offset = 16, size is not suitable) --> new place
   begin
-    // make P2, left-right empty
     GetThreeP;
-    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
-    FreeMemNil(P3);
-    P3 := LastP;
-    LastP := P;
-    FreeMemNil(P);
 
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE - 32);
-    Check(2, k);
-    Check(LastP, P2);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
-    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE - 32, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    StoredP := Pointer(NativeUInt(P3) + TEST_SIZE + SizeOf(THeaderMedium));
+    ResizeMem(P1, TEST_SIZE - 48);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[0].Count);
+    Check(32, PoolInfo.Empties[0].Size);
 
-    // clear
+    ResizeMem(P2, TEST_SIZE + 48);
+    Check(StoredP, P2);
+    Info.Init(P2);
+    Check(ma32Bytes, Info.AsMedium.Align);
+    Check(TEST_SIZE + 48, Info.Size);
+    CheckPBytes(P2, TEST_SIZE, 2);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[9].Count);
+    Check(TEST_SIZE + 48, PoolInfo.Empties[9].Size);
+
     FreeThreeP;
   end;
 
-  // grow left-right: full + 16 --> new
+  // grow penalty: (left is empty, align offset = 0, margin <= 32) --> take full piece
   begin
-    // make P2, left-right empty
+    // magin = 0
+    begin
+      GetThreeP;
+
+      StoredP := Pointer(NativeUInt(P2) - 32);
+      ResizeMem(P1, TEST_SIZE - 32);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[0].Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + 32);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + 32, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      FreeThreeP;
+    end;
+
+    // magin = 16
+    begin
+      GetThreeP;
+
+      StoredP := Pointer(NativeUInt(P2) - 32);
+      ResizeMem(P1, TEST_SIZE - 32);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[0].Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + 16);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + 32, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      FreeThreeP;
+    end;
+
+    // magin = 32
+    begin
+      GetThreeP;
+
+      StoredP := Pointer(NativeUInt(P2) - 64);
+      ResizeMem(P1, TEST_SIZE - 64);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(2, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[1].Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + 32);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + 64, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      FreeThreeP;
+    end;
+  end;
+
+  // grow penalty: (left is empty, align offset = 0, margin > 32) --> include empty
+  begin
     GetThreeP;
-    GetMemAligned(LastP, ma32Bytes, TEST_SIZE - 16);
-    FreeMemNil(P3);
-    P3 := LastP;
-    // LastP := P;
-    FreeMemNil(P);
 
-    k := ResizeOneP(P2, TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE + 16);
-    Check(2, k);
-    Check(Pointer(NativeUInt(LastP) + TEST_SIZE), P2);
-    if (Info.AsMedium.Align <> ma32Bytes) then SystemError;
-    Check(TEST_SIZE + TEST_SIZE - 16 + TEST_SIZE + 16, Info.Size);
-    CheckPBytes(P2, TEST_SIZE - 16, 2);
+    StoredP := Pointer(NativeUInt(P2) - 64);
+    ResizeMem(P1, TEST_SIZE - 64);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[1].Count);
+    Check(1, PoolInfo.Empties[31].Count);
 
-    // clear
+    ResizeMem(P2, TEST_SIZE + 16);
+    Check(StoredP, P2);
+    CheckPBytes(P2, TEST_SIZE, 2);
+    Info.Init(P2);
+    Check(TEST_SIZE + 16, Info.Size);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[0].Count);
+    Check(32, PoolInfo.Empties[0].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    FreeThreeP;
+  end;
+
+  // grow penalty: (left/right are empty, align offset = 0, margin <= 32) --> take full piece
+  begin
+    // magin = 0
+    begin
+      GetThreeP;
+      FreeMem(P3);
+      GetMemAligned(StoredP, ma32Bytes, 16);
+      GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+      FreeMem(StoredP);
+      StoredP := Pointer(NativeUInt(P2) - 32);
+      ResizeMem(P1, TEST_SIZE - 32);
+
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(3, PoolInfo.EmptiesTotal.Count);
+      Check(2, PoolInfo.Empties[0].Count);
+      Check(32, PoolInfo.Empties[0].Size);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + 64);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + 64, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+
+      FreeThreeP;
+    end;
+
+    // magin = 16
+    begin
+      GetThreeP;
+      FreeMem(P3);
+      GetMemAligned(StoredP, ma32Bytes, 16);
+      GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+      FreeMem(StoredP);
+      StoredP := Pointer(NativeUInt(P2) - 32);
+      ResizeMem(P1, TEST_SIZE - 32);
+
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(3, PoolInfo.EmptiesTotal.Count);
+      Check(2, PoolInfo.Empties[0].Count);
+      Check(32, PoolInfo.Empties[0].Size);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + 48);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + 64, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+
+      FreeThreeP;
+    end;
+
+    // magin = 32
+    begin
+      GetThreeP;
+      FreeMem(P3);
+      GetMemAligned(StoredP, ma32Bytes, 16);
+      GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+      FreeMem(StoredP);
+      StoredP := Pointer(NativeUInt(P2) - 64);
+      ResizeMem(P1, TEST_SIZE - 64);
+
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(3, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[0].Count);
+      Check(16, PoolInfo.Empties[0].Size);
+      Check(1, PoolInfo.Empties[1].Count);
+      Check(48, PoolInfo.Empties[1].Size);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + 64);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + 64 + 32, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+
+      FreeThreeP;
+    end;
+  end;
+
+  // grow penalty: (left/right are empty, align offset = 0, margin > 32) --> exclude+include empty
+  begin
+    GetThreeP;
+    FreeMem(P3);
+    GetMemAligned(StoredP, ma32Bytes, 16);
+    GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+    FreeMem(StoredP);
+    StoredP := Pointer(NativeUInt(P2) - 64);
+    ResizeMem(P1, TEST_SIZE - 64);
+
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(3, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[0].Count);
+    Check(16, PoolInfo.Empties[0].Size);
+    Check(1, PoolInfo.Empties[1].Count);
+    Check(48, PoolInfo.Empties[1].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    ResizeMem(P2, TEST_SIZE + 48);
+    Check(StoredP, P2);
+    CheckPBytes(P2, TEST_SIZE, 2);
+    Info.Init(P2);
+    Check(TEST_SIZE + 48, Info.Size);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(2, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[0].Count);
+    Check(32, PoolInfo.Empties[0].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    FreeThreeP;
+  end;
+
+  // grow penalty: (left/right are empty, align offset = 16, margin <= 32) --> grow allocated, take full empty piece
+  begin
+    // magin = 0
+    begin
+      GetThreeP;
+      FreeMem(P3);
+      GetMemAligned(StoredP, ma32Bytes, 16);
+      GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+      FreeMem(StoredP);
+      StoredP := Pointer(NativeUInt(P2) - 32);
+      ResizeMem(P1, TEST_SIZE - 48);
+
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(3, PoolInfo.EmptiesTotal.Count);
+      Check(2, PoolInfo.Empties[0].Count);
+      Check(48, PoolInfo.Empties[0].Size);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + (48 - 16) + 32);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + (48 - 16) + 32, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Info.Init(P1);
+      Check(TEST_SIZE - 32, Info.Size);
+
+      FreeThreeP;
+    end;
+
+    // magin = 16
+    begin
+      GetThreeP;
+      FreeMem(P3);
+      GetMemAligned(StoredP, ma32Bytes, 16);
+      GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+      FreeMem(StoredP);
+      StoredP := Pointer(NativeUInt(P2) - 32);
+      ResizeMem(P1, TEST_SIZE - 48);
+
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(3, PoolInfo.EmptiesTotal.Count);
+      Check(2, PoolInfo.Empties[0].Count);
+      Check(48, PoolInfo.Empties[0].Size);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + (48 - 16) + 32 - 16);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + (48 - 16) + 32, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Info.Init(P1);
+      Check(TEST_SIZE - 32, Info.Size);
+
+      FreeThreeP;
+    end;
+
+    // magin = 32
+    begin
+      GetThreeP;
+      FreeMem(P3);
+      GetMemAligned(StoredP, ma32Bytes, 16);
+      GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+      FreeMem(StoredP);
+      StoredP := Pointer(NativeUInt(P2) - 64);
+      ResizeMem(P1, TEST_SIZE - 80);
+
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(3, PoolInfo.EmptiesTotal.Count);
+      Check(1, PoolInfo.Empties[0].Count);
+      Check(16, PoolInfo.Empties[0].Size);
+      Check(1, PoolInfo.Empties[2].Count);
+      Check(64, PoolInfo.Empties[2].Size);
+      Check(1, PoolInfo.Empties[31].Count);
+
+      ResizeMem(P2, TEST_SIZE + (80 - 16) + 32 - 32);
+      Check(StoredP, P2);
+      CheckPBytes(P2, TEST_SIZE, 2);
+      Info.Init(P2);
+      Check(TEST_SIZE + (80 - 16) + 32, Info.Size);
+      InitPool;
+      Check(3, PoolInfo.Allocated.Count);
+      Check(1, PoolInfo.EmptiesTotal.Count);
+      Info.Init(P1);
+      Check(TEST_SIZE - 80 + 16, Info.Size);
+
+      FreeThreeP;
+    end;
+  end;
+
+  // grow penalty: (left/right are empty, align offset > 16, margin > 32) --> exclude modified left/right + include modified left/right
+  begin
+    GetThreeP;
+    StoredP := P2;
+    FreeMemNil(P2);
+    GetMemAligned(P2, ma64Bytes, TEST_SIZE);
+    Check(StoredP, P2);
+    Info.Init(P2);
+    Check(TEST_SIZE, Info.Size);
+    Check(ma64Bytes, Info.AsMedium.Align);
+    InitPBytes(P2, TEST_SIZE, 2);
+
+    FreeMem(P3);
+    GetMemAligned(StoredP, ma32Bytes, 48);
+    GetMemAligned(P3, ma32Bytes, TEST_SIZE);
+    FreeMem(StoredP);
+    StoredP := Pointer(NativeUInt(P2) - 128);
+    ResizeMem(P1, TEST_SIZE - 128 - 32);
+
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(3, PoolInfo.EmptiesTotal.Count);
+    Check(1, PoolInfo.Empties[1].Count);
+    Check(48, PoolInfo.Empties[1].Size);
+    Check(1, PoolInfo.Empties[5].Count);
+    Check(144, PoolInfo.Empties[5].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+
+    ResizeMem(P2, 128 + TEST_SIZE + 16);
+    Check(StoredP, P2);
+    CheckPBytes(P2, TEST_SIZE, 2);
+    Info.Init(P2);
+    Check(128 + TEST_SIZE + 16, Info.Size);
+    InitPool;
+    Check(3, PoolInfo.Allocated.Count);
+    Check(3, PoolInfo.EmptiesTotal.Count);
+    Check(2, PoolInfo.Empties[0].Count);
+    Check(16 + 32, PoolInfo.Empties[0].Size);
+    Check(1, PoolInfo.Empties[31].Count);
+    Info.Init(P1);
+    Check(TEST_SIZE - 128 - 32, Info.Size);
+
     FreeThreeP;
   end;
 
   // allocate random
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
+    repeat
+      Align := TMemoryAlign(Random(Ord(High(TMemoryAlign)) + 1));
+      Size := Random(MAX_MEDIUM_SIZE) + 1;
+    until (Align <> ma16Bytes) or (Size > MAX_SMALL_SIZE);
 
     repeat
       Align := TMemoryAlign(Random(Ord(High(TMemoryAlign)) + 1));
       Size := Random(MAX_MEDIUM_SIZE) + 1;
     until (Align <> ma16Bytes) or (Size > MAX_SMALL_SIZE);
 
-    GetMemAligned(PTRS[i], Align, Size);
+    if (Align <> ma16Bytes) or (Random(10) < 3) then
+    begin
+      GetMemAligned(P1, Align, Size);
+    end else
+    begin
+      GetMem(P1, Size);
+    end;
+    PTRS[i] := P1;
   end;
 
   // realloc random
   MixPointers(PTRS);
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
-
     Size := Random(MAX_MEDIUM_SIZE) + 1;
     ResizeMem(PTRS[i], Size);
 
-    P := PTRS[i];
-    FillChar(P^, Size, Byte(i));
-    PInteger(P)^ := Size;
+    P1 := PTRS[i];
+    FillChar(P1^, Size, Byte(i));
+    PInteger(P1)^ := Size;
   end;
 
   // free random
   MixPointers(PTRS);
   for i := Low(PTRS) to High(PTRS) do
   begin
-    INC_TEST;
-    P := PTRS[i];
-    Info.Init(P);
+    P1 := PTRS[i];
+    Info.Init(P1);
 
-    Size := PInteger(P)^;
+    Size := PInteger(P1)^;
     if (Info.AsMedium = nil) then SystemError;
-    if (Info.Size <> (Size + 15) and -16) and
-      (Info.Size <> (Size + 15 + 16) and -16) then SystemError;
+    if (Cardinal(Info.Size - ((Size + 15) and -16)) > 32) then SystemError;
 
     if (Realloc) then
     begin
       for j := 4 to Size - 1 do
-      if (PMediumBytes(P)[j] <> PMediumBytes(P)[4]) then
+      if (PMediumBytes(P1)[j] <> PMediumBytes(P1)[4]) then
         SystemError;
     end;
 
-    FreeMem(P);
+    FreeMem(P1);
   end;
 
   // check empty
-  INC_TEST;
   CheckEmptyHeap;
 end;
 
 
 procedure TestDifficults;
 var
-  ThreadHeap: PThreadHeap;
-  HeapInfo: TThreadHeapInfo;
-
   P: Pointer;
-  Info: TPointerInfo;
   Realloc: Boolean;
-  ResizeDifficult: function(P: Pointer; NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer of object;
-
-  procedure InitPBytes(P: Pointer; Size: Integer; XorByte: Byte);
-  var
-    j: Integer;
-  begin
-    for j := 0 to Size - 1 do
-     PMediumBytes(P)[j] := Byte(j) xor XorByte;
-  end;
 
   procedure CheckPBytes(P: Pointer; Size: Integer; XorByte: Byte);
-  var
-    j: Integer;
   begin
     if (Realloc) then
-    begin
-      for j := 0 to Size - 1 do
-      if (PMediumBytes(P)[j] <> Byte(j) xor XorByte) then SystemError;
-    end;
+      UTBrainMM.CheckPBytes(P, Size, XorByte);
+  end;
+
+  function ResizeDifficult(P: Pointer; NewB16Count: NativeUInt): Pointer;
+  begin
+    Result := MainThreadHeap.ResizeDifficult(NativeInt(P) + Ord(Realloc), NewB16Count, @TestDifficults);
   end;
 
 begin
   INC_TEST;
-  ThreadHeap := MainThreadHeap;
-  if (ThreadHeap = nil) then SystemError;
-  ThreadHeap.ErrorAddr := @TestDifficults;
+  if (MainThreadHeap = nil) then SystemError;
+  MainThreadHeap.ErrorAddr := @TestDifficults;
 
   // free difficult: small
   begin
-    INC_TEST;
     GetMem(P, MAX_SMALL_SIZE);
 
-    if (ThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
-    if (not ThreadHeap.Deferreds.Assigned) then SystemError;
-    ThreadHeap.ProcessThreadDeferred;
+    if (MainThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
+    if (not MainThreadHeap.Deferreds.Assigned) then SystemError;
+    MainThreadHeap.ProcessThreadDeferred;
 
     CheckEmptyHeap;
   end;
 
   // free difficult: medium
   begin
-    INC_TEST;
     GetMem(P, MAX_MEDIUM_SIZE);
 
-    if (ThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
-    if (not ThreadHeap.Deferreds.Assigned) then SystemError;
-    ThreadHeap.ProcessThreadDeferred;
+    if (MainThreadHeap.FreeDifficult(P, @TestDifficults) <> FREEMEM_DONE) then SystemError;
+    if (not MainThreadHeap.Deferreds.Assigned) then SystemError;
+    MainThreadHeap.ProcessThreadDeferred;
 
     CheckEmptyHeap;
   end;
@@ -1846,24 +2489,15 @@ begin
   // realloc/reget
   for Realloc := True downto False do
   begin
-    if (Realloc) then
-    begin
-      ResizeDifficult := ThreadHeap.ReallocDifficult;
-    end else
-    begin
-      ResizeDifficult := ThreadHeap.RegetDifficult;
-    end;
-
     // small --> medium
     begin
-      INC_TEST;
       GetMem(P, MAX_SMALL_SIZE);
       InitPBytes(P, MAX_SMALL_SIZE, 1);
 
-      P := ResizeDifficult(P, MAX_SMALL_B16COUNT + 1, @TestDifficults);
-      if (ThreadHeap.Deferreds.Assigned) then SystemError;
+      P := ResizeDifficult(P, MAX_SMALL_B16COUNT + 1);
+      if (MainThreadHeap.Deferreds.Assigned) then SystemError;
       CheckPBytes(P, MAX_SMALL_SIZE, 1);
-      HeapInfo.Init(ThreadHeap);
+      HeapInfo.InitMain;
       Check(0, HeapInfo.PoolSmalls.Count);
       Check(1, HeapInfo.PoolMediums.Count);
       Info.Init(P);
@@ -1876,14 +2510,13 @@ begin
 
     // medium --> big/large
     begin
-      INC_TEST;
       GetMem(P, MAX_MEDIUM_SIZE);
       InitPBytes(P, MAX_MEDIUM_SIZE, 2);
 
-      P := ResizeDifficult(P, MAX_MEDIUM_B16COUNT + 1, @TestDifficults);
-      if (ThreadHeap.Deferreds.Assigned) then SystemError;
+      P := ResizeDifficult(P, MAX_MEDIUM_B16COUNT + 1);
+      if (MainThreadHeap.Deferreds.Assigned) then SystemError;
       CheckPBytes(P, MAX_MEDIUM_SIZE, 2);
-      HeapInfo.Init(ThreadHeap);
+      HeapInfo.InitMain;
       Check(0, HeapInfo.PoolSmalls.Count);
       Check(0, HeapInfo.PoolMediums.Count);
       Info.Init(P);
@@ -1895,14 +2528,13 @@ begin
 
     // small --> big/large
     begin
-      INC_TEST;
       GetMem(P, MAX_SMALL_SIZE);
       InitPBytes(P, MAX_SMALL_SIZE, 3);
 
-      P := ResizeDifficult(P, MAX_MEDIUM_B16COUNT + 1, @TestDifficults);
-      if (ThreadHeap.Deferreds.Assigned) then SystemError;
+      P := ResizeDifficult(P, MAX_MEDIUM_B16COUNT + 1);
+      if (MainThreadHeap.Deferreds.Assigned) then SystemError;
       CheckPBytes(P, MAX_SMALL_SIZE, 3);
-      HeapInfo.Init(ThreadHeap);
+      HeapInfo.InitMain;
       Check(0, HeapInfo.PoolSmalls.Count);
       Check(0, HeapInfo.PoolMediums.Count);
       Info.Init(P);
@@ -1914,7 +2546,6 @@ begin
   end;
 
   // check empty
-  INC_TEST;
   CheckEmptyHeap;
 end;
 
@@ -1952,13 +2583,33 @@ begin
 end;
 
 
+{ TCountSize }
+
+procedure TCountSize.Clear;
+begin
+  Self.Count := 0;
+  Self.Size := 0;
+end;
+
+procedure TCountSize.Add(const ASize: Integer);
+begin
+  Inc(Self.Count);
+  Inc(Self.Size, ASize);
+end;
+
+procedure TCountSize.Add(const ACountSize: TCountSize);
+begin
+  Inc(Self.Count, ACountSize.Count);
+  Inc(Self.Size, ACountSize.Size);
+end;
+
+
 { TBitSetInfo }
 
 procedure TBitSetInfo.Init(const V: TBitSet8);
 var
   i: Integer;
 begin
-  INC_TEST;
   Value := V;
 
   Empty := (V.V64 = -1);
@@ -1986,7 +2637,6 @@ var
   i: Integer;
   ItemSet: TBitSet8;
 begin
-  INC_TEST;
   Value := V;
   ValueIndex := Integer((NativeUInt(V) div 1024) and 63);
   if (V = nil) or (NativeInt(V) and MASK_K1_TEST <> 0) then
@@ -2018,21 +2668,19 @@ begin
     SystemError;
   Items.Init(ItemSet);
 
-  EmptiesCount := 0;
-  AllocatedCount := 0;
+  Empties.Clear;
+  Allocated.Clear;
   for i := 0 to 63 do
   if (DEFAULT_BITSETS_SMALL[Index] and (Int64(1) shl i) <> 0) then
   begin
     if (Items.Bits[i]) then
     begin
-      Inc(EmptiesCount);
+      Empties.Add(Size);
     end else
     begin
-      Inc(AllocatedCount);
+      Allocated.Add(Size);
     end;
   end;
-  EmptiesSize := EmptiesCount * Size;
-  AllocatedSize := AllocatedCount * Size;
 end;
 
 { TK1LineInfo }
@@ -2099,7 +2747,6 @@ var
   i: Integer;
   LineInfo: TK1LineCompactInfo;
 begin
-  INC_TEST;
   Value := V;
   ValueThreadHeap := V.ThreadHeap;
   if (ValueThreadHeap = nil) or (Pointer(not ValueThreadHeap.FMarkerNotSelf) <> ValueThreadHeap) then
@@ -2108,19 +2755,15 @@ begin
   InFullQueue := V.Header.InQK64PoolSmallFull;
   Lines.Init(V.LineSet);
 
-  EmptiesCount := 0;
-  EmptiesSize := 0;
-  AllocatedCount := 0;
-  AllocatedSize := 0;
+  Empties.Clear;
+  Allocated.Clear;
   for i := Low(Lines.Bits) to High(Lines.Bits) do
   if (not Lines.Bits[i]) then
   begin
     LineInfo.Init(@V.Lines[i]);
 
-    Inc(EmptiesCount, LineInfo.EmptiesCount);
-    Inc(EmptiesSize, LineInfo.EmptiesSize);
-    Inc(AllocatedCount, LineInfo.AllocatedCount);
-    Inc(AllocatedSize, LineInfo.AllocatedSize);
+    Empties.Add(LineInfo.Empties);
+    Allocated.Add(LineInfo.Allocated);
   end;
 end;
 
@@ -2193,96 +2836,85 @@ end;
 
 procedure TPoolMediumCompactInfo.Init(const V: PK64PoolMedium);
 var
-  Header, Next: PHeaderMedium;
-  Count: Integer;
+  i: Integer;
+  Header, Next, Finish: PHeaderMedium;
   Empty: PHeaderMediumEmpty;
 begin
-  INC_TEST;
   Value := V;
   ValueThreadHeap := V.ThreadHeap;
   if (V.MarkerNil <> nil) or (ValueThreadHeap = nil) or
     (Pointer(not ValueThreadHeap.FMarkerNotSelf) <> ValueThreadHeap) then
     SystemError;
 
-  EmptiesCount := 0;
-  EmptiesSize := 0;
-  AllocatedCount := 0;
-  AllocatedSize := 0;
+  Allocated.Clear;
+  for i := Low(Empties) to High(Empties) do Empties[i].Clear;
+  EmptiesTotal.Clear;
+
+  if (Value.FlagsFakeAllocated <> MASK_MEDIUM_ALLOCATED) then
+    SystemError;
 
   Header := @Value.Items[Low(Value.Items)];
   if (Header.PreviousSize <> 0) then
     SystemError;
 
-  if (not Value.Finish.Allocated) or (Value.Finish.B16Count <> 0) then
+  Finish := @Value.Items[High(Value.Items)];
+  if (Finish.Flags <> MASK_MEDIUM_ALLOCATED) then
     SystemError;
 
-  while (Header <> @Value.Finish) do
+  while (Header <> Finish) do
   begin
+    Next := Pointer(NativeUInt(Header) + Header.WSize + SizeOf(THeaderMedium));
+    if (Next.PreviousSize <> Header.WSize) then
+      SystemError;
+
     if (Header.Allocated) then
     begin
       if (Header.Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then
         SystemError;
 
-      Inc(AllocatedCount);
-      Inc(AllocatedSize, Header.B16Count shl 4);
+      Allocated.Add(Header.WSize);
     end else
     begin
       if (Header.Flags and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then
         SystemError;
 
-      Inc(EmptiesCount);
-      Inc(EmptiesSize, Header.B16Count shl 4);
-      CheckEmpty(PHeaderMediumEmpty(@PHeaderMediumList(Header)[Header.B16Count - 1]));
+      i := MEDIUM_INDEXES[Header.WSize shr 4];
+      Empties[i].Add(Header.WSize);
+      EmptiesTotal.Add(Header.WSize);
+
+      Empty := Pointer(NativeUInt(Header) + Header.WSize);
+      CheckEmpty(Empty, i);
     end;
 
-    Next := @PHeaderMediumList(Header)[Header.B16Count];
-    if (Next.PreviousSize <> Header.B16Count shl 4) then
-      SystemError;
     Header := Next;
   end;
-
-  Count := 0;
-  Empty := Value.Empties.First.Next;
-  while (Empty <> @Value.Empties.Last) do
-  begin
-    Inc(Count);
-    Empty := Empty.Next;
-  end;
-
-  if (Count <> EmptiesCount) then
-    SystemError;
 end;
 
-procedure TPoolMediumCompactInfo.CheckEmpty(const VEmpty: PHeaderMediumEmpty);
+procedure TPoolMediumCompactInfo.CheckEmpty(const VEmpty: PHeaderMediumEmpty; const AIndex: Integer);
 var
   Found: Boolean;
   S: NativeUInt;
   Current, Next: PHeaderMediumEmpty;
 begin
-  INC_TEST;
-
-  if (Value.Empties.First.Prev <> nil) then
-    SystemError;
-  if (Value.Empties.Last.Next <> nil) then
+  Current := ValueThreadHeap.FMedium.FEmpties[AIndex];
+  if (Current = nil) then
     SystemError;
 
   Found := False;
-  Current := Value.Empties.First.Next;
-  while (Current <> @Value.Empties.Last) do
+  while (Current <> nil) do
   begin
-    S := PHeaderMediumEmptyEx(Current).Size;
-    if (S and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then
+    S := Current.Size;
+    if (S and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then
       SystemError;
 
-    if (PHeaderMedium(NativeUInt(Current) - S).Flags and MASK_MEDIUM_EMPTY_TEST
-      <> MASK_MEDIUM_EMPTY_VALUE) then
+    if (PHeaderMedium(NativeUInt(Current) - S).Flags <> S) then
       SystemError;
 
     if (Current = VEmpty) then
       Found := True;
 
     Next := Current.Next;
-    if (Next.Prev <> Current) then
+    if (Next <> nil) and (Next.Prev <> Current) then
       SystemError;
 
     Current := Next;
@@ -2302,7 +2934,7 @@ var
 begin
   inherited Init(V);
 
-  Current := ValueThreadHeap.QK64PoolMedium;
+  Current := ValueThreadHeap.FMedium.QK64PoolMedium;
   if (Current = nil) then SystemError;
   if (Current.Queue.Prev <> nil) then SystemError;
 
@@ -2353,7 +2985,7 @@ end;
 
 procedure TThreadHeapInfo.Init(const V: PThreadHeap);
 var
-  i, Index: Integer;
+  i, Index, Count: Integer;
   Line: PK1LineSmall;
   LineCounts: PK1LineSmallCounts;
   LineCompactInfo: TK1LineCompactInfo;
@@ -2362,6 +2994,7 @@ var
   PoolSmallInfo: TPoolSmallInfo;
   PoolMedium: PK64PoolMedium;
   PoolMediumInfo: TPoolMediumInfo;
+  Current, Next: PHeaderMediumEmpty;
 begin
   INC_TEST;
   FillChar(Self, SizeOf(Self), #0);
@@ -2418,8 +3051,6 @@ begin
   for i := Low(Self.K1LineSmalls) to High(Self.K1LineSmalls) do
   with Self.K1LineSmalls[i] do
   begin
-    INC_TEST;
-
     if (Count <> AvailableNonFull + AvailableFull + FullQueue) then
       SystemError;
   end;
@@ -2440,10 +3071,8 @@ begin
       Inc(Self.PoolSmalls.AvailableNonFull);
     end;
 
-    Inc(Self.PoolSmalls.EmptiesCount, PoolSmallInfo.EmptiesCount);
-    Inc(Self.PoolSmalls.EmptiesSize, PoolSmallInfo.EmptiesSize);
-    Inc(Self.PoolSmalls.AllocatedCount, PoolSmallInfo.AllocatedCount);
-    Inc(Self.PoolSmalls.AllocatedSize, PoolSmallInfo.AllocatedSize);
+    Self.PoolSmalls.Empties.Add(PoolSmallInfo.Empties);
+    Self.PoolSmalls.Allocated.Add(PoolSmallInfo.Allocated);
 
     if (PoolSmallInfo.Next = nil) then
     begin
@@ -2464,10 +3093,8 @@ begin
     Inc(Self.PoolSmalls.Count);
     Inc(Self.PoolSmalls.FullQueue);
 
-    Inc(Self.PoolSmalls.EmptiesCount, PoolSmallInfo.EmptiesCount);
-    Inc(Self.PoolSmalls.EmptiesSize, PoolSmallInfo.EmptiesSize);
-    Inc(Self.PoolSmalls.AllocatedCount, PoolSmallInfo.AllocatedCount);
-    Inc(Self.PoolSmalls.AllocatedSize, PoolSmallInfo.AllocatedSize);
+    Self.PoolSmalls.Empties.Add(PoolSmallInfo.Empties);
+    Self.PoolSmalls.Allocated.Add(PoolSmallInfo.Allocated);
 
     if (PoolSmallInfo.Next = nil) then
     begin
@@ -2483,17 +3110,17 @@ begin
     if (Count <> AvailableNonFull + AvailableFull + FullQueue) then
       SystemError;
 
-    if (EmptiesSize + AllocatedSize > Count * SizeOf(TK64PoolSmall)) then
+    if (Empties.Size + Allocated.Size > Count * SizeOf(TK64PoolSmall)) then
       SystemError;
   end;
 
-  PoolMedium := V.QK64PoolMedium;
+  PoolMedium := V.FMedium.QK64PoolMedium;
   while (PoolMedium <> nil) do
   begin
     PoolMediumInfo.Init(PoolMedium);
 
     Inc(Self.PoolMediums.Count);
-    if (PoolMediumInfo.EmptiesSize = 0) then
+    if (PoolMediumInfo.EmptiesTotal.Size = 0) then
     begin
       Inc(Self.PoolMediums.CountFull);
     end else
@@ -2501,10 +3128,10 @@ begin
       Inc(Self.PoolMediums.CountNonFull);
     end;
 
-    Inc(Self.PoolMediums.EmptiesCount, PoolMediumInfo.EmptiesCount);
-    Inc(Self.PoolMediums.EmptiesSize, PoolMediumInfo.EmptiesSize);
-    Inc(Self.PoolMediums.AllocatedCount, PoolMediumInfo.AllocatedCount);
-    Inc(Self.PoolMediums.AllocatedSize, PoolMediumInfo.AllocatedSize);
+    Self.PoolMediums.Allocated.Add(PoolMediumInfo.Allocated);
+    Self.PoolMediums.EmptiesTotal.Add(PoolMediumInfo.EmptiesTotal);
+    for i := Low(Self.PoolMediums.Empties) to High(Self.PoolMediums.Empties) do
+      Self.PoolMediums.Empties[i].Add(PoolMediumInfo.Empties[i]);
 
     if (PoolMediumInfo.Next = nil) then
     begin
@@ -2516,15 +3143,39 @@ begin
   end;
 
   with Self.PoolMediums do
-  if (EmptiesSize + AllocatedSize > Count * SizeOf(THeaderMediumList)) then
+  if (EmptiesTotal.Size + Allocated.Size > Count * SizeOf(THeaderMediumList)) then
     SystemError;
+
+  for i := Low(Self.PoolMediums.Empties) to High(Self.PoolMediums.Empties) do
+  begin
+    Count := 0;
+
+    Current := Value.FMedium.FEmpties[i];
+    while (Current <> nil) do
+    begin
+      Inc(Count);
+
+      Next := Current.Next;
+      if (Next <> nil) and (Next.Prev <> Current) then
+        SystemError;
+
+      Current := Next;
+    end;
+
+    if (Self.PoolMediums.Empties[i].Count <> Count) then
+      SystemError;
+  end;
+end;
+
+procedure TThreadHeapInfo.InitMain;
+begin
+  Self.Init(MainThreadHeap);
 end;
 
 { TPointerSmallInfo }
 
 procedure TPointerSmallInfo.Init(const V: Pointer);
 begin
-  INC_TEST;
   Pool.Init(Pointer(NativeInt(V) and MASK_K64_CLEAR));
 
   Line.Init(Pointer(NativeInt(V) and MASK_K1_CLEAR));
@@ -2551,10 +3202,9 @@ const
     {ma2048Bytes} 2048 - 1
   );
 begin
-  INC_TEST;
   Value := V;
 
-  Size := V.B16Count * 16;
+  Size := V.WSize;
   Align := V.Align;
   Allocated := V.Allocated;
 
@@ -2568,12 +3218,12 @@ begin
       SystemError;
   end else
   begin
-    ValueEmpty := Pointer(@PHeaderMediumList(V)[Size shr 4 - 1]);
+    ValueEmpty := Pointer(NativeUInt(V) + Size);
     if (V.Flags and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then
       SystemError;
   end;
 
-  if (PHeaderMediumList(V)[Size shr 4].PreviousSize <> Size) then
+  if (PHeaderMedium(NativeUInt(V) + SizeOf(THeaderMedium) + Size).PreviousSize <> Size) then
     SystemError;
 end;
 
@@ -2583,12 +3233,11 @@ procedure TPointerMediumInfo.Init(const V: Pointer);
 var
   RightHeader: PHeaderMedium;
 begin
-  INC_TEST;
   Pool.Init(Pointer(NativeInt(V) and MASK_K64_CLEAR));
   inherited Init(PHeaderMedium(NativeInt(V) - SizeOf(THeaderMedium)));
 
   // left
-  if (V = @Pool.Value.Items[0]) then
+  if (V = @Pool.Value.Items[Low(Pool.Value.Items)]) then
   begin
     FillChar(Left, SizeOf(Left), #0);
   end else
@@ -2600,8 +3249,8 @@ begin
   end;
 
   // right
-  RightHeader := @PHeaderMediumList(Value)[Size shr 4];
-  if (RightHeader = @Pool.Value.Finish) then
+  RightHeader := PHeaderMedium(NativeUInt(Value) + Size + SizeOf(THeaderMedium));
+  if (RightHeader = @Pool.Value.Items[High(Pool.Value.Items)]) then
   begin
     FillChar(Right, SizeOf(Right), #0);
   end else
@@ -2613,16 +3262,15 @@ begin
   end;
 
   // empties
-  if (Self.ValueEmpty <> nil) then Pool.CheckEmpty(Self.ValueEmpty);
-  if (Left.ValueEmpty <> nil) then Pool.CheckEmpty(Left.ValueEmpty);
-  if (Right.ValueEmpty <> nil) then Pool.CheckEmpty(Right.ValueEmpty);
+  if (Self.ValueEmpty <> nil) then Pool.CheckEmpty(Self.ValueEmpty, MEDIUM_INDEXES[Self.ValueEmpty.Size shr 4]);
+  if (Left.ValueEmpty <> nil) then Pool.CheckEmpty(Left.ValueEmpty, MEDIUM_INDEXES[Left.ValueEmpty.Size shr 4]);
+  if (Right.ValueEmpty <> nil) then Pool.CheckEmpty(Right.ValueEmpty, MEDIUM_INDEXES[Right.ValueEmpty.Size shr 4]);
 end;
 
 { TPointerBigInfo }
 
 procedure TPointerBigInfo.Init(const V: Pointer);
 begin
-  INC_TEST;
 
   // todo
 end;
@@ -2631,7 +3279,6 @@ end;
 
 procedure TPointerLargeInfo.Init(const V: Pointer);
 begin
-  INC_TEST;
 
   // todo
 end;
@@ -2718,7 +3365,6 @@ end;
 
 procedure TJitHeapInfo.Init(const V: TJitHeap);
 begin
-  INC_TEST;
   Value := V;
 
   // todo

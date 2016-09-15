@@ -219,7 +219,7 @@ type
   TJITHeap = class(TInterfacedObject, IJITHeap)
   protected
     FSpin: NativeUInt;
-    FHeapBuffer: array[0..64 * {$ifdef LARGEINT}3{$else}2{$endif} - 1 + 64] of Byte;
+    FHeapBuffer: array[0..64 * {$ifdef LARGEINT}7{$else}4{$endif} - 1 + 64] of Byte;
     FBigOrLargeHash: array[0..63] of Pointer;
 
     function HeapInstance: Pointer; {$ifdef INLINESUPPORT}inline;{$endif}
@@ -277,6 +277,8 @@ const
 
   MAX_SMALL_SIZE = 128;
   MAX_SMALL_B16COUNT = MAX_SMALL_SIZE div 16;
+  MIDDLE_MEDIUM_SIZE = 6 * 1024;
+  MIDDLE_MEDIUM_B16COUNT = MIDDLE_MEDIUM_SIZE div 16;
   MAX_MEDIUM_SIZE = 8 * (4 * 1024) - 16;
   MAX_MEDIUM_B16COUNT = MAX_MEDIUM_SIZE div 16;
   MAX_BIG_SIZE = 8 * (64 * 1024);
@@ -345,18 +347,99 @@ const
       $00800100
   );
 
-  OFFSET_MEDIUM_ALIGN = 16;
+  OFFSET_MEDIUM_ALIGN = 24;
   MASK_MEDIUM_ALIGN = {7}NativeUInt(High(TMemoryAlign)) shl OFFSET_MEDIUM_ALIGN;
-  MASK_MEDIUM_ALLOCATED = NativeUInt(1 shl 24);
+  MASK_MEDIUM_ALLOCATED = NativeUInt(1 shl 16);
 
-  MASK_MEDIUM_SIZE_TEST = not NativeUInt(High(Word) and -16);
-  MASK_MEDIUM_SIZE_VALUE = 0;
-  MASK_MEDIUM_EMPTY_TEST = not NativeUInt(High(Word) div 16);
+  MASK_MEDIUM_EMPTY_TEST = not NativeUInt(NativeInt(High(Word)) and -16);
   MASK_MEDIUM_EMPTY_VALUE = 0;
-  MASK_MEDIUM_ALLOCATED_TEST = (not NativeUInt(MAX_MEDIUM_B16COUNT or MASK_MEDIUM_ALIGN)) or MASK_MEDIUM_ALLOCATED;
+  MASK_MEDIUM_ALLOCATED_TEST = not NativeUInt(MAX_MEDIUM_SIZE or MASK_MEDIUM_ALIGN);
   MASK_MEDIUM_ALLOCATED_VALUE = MASK_MEDIUM_ALLOCATED;
-  MASK_MEDIUM_TEST = MASK_MEDIUM_EMPTY_TEST xor MASK_MEDIUM_ALLOCATED xor MASK_MEDIUM_ALIGN;
-  MASK_MEDIUM_VALUE = 0;
+
+  FLAG_MEDIUM_COPY_SHIFT = 16;
+  FLAG_MEDIUM_COPY = NativeUInt(1 shl FLAG_MEDIUM_COPY_SHIFT);
+  FULL_MEDIUM_EMPTY_SIZE = SIZE_K64 - 48{internal usage} - 2 * 16{start/finish};
+
+  RESIZE_PAGES_COPY_SHIFT = 1;
+  RESIZE_PAGES_COPY = 1 shl RESIZE_PAGES_COPY_SHIFT;
+  RESIZE_PAGES_USER_REGET = 0 + PAGESMODE_USER;
+  RESIZE_PAGES_USER_REALLOC = RESIZE_PAGES_COPY + PAGESMODE_USER;
+  RESIZE_PAGES_SYSTEM_REGET = 0 + PAGESMODE_SYSTEM;
+  RESIZE_PAGES_SYSTEM_REALLOC = RESIZE_PAGES_COPY + PAGESMODE_SYSTEM;
+
+var
+  (*
+     -1 shl 0,
+     -1 shl 1,
+     -1 shl 2,
+     -1 shl 3,
+     -1 shl 4,
+     -1 shl 5,
+     -1 shl 6,
+     -1 shl 7,
+     -1 shl 8,
+     -1 shl 9,
+     -1 shl 10,
+     -1 shl 11,
+     -1 shl 12,
+     -1 shl 13,
+     -1 shl 14,
+     -1 shl 15,
+     -1 shl 16,
+     -1 shl 17,
+     -1 shl 18,
+     -1 shl 19,
+     -1 shl 20,
+     -1 shl 21,
+     -1 shl 22,
+     -1 shl 23,
+     -1 shl 24,
+     -1 shl 25,
+     -1 shl 26,
+     -1 shl 27,
+     -1 shl 28,
+     -1 shl 29,
+     -1 shl 30,
+     -1 shl 31
+  *)
+  MEDIUM_MASKS_CLEAR: array[0-1..31-1] of NativeInt{Cardinal};
+
+  (*
+      0: 16..48 - 1
+      1: 48..64 - 1
+      2: 64..80 - 1
+      3: 80..96 - 1
+      4: 96..128 - 1
+      5: 128..160 - 1
+      6: 160..192 - 1
+      7: 192..224 - 1
+      8: 224..272 - 1
+      9: 272..320 - 1
+     10: 320..384 - 1
+     11: 384..448 - 1
+     12: 448..512 - 1
+     13: 512..576 - 1
+     14: 576..672 - 1
+     15: 672..800 - 1
+     16: 800..1024 - 1
+     17: 1024..1360 - 1
+     18: 1360..1696 - 1
+     19: 1696..2144 - 1
+     20: 2144..2592 - 1
+     21: 2592..3040 - 1
+     22: 3040..3712 - 1
+     23: 3712..4384 - 1
+     24: 4384..5056 - 1
+     25: 5056..5728 - 1
+     26: 5728..6144 - 1
+
+     27: 6144..8192 - 1
+     28: 8192..12288 - 1
+     29: 12288..16384 - 1
+     30: 16384..24576 - 1
+     31: 24576..65536 - 1
+  *)
+  MEDIUM_INDEXES: array[0..64 * 1024 shr 4 - 1] of ShortInt;
 
 type
   PThreadHeap = ^TThreadHeap;
@@ -425,38 +508,34 @@ type
     PreviousSize: NativeUInt;
     {$ifdef SMALLINT}_Padding: array[0..1] of Cardinal;{$endif}
     case Integer of
-     0: (B16Count: Word; Align: TMemoryAlign; Allocated: Boolean);
+     0: (WSize: Word; Allocated: Boolean; Align: TMemoryAlign);
      1: (Flags: NativeUInt);
   end;
   PHeaderMedium = ^THeaderMedium;
 
-  PHeaderMediumEmpty = ^THeaderMediumEmpty;
-  THeaderMediumEmpty = object
-    Prev, Next: PHeaderMediumEmpty;
-    {$ifdef SMALLINT}_Padding: array[0..1] of Cardinal;{$endif}
-  end;
-
-  THeaderMediumEmptyEx = object(THeaderMediumEmpty)
-    Size: NativeUInt{Next.Header.PreviousSize};
-  end;
-  PHeaderMediumEmptyEx = ^THeaderMediumEmptyEx;
-
-  THeaderMediumList = array[-1..(64 * 1024) div 16 - 8] of THeaderMedium;
+  THeaderMediumList = array[0..(16{start} + FULL_MEDIUM_EMPTY_SIZE + 16{finish}) div 16 - 1] of THeaderMedium;
   PHeaderMediumList = ^THeaderMediumList;
 
+  PHeaderMediumEmpty = ^THeaderMediumEmpty;
+  THeaderMediumEmpty = packed record
+    Prev, Next: PHeaderMediumEmpty;
+    {$ifdef SMALLINT}_Padding: array[0..1] of Cardinal;{$endif}
+  case Integer of
+    0: (Size: NativeUInt{Next.Header.PreviousSize});
+    1: (SiblingHeaderMedium: THeaderMedium; SiblingPtr: Byte);
+  end;
+
   TK64PoolMedium = packed record
-    Empties: packed record
-      First: THeaderMediumEmpty;
-      Last: THeaderMediumEmpty;
-    end;
-    MarkerNil: Pointer;
-    {$ifdef SMALLINT}_Padding2: Cardinal;{$endif}
-    ThreadHeap: PThreadHeap;
-    {$ifdef SMALLINT}_Padding3: Cardinal;{$endif}
     Queue: TQueuePrevNext;
-    FakeAllocated: THeaderMedium;
-    Items: {Start + }THeaderMediumList;
-    Finish: THeaderMedium;
+    Reserved: Pointer;
+    {$ifdef SMALLINT}_Padding1: Cardinal;{$endif}
+    ThreadHeap: PThreadHeap;
+    {$ifdef SMALLINT}_Padding2: Cardinal;{$endif}
+    MarkerNil: Pointer;
+    {$ifdef SMALLINT}_Padding3: Cardinal;{$endif}
+    {$ifdef SMALLINT}_Padding4: Cardinal;{$endif}
+    FlagsFakeAllocated: NativeUInt;
+    Items: THeaderMediumList;
   end;
   PK64PoolMedium = ^TK64PoolMedium;
 
@@ -491,6 +570,32 @@ type
   end;
   PSyncStack64 = ^TSyncStack64;
 
+  TMediumManager = {$ifdef OPERATORSUPPORT}packed record{$else}object{$endif}
+  public
+    // errors redirect
+    function ErrorOutOfMemory: Pointer;
+    function ErrorInvalidPtr: Integer;
+    function RaiseOutOfMemory: Pointer;
+    function RaiseInvalidPtr: Integer;
+  public
+    // penalty routine
+    function ExcludeEmpty(LastIndex: NativeUInt; Empty: PHeaderMediumEmpty): Pointer;
+    function ChangeEmptyIndex(Flags: NativeUInt{LastIndex, NewIndex:5}; Empty: PHeaderMediumEmpty): Pointer;
+    function AlignOffsetEmpty(Header: PHeaderMedium; AlignOffset: NativeUInt): Pointer;
+    function GrowPenalty(P: Pointer; GrowFlags: NativeUInt{NewSize: Word; shifted Copy: Boolean}): Pointer;
+  public
+    FEmpties: array[0..31] of PHeaderMediumEmpty;
+    FMask: NativeInt;
+    QK64PoolMedium: PK64PoolMedium;
+
+    function Get(B16Count: NativeUInt): Pointer;
+    function GetAdvanced(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
+    function Reduce(P: Pointer; NewB16Count: NativeUInt{Word}): Pointer;
+    function Grow(P: Pointer; GrowFlags: NativeUInt{NewB16Count: Word; Copy: Boolean}): Pointer;
+    function Free(P: Pointer): Integer;
+  end;
+  PMediumManager = ^TMediumManager;
+
   TThreadHeap = {$ifdef OPERATORSUPPORT}packed record{$else}object{$endif}
   public
     FNextHeap: PThreadHeap;
@@ -509,18 +614,11 @@ type
     function DisposeK1LineSmall(Line: PK1LineSmall): Integer;
     {$ifNdef PUREPASCAL}function PenaltyGrowSmallToSmall(P: Pointer; Dest: Pointer): Pointer;{$endif}
   public
-    // 64kb pool (medium) routine
-    QK64PoolMedium: PK64PoolMedium;
-    FReserved: Pointer;
+    // 64kb medium pieces management
+    FMedium: TMediumManager;
 
     function NewK64PoolMedium: PK64PoolMedium;
     function DisposeK64PoolMedium(PoolMedium: PK64PoolMedium): Integer;
-
-    function PenaltyReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-    function PenaltyGetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
-    function PenaltyFreeMedium(P: Pointer): Integer;
-    function PenaltyRegetMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-    function PenaltyReallocMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
   public
     // errors
     ErrorAddr: Pointer {address/nil};
@@ -544,17 +642,9 @@ type
     function RegrowSmallToSmall(P: Pointer; NewB16Count: NativeUInt): Pointer;
     function GrowSmallToSmall(P: Pointer; NewB16Count: NativeUInt): Pointer;
 
-    // medium routine
-    function ReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-    function GetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
-    function FreeMedium(P: Pointer): Integer;
-    function RegetMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-    function ReallocMediumToMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-
     // difficult routine
     function FreeDifficult(P: Pointer; ReturnAddress: Pointer): Integer;
-    function RegetDifficult(P: Pointer; NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
-    function ReallocDifficult(P: Pointer; NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
+    function ResizeDifficult(PFlags: NativeInt{Copy: Boolean; P: Pointer}; NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
   end;
 
 
@@ -575,9 +665,8 @@ type
           GetMemoryBlock: function(BlockSize: TMemoryBlockSize; PagesMode: NativeUInt): MemoryBlock;
           FreeMemoryBlock: function(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
           GetMemoryPages: function(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
-          RegetMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; PagesMode: NativeUInt): MemoryPages;
-          ReallocMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; PagesMode: NativeUInt): MemoryPages;
           FreeMemoryPages: function(Pages: MemoryPages; PagesMode: NativeUInt): Boolean;
+          ResizeMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; ResizePagesFlags: NativeUInt): MemoryPages;
           Reserved: array[1..4] of Pointer;
           GetMemAligned: function(Align: TMemoryAlign; Size: NativeUInt): Pointer;
           RegetMem: function(P: Pointer; NewSize: NativeUInt): Pointer;
@@ -592,7 +681,7 @@ type
           Reserved: array[1..4] of Pointer;
         end;
        );
-    1: (POINTERS: array[1..24] of Pointer);
+    1: (POINTERS: array[1..23] of Pointer);
   end;
 
   TK4Page = array[0..4 * 1024 - 1] of Byte;
@@ -797,7 +886,7 @@ begin
   begin
     if (Value <> nil) then
     begin
-      Value := MemoryManager.BrainMM.RegetMemoryPages(Value, NativeUInt(NewCount), PAGESMODE_USER);
+      Value := MemoryManager.BrainMM.ResizeMemoryPages(Value, NativeUInt(NewCount), RESIZE_PAGES_USER_REGET);
       if (Value = PTR_INVALID) then
         {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif}
       else
@@ -825,7 +914,7 @@ begin
   begin
     if (Value <> nil) then
     begin
-      Value := MemoryManager.BrainMM.ReallocMemoryPages(Value, NativeUInt(NewCount), PAGESMODE_USER);
+      Value := MemoryManager.BrainMM.ResizeMemoryPages(Value, NativeUInt(NewCount), RESIZE_PAGES_USER_REALLOC);
       if (Value = PTR_INVALID) then
         {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif}
       else
@@ -914,7 +1003,7 @@ function AtomicCmpExchange(var Target: SupposedPtr; NewValue: SupposedPtr; Compa
 begin
   Result := InterlockedCompareExchange(Target, NewValue, Comparand);
 end;
-function AtomicIncrement(var Target: NativeInt; Increment: NativeInt = 1): NativeInt; inline;
+function AtomicIncrement(var Target: NativeInt; Increment: NativeInt): NativeInt; inline;
 begin
   Result := InterlLockedExchangeAdd(Target, Increment);
 end;
@@ -929,7 +1018,7 @@ asm
     lock cmpxchg [rcx], rdx
   {$endif}
 end;
-function AtomicIncrement(var Target: NativeInt; Increment: NativeInt = 1): NativeInt;
+function AtomicIncrement(var Target: NativeInt; Increment: NativeInt): NativeInt;
 asm
   {$ifdef CPUX86}
     mov ecx, edx
@@ -949,11 +1038,24 @@ asm
   xchg eax, ecx
   lock cmpxchg [ecx], edx
 end;
-function AtomicIncrement(var Target: NativeInt; Increment: NativeInt = 1): NativeInt;
+function AtomicIncrement(var Target: NativeInt; Increment: NativeInt): NativeInt;
 asm
   mov ecx, edx
   lock xadd [eax], edx
   lea eax, [edx + ecx]
+end;
+{$endif}
+
+{$ifdef BRAINMM_UNITTEST}
+procedure FillRandomBytes(Memory: PByte; Count: NativeUInt);
+var
+  i: NativeUInt;
+begin
+  for i := 1 to Count do
+  begin
+    Memory^ := Random(256);
+    Inc(Memory);
+  end;
 end;
 {$endif}
 
@@ -1868,6 +1970,10 @@ begin
   if (CoreThreadHeapList = nil) then
     {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
 
+  {$ifdef BRAINMM_UNITTEST}
+  FillRandomBytes(Pointer(CoreThreadHeapList), SIZE_K64);
+  {$endif}
+
   for i := 1 to High(TCoreThreadHeapList) - 1 do
     CoreThreadHeapList[i].FNextHeap := @CoreThreadHeapList[i + 1];
 
@@ -1987,9 +2093,6 @@ begin
   if (Store) then
     ThreadHeapInstance := Result;
   {$endif}
-
-  // hints off
-  Result.FReserved := nil;
 end;
 
 {$ifNdef PUREPASCAL}
@@ -2337,8 +2440,10 @@ end;
 
 function BrainMMGetMemoryBlock(BlockSize: TMemoryBlockSize;
   PagesMode: NativeUInt): MemoryBlock;
+{$ifNdef BRAINMM_UNITTEST}
 var
   GlobalStorage: PGlobalStorage;
+{$endif}
 begin
   // todo
   if (BlockSize <> BLOCK_64K) or (PagesMode = PAGESMODE_USER) then
@@ -2347,17 +2452,24 @@ begin
     Exit;
   end;
 
+  {$ifNdef BRAINMM_UNITTEST}
   GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   Result := GlobalStorage.K64BlockCache.Stack.Pop;
   if (Result <> nil) then
   begin
     AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count), -1);
   end else
+  {$endif}
   begin
     {$ifdef MSWINDOWS}
       Result := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT, PAGE_READWRITE);
     {$else .POSIX}
       Result := memalign(SIZE_K64, SIZE_K64);
+    {$endif}
+
+    {$ifdef BRAINMM_UNITTEST}
+    if (Result <> nil) then
+      FillRandomBytes(Result, SIZE_K64);
     {$endif}
   end;
 
@@ -2366,8 +2478,10 @@ begin
 end;
 
 function BrainMMFreeMemoryBlock(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
+{$ifNdef BRAINMM_UNITTEST}
 var
   GlobalStorage: PGlobalStorage;
+{$endif}
 begin
   // todo
   if (PagesMode = PAGESMODE_USER) then
@@ -2376,6 +2490,7 @@ begin
     Exit;
   end;
 
+  {$ifNdef BRAINMM_UNITTEST}
   GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   if (GlobalStorage.K64BlockCache.Count < 16) then
   begin
@@ -2383,6 +2498,7 @@ begin
     GlobalStorage.K64BlockCache.Stack.Push(Block);
     Result := True;
   end else
+  {$endif}
   begin
     {$ifdef MSWINDOWS}
       Result := VirtualFree(Block, 0, MEM_RELEASE);
@@ -2414,6 +2530,10 @@ begin
 
   if (Result <> nil) then
   begin
+    {$ifdef BRAINMM_UNITTEST}
+    FillRandomBytes(Result, K64Count * SIZE_K64);
+    {$endif}
+
     Inc(NativeInt(Result), SIZE_K4);
     PNativeUInt(NativeInt(Result) - SizeOf(NativeUInt))^ := Count;
 
@@ -2422,14 +2542,14 @@ begin
   end;
 end;
 
-function BrainMMRegetMemoryPages(Pages: MemoryPages; NewCount: NativeUInt;
-  PagesMode: NativeUInt): MemoryPages;
+function BrainMMResizeMemoryPages(Pages: MemoryPages; NewCount: NativeUInt;
+  ResizePagesFlags: NativeUInt): MemoryPages;
 var
   K64Count: NativeUInt;
   LastCount, LastK64Count: NativeUInt;
 begin
   // todo
-  if (PagesMode = PAGESMODE_USER) then
+  if (ResizePagesFlags and PAGESMODE_SYSTEM = 0) then
   begin
     Result := nil;
     Exit;
@@ -2444,46 +2564,28 @@ begin
     PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^ := NewCount;
     Result := Pages;
   end else
+  if (ResizePagesFlags and RESIZE_PAGES_COPY <> 0) then
   begin
-    if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
-      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+    // Resize
+    ResizePagesFlags := ResizePagesFlags and 1;
 
-    Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
-  end;
-end;
-
-function BrainMMReallocMemoryPages(Pages: MemoryPages; NewCount: NativeUInt;
-  PagesMode: NativeUInt): MemoryPages;
-var
-  K64Count: NativeUInt;
-  LastCount, LastK64Count: NativeUInt;
-begin
-  // todo
-  if (PagesMode = PAGESMODE_USER) then
-  begin
-    Result := nil;
-    Exit;
-  end;
-
-  K64Count := ((NewCount + 1) + 15) shr 4;
-  LastCount := PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^;
-  LastK64Count := ((LastCount + 1) + 15) shr 4;
-
-  if (LastK64Count = K64Count) then
-  begin
-    PNativeUInt(NativeInt(Pages) - SizeOf(NativeUInt))^ := NewCount;
-    Result := Pages;
-  end else
-  begin
-    Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, PagesMode);
+    if (LastCount > NewCount) then LastCount := NewCount;
+    Result := MemoryManager.BrainMM.GetMemoryPages(NewCount, {PagesMode}ResizePagesFlags);
     if (Result <> nil) then
-    begin
-      if (LastCount > NewCount) then LastCount := NewCount;
       NcMoveB16(P16(Pages)^, P16(Result)^, LastCount * B16_PER_PAGE);
-    end;  
 
-    if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, PagesMode)) then
+    if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, {PagesMode}ResizePagesFlags)) then
       {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+  end else
+  begin
+    // Reget
+    ResizePagesFlags := ResizePagesFlags and 1;
+    LastCount := NewCount;
+
+    if (not MemoryManager.BrainMM.FreeMemoryPages(Pages, {PagesMode}ResizePagesFlags)) then
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+
+    Result := MemoryManager.BrainMM.GetMemoryPages({stored NewCount}LastCount, {PagesMode}ResizePagesFlags);
   end;
 end;
 
@@ -2659,7 +2761,7 @@ begin
         Self.FreeSmall(P);
       end else
       begin
-        Self.FreeMedium(P);
+        Self.FMedium.Free(P);
       end;
     finally
       Self.ErrorAddr := LastErrorAddr;
@@ -2707,7 +2809,7 @@ begin
           Self.FreeSmall(ThreadDeferred);
         end else
         begin
-          Self.FreeMedium(ThreadDeferred);
+          Self.FMedium.Free(ThreadDeferred);
         end;
 
         ThreadDeferred := Next;
@@ -2745,8 +2847,10 @@ begin
     ThreadHeap.ErrorAddr := ErrorAddr;
     case (B16Count) of
       0..MAX_SMALL_B16COUNT: Result := ThreadHeap.GetSmall(B16Count);
-      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-        Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
+      MAX_SMALL_B16COUNT+1..MIDDLE_MEDIUM_B16COUNT:
+        Result := ThreadHeap.FMedium.Get(B16Count);
+      MIDDLE_MEDIUM_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+        Result := ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes));
     else
       Result := MemoryManager.BrainMM.GetMemoryPages(
         (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
@@ -2781,8 +2885,10 @@ begin
     thread_deferreds_done:
       case (B16Count) of
         0..MAX_SMALL_B16COUNT: Result := ThreadHeap.GetSmall(B16Count);
-        MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-          Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
+        MAX_SMALL_B16COUNT+1..MIDDLE_MEDIUM_B16COUNT:
+          Result := ThreadHeap.FMedium.Get(B16Count);
+        MIDDLE_MEDIUM_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+          Result := ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes));
       else
         Result := MemoryManager.BrainMM.GetMemoryPages(
           (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
@@ -2849,20 +2955,27 @@ asm
 
   // case (B16Count) of
   //   Exit ThreadHeap.GetSmall(B16Count)
-  //   Exit ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes))
+  //   Exit ThreadHeap.FMedium.Get(B16Count, Ord(ma16Bytes))
+  //   Exit ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes))
   //   Exit MemoryManager.BrainMM.GetMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     xor ecx, ecx
     cmp edx, MAX_SMALL_B16COUNT
     jbe TThreadHeap.GetSmall
+    lea eax, [EAX].TThreadHeap.FMedium
+    cmp edx, MIDDLE_MEDIUM_B16COUNT
+    jbe TMediumManager.Get
     cmp edx, MAX_MEDIUM_B16COUNT
-    jbe TThreadHeap.GetMedium
+    jbe TMediumManager.GetAdvanced
   {$else .CPUX64}
     xor r8, r8
     cmp rdx, MAX_SMALL_B16COUNT
     jbe TThreadHeap.GetSmall
+    lea rcx, [RCX].TThreadHeap.FMedium
+    cmp rdx, MIDDLE_MEDIUM_B16COUNT
+    jbe TMediumManager.Get
     cmp rdx, MAX_MEDIUM_B16COUNT
-    jbe TThreadHeap.GetMedium
+    jbe TMediumManager.GetAdvanced
   {$endif}
 
   {$ifdef CPUX86}
@@ -3141,8 +3254,10 @@ begin
     thread_deferreds_done:
       case (B16Count) of
         0..MAX_SMALL_B16COUNT: Result := ThreadHeap.GetSmall(B16Count);
-        MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-          Result := ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes));
+        MAX_SMALL_B16COUNT+1..MIDDLE_MEDIUM_B16COUNT:
+          Result := ThreadHeap.FMedium.Get(B16Count);
+        MIDDLE_MEDIUM_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+          Result := ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes));
       else
         Result := MemoryManager.BrainMM.GetMemoryPages(
           (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
@@ -3214,7 +3329,8 @@ asm
   // store B16Count
   // case (B16Count) of
   //   call ThreadHeap.GetSmall(B16Count)
-  //   call ThreadHeap.GetMedium(B16Count, Ord(ma16Bytes))
+  //   call ThreadHeap.FMedium.Get(B16Count, Ord(ma16Bytes))
+  //   call ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes))
   //   call MemoryManager.BrainMM.GetMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
   {$ifdef CPUX86}
     push edx
@@ -3222,8 +3338,11 @@ asm
     xor ecx, ecx
     cmp edx, MAX_SMALL_B16COUNT
     jbe TThreadHeap.GetSmall
+    lea eax, [EAX].TThreadHeap.FMedium
+    cmp edx, MIDDLE_MEDIUM_B16COUNT
+    jbe TMediumManager.Get
     cmp edx, MAX_MEDIUM_B16COUNT
-    jbe TThreadHeap.GetMedium
+    jbe TMediumManager.GetAdvanced
   {$else .CPUX64}
     push rdx
     lea r9, @fill_zero
@@ -3231,8 +3350,11 @@ asm
     xor r8, r8
     cmp rdx, MAX_SMALL_B16COUNT
     jbe TThreadHeap.GetSmall
+    lea rcx, [RCX].TThreadHeap.FMedium
+    cmp rdx, MIDDLE_MEDIUM_B16COUNT
+    jbe TMediumManager.Get
     cmp rdx, MAX_MEDIUM_B16COUNT
-    jbe TThreadHeap.GetMedium
+    jbe TMediumManager.GetAdvanced
   {$endif}
 
   {$ifdef CPUX86}
@@ -3289,7 +3411,7 @@ asm
     rep STOSQ
   {$endif}
 
-  // Result := edi/rdi - B16Count * 16, restore edi/rdi (from edx/rdx)
+  // Result := edi/rdi - B16Count * 16, retrieve edi/rdi (from edx/rdx)
   {$ifdef CPUX86}
     shl ecx, 4
     xchg eax, edx
@@ -3323,7 +3445,7 @@ end;
 function BrainMMUnknownGetMemAligned(Align: TMemoryAlign; B16Count: NativeUInt;
   ErrorAddr: Pointer): Pointer;
 label
-  medium;
+  medium_advanced;
 var
   ThreadHeap: PThreadHeap;
   Flags: SupposedPtr;
@@ -3349,14 +3471,19 @@ begin
     case (B16Count) of
       0..MAX_SMALL_B16COUNT:
       begin
-        if (Align <> ma16Bytes) then goto medium;
+        if (Align <> ma16Bytes) then goto medium_advanced;
         Result := ThreadHeap.GetSmall(B16Count);
       end;
-      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+      MAX_SMALL_B16COUNT+1..MIDDLE_MEDIUM_B16COUNT:
       begin
-      medium:
-        Result := ThreadHeap.GetMedium(B16Count, Ord(Align));
-      end
+        if (Align <> ma16Bytes) then goto medium_advanced;
+        Result := ThreadHeap.FMedium.Get(B16Count);
+      end;
+      MIDDLE_MEDIUM_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+      begin
+      medium_advanced:
+        Result := ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(Align));
+      end;
     else
       Result := MemoryManager.BrainMM.GetMemoryPages(
         (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
@@ -3372,7 +3499,7 @@ end;
 
 function BrainMMGetMemAligned(Align: TMemoryAlign; Size: NativeUInt): Pointer;
 label
-  thread_deferreds_done, medium;
+  thread_deferreds_done, medium_advanced;
 const
   ErrorAddr = nil;
 var
@@ -3391,14 +3518,19 @@ begin
       case (B16Count) of
         0..MAX_SMALL_B16COUNT:
         begin
-          if (Align <> ma16Bytes) then goto medium;
+          if (Align <> ma16Bytes) then goto medium_advanced;
           Result := ThreadHeap.GetSmall(B16Count);
         end;
-        MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+        MAX_SMALL_B16COUNT+1..MIDDLE_MEDIUM_B16COUNT:
         begin
-        medium:
-          Result := ThreadHeap.GetMedium(B16Count, Ord(Align));
-        end
+          if (Align <> ma16Bytes) then goto medium_advanced;
+          Result := ThreadHeap.FMedium.Get(B16Count);
+        end;
+        MIDDLE_MEDIUM_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+        begin
+        medium_advanced:
+          Result := ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(Align));
+        end;
       else
         Result := MemoryManager.BrainMM.GetMemoryPages(
           (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
@@ -3463,7 +3595,7 @@ begin
         medium:
           if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
           begin
-            Result := ThreadHeap.FreeMedium(P);
+            Result := ThreadHeap.FMedium.Free(P);
             Exit;
           end;
         end;
@@ -3540,7 +3672,7 @@ begin
           medium:
             if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
             begin
-              Result := ThreadHeap.FreeMedium(P);
+              Result := ThreadHeap.FMedium.Free(P);
               Exit;
             end;
           end;
@@ -3669,14 +3801,18 @@ asm
   {$endif}
 
 @medium:
-  // if (PK64PoolMedium(P).ThreadHeap = @Self) then Exit ThreadHeap.FreeMedium(P)
+  // if (PK64PoolMedium(P).ThreadHeap = @Self) then Exit ThreadHeap.FMedium.FreeMedium(P)
   // else Exit ThreadHeap.FreeDifficult
   {$ifdef CPUX86}
     cmp [ECX].TK64PoolMedium.ThreadHeap, eax
-    je TThreadHeap.FreeMedium
+    lea eax, [EAX].TThreadHeap.FMedium
+    je TMediumManager.Free
+    lea eax, [EAX - TThreadHeap.FMedium]
   {$else .CPUX64}
     cmp [R8].TK64PoolMedium.ThreadHeap, rcx
-    je TThreadHeap.FreeMedium
+    lea rcx, [RCX].TThreadHeap.FMedium
+    je TMediumManager.Free
+    lea rcx, [RCX - TThreadHeap.FMedium]
   {$endif}
   jmp @free_difficult
 
@@ -3926,7 +4062,7 @@ asm
     mov [RCX].TK1LineSmall.Header.Queue.Prev, r9
   {$endif}
 
-  // restore Self
+  // retrieve Self
   // enqueue Self.FK1LineSmalls
   // v4 := 0
   {$ifdef CPUX86}
@@ -3981,16 +4117,21 @@ asm
 end;
 {$endif}
 
-function BrainMMUnknownRegetMem(ErrorAddr: Pointer; P: Pointer;
-  NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
+function BrainMMUnknownResizeMem(ErrorAddr: Pointer; P: Pointer;
+  FlagsNewB16Count: NativeUInt{NewB16Count, High Copy}; ReturnAddress: Pointer): Pointer;
 label
   return_made_none, medium, raise_invalid_ptr;
 var
+  NewB16Count, FlagCopy: NativeUInt;
   ThreadHeap: PThreadHeap;
   Flags: SupposedPtr;
   Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
   LastB16Count: NativeUInt;
 begin
+  // unpack parameters
+  NewB16Count := FlagsNewB16Count and MASK_HIGH_NATIVE_TEST;
+  FlagCopy := FlagsNewB16Count shr HIGH_NATIVE_BIT;
+
   // inline SpinLock
   ThreadHeap := UnknownThreadHeap;
   repeat
@@ -4007,7 +4148,7 @@ begin
     end;
   until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
   try
-    // reget
+    // resize
     ThreadHeap.ErrorAddr := ErrorAddr;
     if (NativeInt(P) and MASK_16_TEST = 0) then
     begin
@@ -4030,7 +4171,14 @@ begin
             NewB16Count := {retrieve}NewB16Count shr 4;
             if (NewB16Count <= MAX_SMALL_B16COUNT) then
             begin
-              Result := ThreadHeap.RegrowSmallToSmall(P, NewB16Count);
+              if (FlagCopy <> 0) then
+              begin
+                Result := ThreadHeap.GrowSmallToSmall(P, NewB16Count);
+              end else
+              begin
+                Result := ThreadHeap.RegrowSmallToSmall(P, NewB16Count);
+              end;
+
               Exit;
             end;
           end;
@@ -4041,16 +4189,16 @@ begin
         medium:
           if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
           begin
-            LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
+            LastB16Count := NativeUInt(PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).WSize) shr 4;
             if (NewB16Count <= LastB16Count) then
             begin
-              if (NewB16Count = LastB16Count) then goto return_made_none;
-              Result := ThreadHeap.ReduceMedium(P, NewB16Count);
+              if (NewB16Count >= LastB16Count - 1) then goto return_made_none;
+              Result := ThreadHeap.FMedium.Reduce(P, NewB16Count);
               Exit;
             end;
             if (NewB16Count <= MAX_MEDIUM_B16COUNT) then
             begin
-              Result := ThreadHeap.RegetMediumToMedium(P, NewB16Count);
+              Result := ThreadHeap.FMedium.Grow(P, (FlagCopy shl FLAG_MEDIUM_COPY_SHIFT) + NewB16Count);
               Exit;
             end;
           end;
@@ -4065,8 +4213,9 @@ begin
         end else
         begin
           // big or large
-          Result := MemoryManager.BrainMM.RegetMemoryPages(MemoryPages(P),
-            (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+          Result := MemoryManager.BrainMM.ResizeMemoryPages(MemoryPages(P),
+            (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
+            (FlagCopy shl RESIZE_PAGES_COPY_SHIFT) + PAGESMODE_SYSTEM);
           if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
           begin
             if (Result = PTR_INVALID) then goto raise_invalid_ptr;
@@ -4078,7 +4227,7 @@ begin
       end;
 
       // "default" method
-      Result := ThreadHeap.RegetDifficult(P, NewB16Count, ReturnAddress);
+      Result := ThreadHeap.ResizeDifficult(NativeUInt(P) + FlagCopy, NewB16Count, ReturnAddress);
       Exit;
     end else
     begin
@@ -4148,16 +4297,16 @@ begin
           medium:
             if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
             begin
-              LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
+              LastB16Count := NativeUInt(PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).WSize) shr 4;
               if (NewB16Count <= LastB16Count) then
               begin
-                if (NewB16Count = LastB16Count) then goto return_made_none;
-                Result := ThreadHeap.ReduceMedium(P, NewB16Count);
+                if (NewB16Count >= LastB16Count - 1) then goto return_made_none;
+                Result := ThreadHeap.FMedium.Reduce(P, NewB16Count);
                 Exit;
               end;
               if (NewB16Count <= MAX_MEDIUM_B16COUNT) then
               begin
-                Result := ThreadHeap.RegetMediumToMedium(P, NewB16Count);
+                Result := ThreadHeap.FMedium.Grow(P, 0 + NewB16Count);
                 Exit;
               end;
             end;
@@ -4172,8 +4321,8 @@ begin
           end else
           begin
             // big or large
-            Result := MemoryManager.BrainMM.RegetMemoryPages(MemoryPages(P),
-              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+            Result := MemoryManager.BrainMM.ResizeMemoryPages(MemoryPages(P),
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, RESIZE_PAGES_SYSTEM_REGET);
             if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
             begin
               if (Result = PTR_INVALID) then goto raise_invalid_ptr;
@@ -4185,7 +4334,7 @@ begin
         end;
 
         // "default" method
-        Result := ThreadHeap.RegetDifficult(P, NewB16Count, ReturnAddress);
+        Result := ThreadHeap.ResizeDifficult(NativeInt(P) + Ord(False), NewB16Count, ReturnAddress);
         Exit;
       end else
       begin
@@ -4199,7 +4348,7 @@ begin
     end;
   end else
   begin
-    Result := BrainMMUnknownRegetMem(ErrorAddr, P, NewB16Count, ReturnAddress);
+    Result := BrainMMUnknownResizeMem(ErrorAddr, P, 0 + NewB16Count, ReturnAddress);
   end;
 end;
 {$else}
@@ -4319,7 +4468,7 @@ asm
 
 @small_grow:
   // retrieve NewB16Count
-  // if (NewSize > MAX_SMALL_SIZE) then Exit ThreadHeap.RegetDifficult
+  // if (NewSize > MAX_SMALL_SIZE) then Exit ThreadHeap.ResizeDifficult(False)
   {$ifdef CPUX86}
     mov ebx, ecx
     shr ecx, 4
@@ -4353,7 +4502,7 @@ asm
 
 @not_fast:
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
-  // else Exit RegetDifficult
+  // else Exit ThreadHeap.ResizeDifficult(False)
   {$ifdef CPUX86}
     cmp [EBX].TK64PoolSmall.ThreadHeap, 0
   {$else .CPUX64}
@@ -4362,7 +4511,7 @@ asm
   jnz @reget_difficult
 
 @medium:
-  // if (PK64PoolMedium(P).ThreadHeap <> @Self) then Exit ThreadHeap.RegetDifficult
+  // if (PK64PoolMedium(P).ThreadHeap <> @Self) then Exit ThreadHeap.ResizeDifficult(False)
   {$ifdef CPUX86}
     cmp [EBX].TK64PoolMedium.ThreadHeap, eax
   {$else .CPUX64}
@@ -4370,24 +4519,33 @@ asm
   {$endif}
   jne @reget_difficult
 
-  // if (NewB16Count > MAX_MEDIUM_B16COUNT) then Exit ThreadHeap.RegetDifficult
+  // if (NewB16Count > MAX_MEDIUM_B16COUNT) then Exit ThreadHeap.ResizeDifficult(False)
   {$ifdef CPUX86}
     cmp ecx, MAX_MEDIUM_B16COUNT
   {$else .CPUX64}
     cmp r8, MAX_MEDIUM_B16COUNT
   {$endif}  
   ja @reget_difficult
-  
-  // Compare: PHeaderMedium(P).B16Count ~ NewB16Count
-  // if = then Exit P (return made none)
-  // if < then Exit ThreadHeap.RegetMediumToMedium
-  // if > then Exit ThreadHeap.ReduceMedium
+
+  // if (NewB16Count > LastB16Count) then Exit TMediumManager.Grow()
+  // if (NewB16Count >= LastB16Count - 1) then Exit P (return made none)
+  // else Exit TMediumManager.Reduce()
   {$ifdef CPUX86}
-    cmp [EDX - 16].THeaderMedium.B16Count, cx
+    shl ecx, 4
+    movzx ebx, [EDX - 16].THeaderMedium.WSize
+    sub ebx, ecx
+    shr ecx, 4
+    lea eax, [EAX].TThreadHeap.FMedium
+    cmp ebx, 16
   {$else .CPUX64}
-    cmp [RDX - 16].THeaderMedium.B16Count, r8w
+    shl r8, 4
+    movzx r9, [RDX - 16].THeaderMedium.WSize
+    sub r9, r8
+    shr r8, 4
+    lea rcx, [RCX].TThreadHeap.FMedium
+    cmp r9, 16
   {$endif}
-  je @return_made_none
+  jbe @return_made_none
   {$ifdef CPUX86}
     push offset @return_var_p
   {$else .CPUX64}
@@ -4395,8 +4553,8 @@ asm
     lea r9, @return_var_p
     push r9
   {$endif}
-  jb TThreadHeap.RegetMediumToMedium
-  jmp TThreadHeap.ReduceMedium
+  jl TMediumManager.Grow
+  jmp TMediumManager.Reduce
 
 @not_small:
   // if (P(v2) and MASK_K4_TEST = 0) then BigOrLarge
@@ -4418,20 +4576,20 @@ asm
   jmp @raise_invalid_ptr
 
 @reget_big_large:
-  // Exit MemoryManager.BrainMM.RegetMemoryPages(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  // Exit MemoryManager.BrainMM."RegetMemoryPages"(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
   {$ifdef CPUX86}
     mov eax, edx
     lea edx, [ecx + B16_PER_PAGE - 1]
-    mov ecx, PAGESMODE_SYSTEM
+    mov ecx, RESIZE_PAGES_SYSTEM_REGET
     shr edx, B16_PER_PAGE_SHIFT
   {$else .CPUX64}
     mov rcx, rdx
     lea rdx, [r8 + B16_PER_PAGE - 1]
-    mov r8d, PAGESMODE_SYSTEM
+    mov r8d, RESIZE_PAGES_SYSTEM_REGET
     shr rdx, B16_PER_PAGE_SHIFT
     push r10
   {$endif}
-  call MemoryManager.BrainMM.RegetMemoryPages
+  call MemoryManager.BrainMM.ResizeMemoryPages
   {$ifdef CPUX86}
     cmp eax, 1 // PTR_INVALID
   {$else .CPUX64}
@@ -4456,7 +4614,7 @@ asm
     mov r9, [rsp]
     push r10
   {$endif}
-  call TThreadHeap.RegetDifficult
+  call TThreadHeap.ResizeDifficult
 @return_var_p:
   {$ifdef CPUX86}
     pop ecx
@@ -4479,7 +4637,7 @@ asm
     lea r10, @return_var_p
     push r10
   {$endif}
-  jmp BrainMMUnknownRegetMem
+  jmp BrainMMUnknownResizeMem
 @raise_invalid_pages:
   {$ifdef CPUX64}
     pop r10
@@ -4542,116 +4700,6 @@ asm
 end;
 {$endif}
 
-function BrainMMUnknownReallocMem(ErrorAddr: Pointer; P: Pointer;
-  NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
-label
-  return_made_none, medium, raise_invalid_ptr;
-var
-  ThreadHeap: PThreadHeap;
-  Flags: SupposedPtr;
-  Pool: Pointer{PK64PoolSmall/PK64PoolMedium};
-  LastB16Count: NativeUInt;
-begin
-  // inline SpinLock
-  ThreadHeap := UnknownThreadHeap;
-  repeat
-    Flags := ThreadHeap.LockFlags;
-    if (Flags <> THREAD_HEAP_LOCKABLE) then
-    begin
-      if (Flags = THREAD_HEAP_LOCKED) then
-      begin
-        SpinWait(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED_BIT);
-      end else
-      begin
-        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
-      end;
-    end;
-  until (THREAD_HEAP_LOCKABLE = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, THREAD_HEAP_LOCKABLE));
-  try
-    // realloc
-    ThreadHeap.ErrorAddr := ErrorAddr;
-    if (NativeInt(P) and MASK_16_TEST = 0) then
-    begin
-      Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-
-      if (NativeInt(P) and MASK_K1_TEST <> 0) then
-      begin
-        // pool: small or medium
-        if (PK64PoolSmall(Pool).ThreadHeap = ThreadHeap) then
-        begin
-          // pool small
-          NewB16Count := {NewSize}NewB16Count shl 4;
-          if (PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR).Header.ModeSize >= {NewSize}NewB16Count) then
-          begin
-          return_made_none:
-            Result := P;
-            Exit;
-          end else
-          begin
-            NewB16Count := {retrieve}NewB16Count shr 4;
-            if (NewB16Count <= MAX_SMALL_B16COUNT) then
-            begin
-              Result := ThreadHeap.GrowSmallToSmall(P, NewB16Count);
-              Exit;
-            end;
-          end;
-        end else
-        if (PK64PoolSmall(Pool).ThreadHeap = nil) then
-        begin
-          // pool medium
-        medium:
-          if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
-          begin
-            LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
-            if (NewB16Count <= LastB16Count) then
-            begin
-              if (NewB16Count = LastB16Count) then goto return_made_none;
-              Result := ThreadHeap.ReduceMedium(P, NewB16Count);
-              Exit;
-            end;
-            if (NewB16Count <= MAX_MEDIUM_B16COUNT) then
-            begin
-              Result := ThreadHeap.ReallocMediumToMedium(P, NewB16Count);
-              Exit;
-            end;
-          end;
-        end;
-      end else
-      begin
-        if (NativeInt(P) and MASK_K4_TEST <> 0) then
-        begin
-          // medium or invalid pointer
-          if (PK64PoolSmall(Pool).ThreadHeap = nil) then goto medium;
-          goto raise_invalid_ptr;
-        end else
-        begin
-          // big or large
-          Result := MemoryManager.BrainMM.ReallocMemoryPages(MemoryPages(P),
-            (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
-          if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
-          begin
-            if (Result = PTR_INVALID) then goto raise_invalid_ptr;
-            Result := ThreadHeap.ErrorOutOfMemory;
-          end;
-
-          Exit;
-        end;
-      end;
-
-      // "default" method
-      Result := ThreadHeap.ReallocDifficult(P, NewB16Count, ReturnAddress);
-      Exit;
-    end else
-    begin
-    raise_invalid_ptr:
-      Result := Pointer(ThreadHeap.RaiseInvalidPtr);
-    end;
-  finally
-    // inline SpinUnlock
-    ThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
-  end;
-end;
-
 function BrainMMReallocMem(P: Pointer; NewSize: NativeUInt): Pointer;
 {$ifdef PUREPASCAL}
 {$ifNdef RETURNADDRESS}
@@ -4709,16 +4757,16 @@ begin
           medium:
             if (PK64PoolMedium(Pool).ThreadHeap = ThreadHeap) then
             begin
-              LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
+              LastB16Count := NativeUInt(PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).WSize) shr 4;
               if (NewB16Count <= LastB16Count) then
               begin
-                if (NewB16Count = LastB16Count) then goto return_made_none;
-                Result := ThreadHeap.ReduceMedium(P, NewB16Count);
+                if (NewB16Count >= LastB16Count - 1) then goto return_made_none;
+                Result := ThreadHeap.FMedium.Reduce(P, NewB16Count);
                 Exit;
               end;
               if (NewB16Count <= MAX_MEDIUM_B16COUNT) then
               begin
-                Result := ThreadHeap.ReallocMediumToMedium(P, NewB16Count);
+                Result := ThreadHeap.FMedium.Grow(P, FLAG_MEDIUM_COPY + NewB16Count);
                 Exit;
               end;
             end;
@@ -4733,8 +4781,8 @@ begin
           end else
           begin
             // big or large
-            Result := MemoryManager.BrainMM.ReallocMemoryPages(MemoryPages(P),
-              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_SYSTEM);
+            Result := MemoryManager.BrainMM.ResizeMemoryPages(MemoryPages(P),
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, RESIZE_PAGES_SYSTEM_REALLOC);
             if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
             begin
               if (Result = PTR_INVALID) then goto raise_invalid_ptr;
@@ -4746,7 +4794,7 @@ begin
         end;
 
         // "default" method
-        Result := ThreadHeap.ReallocDifficult(P, NewB16Count, ReturnAddress);
+        Result := ThreadHeap.ResizeDifficult(NativeInt(P) + Ord(True), NewB16Count, ReturnAddress);
         Exit;
       end else
       begin
@@ -4760,7 +4808,7 @@ begin
     end;
   end else
   begin
-    Result := BrainMMUnknownReallocMem(ErrorAddr, P, NewB16Count, ReturnAddress);
+    Result := BrainMMUnknownResizeMem(ErrorAddr, P, NativeUInt(MASK_HIGH_NATIVE_BIT) + NewB16Count, ReturnAddress);
   end;
 end;
 {$else}
@@ -4880,7 +4928,7 @@ asm
 
 @small_grow:
   // retrieve NewB16Count
-  // if (NewSize > MAX_SMALL_SIZE) then Exit ThreadHeap.ReallocDifficult
+  // if (NewSize > MAX_SMALL_SIZE) then Exit ThreadHeap.ResizeDifficult(True)
   {$ifdef CPUX86}
     mov ebx, ecx
     shr ecx, 4
@@ -4914,7 +4962,7 @@ asm
 
 @not_fast:
   // if (PK64PoolSmall(P).ThreadHeap = 0) then May be medium
-  // else Exit ReallocDifficult
+  // else Exit ThreadHeap.ResizeDifficult(True)
   {$ifdef CPUX86}
     cmp [EBX].TK64PoolSmall.ThreadHeap, 0
   {$else .CPUX64}
@@ -4923,7 +4971,7 @@ asm
   jnz @realloc_difficult
 
 @medium:
-  // if (PK64PoolMedium(P).ThreadHeap <> @Self) then Exit ThreadHeap.ReallocDifficult
+  // if (PK64PoolMedium(P).ThreadHeap <> @Self) then Exit ThreadHeap.ResizeDifficult(True)
   {$ifdef CPUX86}
     cmp [EBX].TK64PoolMedium.ThreadHeap, eax
   {$else .CPUX64}
@@ -4931,7 +4979,7 @@ asm
   {$endif}
   jne @realloc_difficult
 
-  // if (NewB16Count > MAX_MEDIUM_B16COUNT) then Exit ThreadHeap.ReallocDifficult
+  // if (NewB16Count > MAX_MEDIUM_B16COUNT) then Exit ThreadHeap.ResizeDifficult(True)
   {$ifdef CPUX86}
     cmp ecx, MAX_MEDIUM_B16COUNT
   {$else .CPUX64}
@@ -4939,25 +4987,36 @@ asm
   {$endif}  
   ja @realloc_difficult
   
-  // Compare: PHeaderMedium(P).B16Count ~ NewB16Count
-  // if = then Exit P (return made none)
-  // if < then Exit ThreadHeap.ReallocMediumToMedium
-  // if > then Exit ThreadHeap.ReduceMedium
+  // if (NewB16Count > LastB16Count) then Exit TMediumManager.Grow(FLAG_MEDIUM_COPY)
+  // if (NewB16Count >= LastB16Count - 1) then Exit P (return made none)
+  // else Exit TMediumManager.Reduce(FLAG_MEDIUM_COPY)
   {$ifdef CPUX86}
-    cmp [EDX - 16].THeaderMedium.B16Count, cx
+    shl ecx, 4
+    movzx ebx, [EDX - 16].THeaderMedium.WSize
+    sub ebx, ecx
+    shr ecx, 4
+    lea eax, [EAX].TThreadHeap.FMedium
+    cmp ebx, 16
   {$else .CPUX64}
-    cmp [RDX - 16].THeaderMedium.B16Count, r8w
+    shl r8, 4
+    movzx r9, [RDX - 16].THeaderMedium.WSize
+    sub r9, r8
+    shr r8, 4
+    lea rcx, [RCX].TThreadHeap.FMedium
+    cmp r9, 16
   {$endif}
-  je @return_made_none
+  jbe @return_made_none
   {$ifdef CPUX86}
     push offset @return_var_p
+    lea ecx, [ecx + FLAG_MEDIUM_COPY]
   {$else .CPUX64}
     push r10
     lea r9, @return_var_p
     push r9
+    lea r8, [r8 + FLAG_MEDIUM_COPY]
   {$endif}
-  jb TThreadHeap.ReallocMediumToMedium
-  jmp TThreadHeap.ReduceMedium
+  jl TMediumManager.Grow
+  jmp TMediumManager.Reduce
 
 @not_small:
   // if (P(v2) and MASK_K4_TEST = 0) then BigOrLarge
@@ -4979,20 +5038,20 @@ asm
   jmp @raise_invalid_ptr
 
 @realloc_big_large:
-  // Exit MemoryManager.BrainMM.ReallocMemoryPages(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  // Exit MemoryManager.BrainMM."ReallocMemoryPages"(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
   {$ifdef CPUX86}
     mov eax, edx
     lea edx, [ecx + B16_PER_PAGE - 1]
-    mov ecx, PAGESMODE_SYSTEM
+    mov ecx, RESIZE_PAGES_SYSTEM_REALLOC
     shr edx, B16_PER_PAGE_SHIFT
   {$else .CPUX64}
     mov rcx, rdx
     lea rdx, [r8 + B16_PER_PAGE - 1]
-    mov r8d, PAGESMODE_SYSTEM
+    mov r8d, RESIZE_PAGES_SYSTEM_REALLOC
     shr rdx, B16_PER_PAGE_SHIFT
     push r10
   {$endif}
-  call MemoryManager.BrainMM.ReallocMemoryPages
+  call MemoryManager.BrainMM.ResizeMemoryPages
   {$ifdef CPUX86}
     cmp eax, 1 // PTR_INVALID
   {$else .CPUX64}
@@ -5013,11 +5072,13 @@ asm
 @realloc_difficult:
   {$ifdef CPUX86}
     push dword ptr [esp + 8]
+    add edx, 1
   {$else .CPUX64}
     mov r9, [rsp]
     push r10
+    add rdx, 1
   {$endif}
-  call TThreadHeap.ReallocDifficult
+  call TThreadHeap.ResizeDifficult
 @return_var_p:
   {$ifdef CPUX86}
     pop ecx
@@ -5033,14 +5094,17 @@ asm
     mov eax, ebx
     push dword ptr [esp + 8]
     push offset @return_var_p
+    add ecx, MASK_HIGH_NATIVE_BIT
   {$else .CPUX64}
     mov rcx, r9
     mov r9, [rsp]
     push r10
     lea r10, @return_var_p
     push r10
+    mov r10, MASK_HIGH_NATIVE_BIT
+    add r8, r10
   {$endif}
-  jmp BrainMMUnknownReallocMem
+  jmp BrainMMUnknownResizeMem
 @raise_invalid_pages:
   {$ifdef CPUX64}
     pop r10
@@ -5299,17 +5363,63 @@ end;
 {$endif}
 
 
+procedure InitializeMediumIndexes;
+var
+  i: NativeInt;
+begin
+  for i := 0 to 31 do
+  begin
+    MEDIUM_MASKS_CLEAR[i - 1] := Cardinal(NativeInt(-1) shl i);
+  end;
+
+  MEDIUM_INDEXES[0] := -1;
+  FillChar(MEDIUM_INDEXES[16 div 16], -(16 - 48) div 16, 0);
+  FillChar(MEDIUM_INDEXES[48 div 16], -(48 - 64) div 16, 1);
+  FillChar(MEDIUM_INDEXES[64 div 16], -(64 - 80) div 16, 2);
+  FillChar(MEDIUM_INDEXES[80 div 16], -(80 - 96) div 16, 3);
+  FillChar(MEDIUM_INDEXES[96 div 16], -(96 - 128) div 16, 4);
+  FillChar(MEDIUM_INDEXES[128 div 16], -(128 - 160) div 16, 5);
+  FillChar(MEDIUM_INDEXES[160 div 16], -(160 - 192) div 16, 6);
+  FillChar(MEDIUM_INDEXES[192 div 16], -(192 - 224) div 16, 7);
+  FillChar(MEDIUM_INDEXES[224 div 16], -(224 - 272) div 16, 8);
+  FillChar(MEDIUM_INDEXES[272 div 16], -(272 - 320) div 16, 9);
+  FillChar(MEDIUM_INDEXES[320 div 16], -(320 - 384) div 16, 10);
+  FillChar(MEDIUM_INDEXES[384 div 16], -(384 - 448) div 16, 11);
+  FillChar(MEDIUM_INDEXES[448 div 16], -(448 - 512) div 16, 12);
+  FillChar(MEDIUM_INDEXES[512 div 16], -(512 - 576) div 16, 13);
+  FillChar(MEDIUM_INDEXES[576 div 16], -(576 - 672) div 16, 14);
+  FillChar(MEDIUM_INDEXES[672 div 16], -(672 - 800) div 16, 15);
+  FillChar(MEDIUM_INDEXES[800 div 16], -(800 - 1024) div 16, 16);
+  FillChar(MEDIUM_INDEXES[1024 div 16], -(1024 - 1360) div 16, 17);
+  FillChar(MEDIUM_INDEXES[1360 div 16], -(1360 - 1696) div 16, 18);
+  FillChar(MEDIUM_INDEXES[1696 div 16], -(1696 - 2144) div 16, 19);
+  FillChar(MEDIUM_INDEXES[2144 div 16], -(2144 - 2592) div 16, 20);
+  FillChar(MEDIUM_INDEXES[2592 div 16], -(2592 - 3040) div 16, 21);
+  FillChar(MEDIUM_INDEXES[3040 div 16], -(3040 - 3712) div 16, 22);
+  FillChar(MEDIUM_INDEXES[3712 div 16], -(3712 - 4384) div 16, 23);
+  FillChar(MEDIUM_INDEXES[4384 div 16], -(4384 - 5056) div 16, 24);
+  FillChar(MEDIUM_INDEXES[5056 div 16], -(5056 - 5728) div 16, 25);
+  FillChar(MEDIUM_INDEXES[5728 div 16], -(5728 - 6144) div 16, 26);
+  FillChar(MEDIUM_INDEXES[6144 div 16], -(6144 - 8192) div 16, 27);
+  FillChar(MEDIUM_INDEXES[8192 div 16], -(8192 - 12288) div 16, 28);
+  FillChar(MEDIUM_INDEXES[12288 div 16], -(12288 - 16384) div 16, 29);
+  FillChar(MEDIUM_INDEXES[16384 div 16], -(16384 - 24576) div 16, 30);
+  FillChar(MEDIUM_INDEXES[24576 div 16], -(24576 - 65536) div 16, 31);
+end;
+
 type
   TMediumAlignOffsets = packed record
-    Values: array[0..255] of Byte;
-    AllocatedFlags: Cardinal;
+    Values: array[0..255] of Word;
+  case Integer of
+    0: (AllocatedFlags: Cardinal);
+    1: (Null: Word; Allocated: Boolean; Align: TMemoryAlign);
   end;
   PMediumAlignOffsets = ^TMediumAlignOffsets;
 
 var
   MEDIUM_ALIGN_OFFSETS{from Header}: array[0..Ord(High(TMemoryAlign))] of TMediumAlignOffsets;
 
-procedure InitializeOffsetsMedium;
+procedure InitializeMediumOffsets;
 const
   MASK_MEDIUM_ALIGNS: array[0..Ord(High(TMemoryAlign))] of NativeUInt = (
     {ma16Bytes}   16 - 1,
@@ -5329,7 +5439,7 @@ begin
   for Align := 0 to Ord(High(TMemoryAlign)) do
   begin
     AlignOffsets := @MEDIUM_ALIGN_OFFSETS[Align];
-    AlignOffsets.AllocatedFlags := (Align shl 16) + MASK_MEDIUM_ALLOCATED;
+    AlignOffsets.AllocatedFlags := (Align shl OFFSET_MEDIUM_ALIGN) + MASK_MEDIUM_ALLOCATED;
     AlignMaskTest := MASK_MEDIUM_ALIGNS[Align];
     AlignMaskClear := (not AlignMaskTest);
 
@@ -5338,1518 +5448,1262 @@ begin
       Value := (X + 1) shl 4;
       Value := (Value + AlignMaskTest) and AlignMaskClear;
       Value := (Value + Byte(Value and MASK_K4_TEST = 0) + AlignMaskTest) and AlignMaskClear;
-      AlignOffsets.Values[X] := (Value shr 4) - X - 1;
+      AlignOffsets.Values[X] := Value - (X shl 4) - 16;
     end;
   end;
 end;
 
-function TThreadHeap.ReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-{$ifdef PUREPASCAL}
-var
-  Header: PHeaderMedium;
-  Flags, EmptyFlags: NativeUInt;
-begin
-  // header flags
-  Header := P;
-  Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-
-  // if (Next.Empty) then Grow(Next)
-  EmptyFlags := Flags and MASK_MEDIUM_ALLOCATED_TEST;
-  if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
-  begin
-    Flags := (Flags shl 4) and ($ffff shl 4);
-    Inc(NativeUInt(Header), Flags);
-    EmptyFlags := Header.Flags;
-    if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) and
-      (Header.PreviousSize = Flags) then
-    begin
-      // MediumEmpty.Size := MediumEmpty.Size + (NewSize - LastSize)
-      EmptyFlags := EmptyFlags shl 4;
-      NewB16Count := NewB16Count shl 4;
-      Inc(NativeUInt(Header), EmptyFlags);
-      Dec(Flags, NewB16Count);
-      Inc(Flags, EmptyFlags);
-      PHeaderMediumEmptyEx(Header{Empty}).Size := Flags;
-
-      // new empty flags
-      Dec(NativeUInt(Header), Flags);
-      Flags := Flags shr 4;
-      Header.PreviousSize := NewB16Count;
-      Header.Flags := Flags;
-
-      // result
-      Dec(NativeUInt(Header), NewB16Count);
-      NewB16Count := NewB16Count shr 4;
-      Dec(Header);
-      Header.B16Count := NewB16Count;
-      Result := Pointer(@PHeaderMediumList(Header)[0]);
-      Exit;
-    end else
-    begin
-      Dec(NativeUInt(Header), Flags);
-    end;
-  end;
-
-  Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyReduceMedium(Pointer(Header), NewB16Count);
+function TMediumManager.ErrorOutOfMemory: Pointer;
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    lea eax, [EAX - TThreadHeap.FMedium]
+  {$else .CPUX64}
+    lea rcx, [RCX - TThreadHeap.FMedium]
+  {$endif}
+  jmp TThreadHeap.ErrorOutOfMemory
 end;
 {$else}
-asm
-  // if (not Allocated(P)) then PenaltyReduceMedium
-  // Size := SizeOf(P)
-  {$ifdef CPUX86}
-    mov eax, [EDX - 16].THeaderMedium.Flags
-    push ebx
-    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
-    and ebx, eax
-    movzx eax, ax
-    shl eax, 4
-    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
-  {$else .CPUX64}
-    mov rcx, [RDX - 16].THeaderMedium.Flags
-    mov r9, MASK_MEDIUM_ALLOCATED_TEST
-    and r9, rcx
-    movzx rcx, cx
-    shl rcx, 4
-    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
-  {$endif}
-  jne @penalty_reducemem
-
-  // if (not Next.Empty) then PenaltyReduceMedium
-  {$ifdef CPUX86}
-    add edx, eax
-    mov ebx, [EDX].THeaderMedium.Flags
-    cmp [EDX].THeaderMedium.PreviousSize, eax
-    jne @penalty_reducemem_restore
-    test ebx, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_reducemem_restore
-  {$else .CPUX64}
-    add rdx, rcx
-    mov r9, [RDX].THeaderMedium.Flags
-    cmp [RDX].THeaderMedium.PreviousSize, rcx
-    jne @penalty_reducemem_restore
-    test r9, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_reducemem_restore
-  {$endif}
-
-  // empty grow routine, result
-  {$ifdef CPUX86}
-    shl ebx, 4
-    shl ecx, 4
-    add edx, ebx
-    sub eax, ecx
-    add eax, ebx
-    mov [EDX].THeaderMediumEmptyEx.Size, eax
-
-    sub edx, eax
-    shr eax, 4
-    mov [EDX].THeaderMedium.PreviousSize, ecx
-    mov [EDX].THeaderMedium.Flags, eax
-
-    sub edx, ecx
-    shr ecx, 4
-    pop ebx
-    mov [EDX - 16].THeaderMedium.B16Count, cx
-    xchg eax, edx
-  {$else .CPUX64}
-    shl r9, 4
-    shl r8, 4
-    add rdx, r9
-    sub rcx, r8
-    add rcx, r9
-    mov [RDX].THeaderMediumEmptyEx.Size, rcx
-
-    sub rdx, rcx
-    shr rcx, 4
-    mov [RDX].THeaderMedium.PreviousSize, r8
-    mov [RDX].THeaderMedium.Flags, rcx
-
-    sub rdx, r8
-    shr r8, 4
-    mov [RDX - 16].THeaderMedium.B16Count, r8w
-    xchg rax, rdx
-  {$endif}
-
-  // Exit
-  ret
-@penalty_reducemem_restore:
-  {$ifdef CPUX86}
-    sub edx, eax
-  {$else .CPUX64}
-    sub rdx, rcx
-  {$endif}
-@penalty_reducemem:
-  {$ifdef CPUX86}
-    mov eax, MASK_K64_CLEAR
-    and eax, edx
-    mov eax, [EAX].TK64PoolMedium.ThreadHeap
-    pop ebx
-  {$else .CPUX64}
-    mov rcx, MASK_K64_CLEAR
-    and rcx, rdx
-    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
-  {$endif}
-  jmp TThreadHeap.PenaltyReduceMedium
+begin
+  Result := PThreadHeap(NativeInt(@Self) - NativeInt(@PThreadHeap(nil).FMedium)).ErrorOutOfMemory;
 end;
 {$endif}
 
-function TThreadHeap.PenaltyReduceMedium(P: Pointer; NewB16Count: NativeUInt): Pointer;
-label
-  ptr_invalid, done;
-var
-  Header, NextHeader: PHeaderMedium;
-  Flags, EmptySize: NativeUInt;
-  CurrentB16Count, EmptyB16Count: NativeUInt;
-  Pool: PK64PoolMedium;
-  Empty, Left: PHeaderMediumEmpty;
+function TMediumManager.ErrorInvalidPtr: Integer;
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    lea eax, [EAX - TThreadHeap.FMedium]
+  {$else .CPUX64}
+    lea rcx, [RCX - TThreadHeap.FMedium]
+  {$endif}
+  jmp TThreadHeap.ErrorInvalidPtr
+end;
+{$else}
 begin
-  // header, B16Count, next header
-  Header := Pointer(NativeInt(P) - SizeOf(THeaderMedium));
-  Flags := Header.Flags;
-  if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then goto ptr_invalid;
-  CurrentB16Count := Word(Flags);
-  Flags := {CurrentSize}(Flags shl 4) and ($ffff shl 4);
-  NextHeader := P;
-  Inc(NativeUInt(NextHeader), {CurrentSize}Flags);
-  if (NextHeader.PreviousSize <> {CurrentSize}Flags) then goto ptr_invalid;
+  Result := PThreadHeap(NativeInt(@Self) - NativeInt(@PThreadHeap(nil).FMedium)).ErrorInvalidPtr;
+end;
+{$endif}
 
-  // optional reduce piece + new/grow empty piece
-  Flags := NextHeader.Flags;
-  if (Flags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) then
-  begin
-    // grow empty piece
-    EmptySize := NativeUInt(Word(Flags)) shl 4;
-    Inc(NextHeader);
-    Inc(NativeUInt(NextHeader), EmptySize);
-    if (NextHeader.PreviousSize <> EmptySize) then goto ptr_invalid;
-    EmptySize := EmptySize + (CurrentB16Count - NewB16Count) shl 4;
-    NextHeader.PreviousSize := EmptySize;
-    Dec(NextHeader);
-    Dec(NativeUInt(NextHeader), EmptySize);
-    NextHeader.Flags := {EmptyB16Count, Align: ma16Bytes, Allocated: False}EmptySize shr 4;
-  end else
-  if (Flags and MASK_MEDIUM_ALLOCATED_TEST = MASK_MEDIUM_ALLOCATED_VALUE) then
-  begin
-    // optional make empty piece
-    EmptyB16Count := CurrentB16Count - NewB16Count;
-    if (EmptyB16Count = 1) then goto done;
+function TMediumManager.RaiseOutOfMemory: Pointer;
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    lea eax, [EAX - TThreadHeap.FMedium]
+  {$else .CPUX64}
+    lea rcx, [RCX - TThreadHeap.FMedium]
+  {$endif}
+  jmp TThreadHeap.RaiseOutOfMemory
+end;
+{$else .CPUARM.CPUARM64}
+{$ifNdef RETURNADDRESS}
+const
+  ReturnAddress: Pointer = @TMediumManager.RaiseOutOfMemory;
+{$endif}
+var
+  ThreadHeap: PThreadHeap;
+begin
+  ThreadHeap := PThreadHeap(NativeInt(@Self) - NativeInt(@PThreadHeap(nil).FMedium));
+  if (ThreadHeap.ErrorAddr = nil) then ThreadHeap.ErrorAddr := ReturnAddress;
+  Result := Self.ErrorOutOfMemory;
+end;
+{$endif}
 
-    EmptyB16Count := EmptyB16Count - 1;
-    NextHeader := @PHeaderMediumList(Header)[NewB16Count];
-    NextHeader.Flags := {EmptyB16Count, Align: ma16Bytes, Allocated: False}EmptyB16Count;
-    Empty := Pointer(@PHeaderMediumList(NextHeader)[EmptyB16Count - 1]);
-    PHeaderMediumEmptyEx(Empty).Size := EmptyB16Count shl 4;
+function TMediumManager.RaiseInvalidPtr: Integer;
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    lea eax, [EAX - TThreadHeap.FMedium]
+  {$else .CPUX64}
+    lea rcx, [RCX - TThreadHeap.FMedium]
+  {$endif}
+  jmp TThreadHeap.RaiseInvalidPtr
+end;
+{$else .CPUARM.CPUARM64}
+{$ifNdef RETURNADDRESS}
+const
+  ReturnAddress: Pointer = @TMediumManager.RaiseInvalidPtr;
+{$endif}
+var
+  ThreadHeap: PThreadHeap;
+begin
+  ThreadHeap := PThreadHeap(NativeInt(@Self) - NativeInt(@PThreadHeap(nil).FMedium));
+  if (ThreadHeap.ErrorAddr = nil) then ThreadHeap.ErrorAddr := ReturnAddress;
+  Result := Self.ErrorInvalidPtr;
+end;
+{$endif}
 
-    // push back
-    Pool := PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR);
-    Left := Pool.Empties.Last.Prev;
-    Left.Next := Empty;
-    Empty.Prev := Left;
-    Empty.Next := @Pool.Empties.Last;
-    Pool.Empties.Last.Prev := Empty;
-  end else
+// returns last empty Pointer
+// empty size should be actual filled
+function TMediumManager.ExcludeEmpty(LastIndex: NativeUInt; Empty: PHeaderMediumEmpty): Pointer;
+var
+  Prev, Next: PHeaderMediumEmpty;
+begin
+  {$ifdef DEBUG}
+  if (Self.FMask and (1 shl LastIndex) = 0) then
   begin
-  ptr_invalid:
-    Result := Pointer({Self}PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.RaiseInvalidPtr);
+    Result := Pointer(Self.RaiseInvalidPtr);
     Exit;
   end;
+  {$endif}
 
-  // new header B16Count/size
-  Header.B16Count := NewB16Count;
-  PHeaderMediumList(Header)[NewB16Count].PreviousSize := NewB16Count shl 4;
-done:
+  // dequeue
+  Prev := Empty.Prev;
+  Next := Empty.Next;
+  if (NativeInt(Prev) or NativeInt(Next) = 0) then
+  begin
+    Self.FEmpties[LastIndex] := Next{nil};
+    Self.FMask := Self.FMask and (not (1 shl LastIndex));
+  end else
+  begin
+    if (Prev = nil) then
+    begin
+      Self.FEmpties[LastIndex] := Next;
+    end else
+    begin
+      Prev.Next := Next;
+    end;
+    if (Next <> nil) then
+    begin
+      Next.Prev := Prev;
+    end;
+  end;
+
   // result
-  Result := Pointer(@PHeaderMediumList(Header)[0]);
+  Result := Pointer(NativeUInt(@Empty.SiblingHeaderMedium) - Empty.Size);
 end;
 
-function OffsetHeaderMediumEmpty(Header: PHeaderMedium;
-  AlignOffset: NativeUInt): PHeaderMedium;
+// returns allocated Pointer before empty area
+// empty size/prevous should be actual filled
+function TMediumManager.ChangeEmptyIndex(Flags: NativeUInt{LastIndex, NewIndex:5}; Empty: PHeaderMediumEmpty): Pointer;
 label
-  ptr_invalid;
+  set_b16count;
 var
-  Pool: PK64PoolMedium;
-  Size, Flags, CurrentB16Count: NativeUInt;
-  Empty, Left: PHeaderMediumEmpty;
+  LastIndex, NewIndex: NativeInt;
+  Prev, Next: PHeaderMediumEmpty;
 begin
-  if (AlignOffset > 1) then
+  LastIndex := Flags and 31;
+
+  // dequeue
+  {$ifdef DEBUG}
+  if (Self.FMask and (1 shl LastIndex) = 0) then
   begin
-    // new empty piece
-    AlignOffset := AlignOffset - 1;
-    Header.Flags := {B16Count, Align: ma16Bytes, Allocated: False} AlignOffset;
-    Empty := Pointer(@PHeaderMediumList(Header)[AlignOffset - 1]);
-    PHeaderMediumEmptyEx(Empty).Size := AlignOffset shl 4;
-
-    // push back
-    Pool := PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR);
-    Left := Pool.Empties.Last.Prev;
-    Left.Next := Empty;
-    Empty.Prev := Left;
-    Empty.Next := @Pool.Empties.Last;
-    Pool.Empties.Last.Prev := Empty;
-
-    // after empty header
-    Result := @PHeaderMediumList(Empty)[0];
-    Exit;
-  end else
-  begin
-    // grow allocated left
-    Size := Header.PreviousSize;
-    Dec(Header);
-    Dec(NativeUInt(Header), Size);
-    if (Size and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then goto ptr_invalid;
-    Flags := Header.Flags;
-    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then goto ptr_invalid;
-    CurrentB16Count := Word(Flags);
-    if (CurrentB16Count <> Size shr 4) then goto ptr_invalid;
-
-    Inc(CurrentB16Count);
-    Inc(Size, SizeOf(B16));
-    Header.B16Count := CurrentB16Count;
-    Inc(Header);
-    Inc(NativeUInt(Header), Size);
-    Header.PreviousSize := Size;
-    Result := Header;
+    Result := Pointer(Self.RaiseInvalidPtr);
     Exit;
   end;
-
-ptr_invalid:
-  Result := nil;
-end;
-
-function TThreadHeap.GetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
-{$ifdef PUREPASCAL}
-var
-  Pool: PK64PoolMedium;
-  Header: PHeaderMedium;
-  Flags: NativeUInt;
-begin
-  if (Align = 0) then
+  {$endif}
+  Prev := Empty.Prev;
+  Next := Empty.Next;
+  if (NativeInt(Prev) or NativeInt(Next) = 0) then
   begin
-    Pool := Self.QK64PoolMedium;
-    if (Pool <> nil) then
+    Self.FEmpties[LastIndex] := Next{nil};
+    Self.FMask := Self.FMask and (not (1 shl LastIndex));
+  end else
+  begin
+    if (Prev = nil) then
     begin
-      Header{Empty} := Pointer(Pool.Empties.First.Next);
-      if (Header{Empty} <> Pointer(@Pool.Empties.Last)) then
-      begin
-        Flags{Size} := PHeaderMediumEmptyEx(Header{Empty}).Size;
-        Inc(Header);
-        Dec(NativeUInt(Header), Flags{Size});
-        if (Flags{Size} and MASK_MEDIUM_SIZE_TEST = MASK_MEDIUM_SIZE_VALUE) and
-          (NativeInt(Header) and MASK_K4_TEST <> 0) then
-        begin
-          Dec(Header);
-          Flags := Flags{Size} shr 4;
-          Inc(B16Count, 2);
-          if (Flags = Header.Flags) and (Flags >= B16Count{ + 2}) then
-          begin
-            // Flags := Flags - B16Count - 1
-            // (B16Count * 16)
-            Dec(Flags, B16Count);
-            Dec(B16Count, 2);
-            Inc(Flags);
-            B16Count := B16Count shl 4;
-
-            // make empty shorter
-            // (Flags * 16)
-            Inc(Header);
-            Inc(NativeUInt(Header), B16Count);
-            Header.PreviousSize := B16Count;
-            Header.Flags := Flags{Empty B16Count};
-            Flags := Flags shl 4;
-            Inc(Header);
-            Inc(NativeUInt(Header), Flags);
-            Header.PreviousSize := Flags;
-
-            // result
-            Dec(Header, 2);
-            Dec(NativeUInt(Header), B16Count);
-            B16Count := B16Count shr 4;
-            Dec(NativeUInt(Header), Flags);
-            Header.Flags := B16Count + {AllocatedFlags}MASK_MEDIUM_ALLOCATED;
-            Result := Pointer(@PHeaderMediumList(Header)[0]);
-            Exit;
-          end;
-          Dec(B16Count, 2);
-        end;
-      end;
-
-      Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyGetMedium(B16Count, 0);
+      Self.FEmpties[LastIndex] := Next;
     end else
     begin
-      Result := Self.PenaltyGetMedium(B16Count, 0);
+      Prev.Next := Next;
     end;
-  end else
-  begin
-    Result := Self.PenaltyGetMedium(B16Count, Align);
-  end;
-end;
-{$else}
-asm
-  // if (Align <> ma16Bytes) then Self.PenaltyGetMedium(..., ...)
-  {$ifdef CPUX86}
-    test ecx, ecx
-  {$else .CPUX64}
-    test r8, r8
-  {$endif}
-  jnz TThreadHeap.PenaltyGetMedium
-
-  // if (Self.QK64PoolMedium = nil) then Self.PenaltyGetMedium(..., 0)
-  {$ifdef CPUX86}
-    mov ecx, [EAX].TThreadHeap.QK64PoolMedium
-    test ecx, ecx
-  {$else .CPUX64}
-    mov r8, [RCX].TThreadHeap.QK64PoolMedium
-    test r8, r8
-  {$endif}
-  jz TThreadHeap.PenaltyGetMedium
-
-  // if (not Contains(Empty)) then Self.PenaltyGetMedium(..., 0)
-  {$ifdef CPUX86}
-    mov eax, [ECX].TK64PoolMedium.Empties.First.Next
-    lea ecx, [ECX].TK64PoolMedium.Empties.Last
-    cmp eax, ecx
-  {$else .CPUX64}
-    mov rcx, [R8].TK64PoolMedium.Empties.First.Next
-    lea r8, [R8].TK64PoolMedium.Empties.Last
-    cmp rcx, r8
-  {$endif}
-  je @penalty_getmem_thread
-
-  // Size := SizeOf(Empty), check bits
-  // Header := HeaderOf(Empty), check 4kb align
-  {$ifdef CPUX86}
-    mov ecx, [EAX].THeaderMediumEmptyEx.Size
-    add eax, 16
-    sub eax, ecx
-    test ecx, MASK_MEDIUM_SIZE_TEST
-    jnz @penalty_getmem_thread
-    test eax, MASK_K4_TEST
-    jz @penalty_getmem_thread
-  {$else .CPUX64}
-    mov r8, [RCX].THeaderMediumEmptyEx.Size
-    add rcx, 16
-    sub rcx, r8
-    test r8, MASK_MEDIUM_SIZE_TEST
-    jnz @penalty_getmem_thread
-    test rcx, MASK_K4_TEST
-    jz @penalty_getmem_thread
-  {$endif}
-
-  // if (Size shr 4 <> Header.Flags) or (Size shr 4 >= B16Count + 2) then
-  //   Self.PenaltyGetMedium(..., 0)
-  {$ifdef CPUX86}
-    shr ecx, 4
-    add edx, 2
-    sub eax, 16
-    cmp ecx, edx
-    jb @penalty_getmem_b16count
-    cmp ecx, [EAX].THeaderMedium.Flags
-    jne @penalty_getmem_b16count
-  {$else .CPUX64}
-    shr r8, 4
-    add rdx, 2
-    sub rcx, 16
-    cmp r8, rdx
-    jb @penalty_getmem_b16count
-    cmp r8, [RCX].THeaderMedium.Flags
-    jne @penalty_getmem_b16count
-  {$endif}
-
-  // allocate and empty reduce routine
-  {$ifdef CPUX86}
-    sub ecx, edx
-    sub edx, 2
-    add ecx, 1
-    shl edx, 4
-
-    add eax, edx
-    mov [EAX + 16].THeaderMedium.PreviousSize, edx
-    mov [EAX + 16].THeaderMedium.Flags, ecx
-    shl ecx, 4
-    add eax, ecx
-    mov [EAX + 32].THeaderMedium.PreviousSize, ecx
-
-    add ecx, edx
-    shr edx, 4
-    sub eax, ecx
-    add edx, MASK_MEDIUM_ALLOCATED
-    mov [EAX].THeaderMedium.Flags, edx
-    lea eax, [EAX + 16]
-  {$else .CPUX64}
-    sub r8, rdx
-    sub rdx, 2
-    add r8, 1
-    shl rdx, 4
-
-    add rcx, rdx
-    mov [RCX + 16].THeaderMedium.PreviousSize, rdx
-    mov [RCX + 16].THeaderMedium.Flags, r8
-    shl r8, 4
-    add rcx, r8
-    mov [RCX + 32].THeaderMedium.PreviousSize, r8
-
-    add r8, rdx
-    shr rdx, 4
-    sub rcx, r8
-    add rdx, MASK_MEDIUM_ALLOCATED
-    mov [RCX].THeaderMedium.Flags, rdx
-    lea rax, [RCX + 16]
-  {$endif}
-
-  // Exit
-  ret
-@penalty_getmem_b16count:
-  // Dec(B16Count, 2)
-  {$ifdef CPUX86}
-    sub edx, 2
-  {$else .CPUX64}
-    sub rdx, 2
-  {$endif}
-@penalty_getmem_thread:
-  // Self := ThreadHeapOf(Header/Empty)
-  {$ifdef CPUX86}
-    and eax, MASK_K64_CLEAR
-    mov eax, [EAX].TK64PoolMedium.ThreadHeap
-  {$else .CPUX64}
-    and rcx, MASK_K64_CLEAR
-    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
-  {$endif}
-@penalty_getmem:
-  {$ifdef CPUX86}
-    xor ecx, ecx
-  {$else .CPUX64}
-    xor r8, r8
-  {$endif}
-  jmp TThreadHeap.PenaltyGetMedium
-end;
-{$endif}
-
-function TThreadHeap.PenaltyGetMedium(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
-label
-  done, ptr_invalid;
-var
-  ALIGN_OFFSETS: PMediumAlignOffsets;
-  Pool: PK64PoolMedium;
-  Empty, Left, Right: PHeaderMediumEmpty;
-  Size, Flags, AlignOffset: NativeUInt;
-  Header: PHeaderMedium;
-  RequirementB16Count: NativeUInt;
-  CurrentB16Count: NativeUInt;
-  VacantB16Count: NativeUInt;
-begin
-  // align offsets
-  ALIGN_OFFSETS := @MEDIUM_ALIGN_OFFSETS[Align];
-
-  // allocation loops
-  Pool := Self.QK64PoolMedium;
-  repeat
-    if (Pool <> nil) then
-    repeat
-      Empty := Pool.Empties.First.Next;
-      if (Empty <> @Pool.Empties.Last) then
-      repeat
-        // check bits
-        Size := PHeaderMediumEmptyEx(Empty).Size;
-        Header := Pointer(NativeUInt(Empty) - Size);
-        if (Size and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then goto ptr_invalid;
-        Flags := Header.Flags;
-        if (Flags and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then goto ptr_invalid;
-        if (Flags and $ffff <> Size shr 4) then goto ptr_invalid;
-
-        // align offset, piece size
-        AlignOffset := ALIGN_OFFSETS.Values[(NativeInt(Header) and MASK_K4_TEST) shr 4];
-        RequirementB16Count := AlignOffset + B16Count;
-        if (Header.B16Count >= RequirementB16Count) then goto done;
-
-        Empty := Empty.Next;
-      until (Empty = @Pool.Empties.Last);
-
-      Pool := Pool.Queue.Next;
-    until (Pool = nil);
-
-    Pool := Self.NewK64PoolMedium;
-    if (Pool = nil) then
+    if (Next <> nil) then
     begin
-      Result := nil{Self.ErrorOutOfMemory};
-      Exit;
-    ptr_invalid:
+      Next.Prev := Prev;
+    end;
+  end;
+
+  // enqueue
+  NewIndex := Flags shr 5;
+  with Self do
+  begin
+    Next := FEmpties[NewIndex];
+    {$ifdef DEBUG}
+    if ((Self.FMask shr NewIndex) and 1 <> Byte(Next <> nil)) then
+    begin
       Result := Pointer(Self.RaiseInvalidPtr);
       Exit;
     end;
-  until (False);
-
-done:
-  // make empty piece shorter (or remove)
-  CurrentB16Count := Header.B16Count;
-  VacantB16Count := CurrentB16Count - RequirementB16Count;
-  if (VacantB16Count > 1) then
-  begin
-    VacantB16Count := VacantB16Count - 1;
-    PHeaderMediumList(Header)[CurrentB16Count].PreviousSize := VacantB16Count shl 4;
-    PHeaderMediumList(Header)[RequirementB16Count].Flags := {NewB16Count, Align: ma16Bytes, Allocated: False}VacantB16Count;
-  end else
-  begin
-    Inc(B16Count, VacantB16Count);
-    Empty := Pointer(@PHeaderMediumList(Header)[CurrentB16Count - 1]);
-    Left := Empty.Prev;
-    Right := Empty.Next;
-    Left.Next := Right;
-    Right.Prev := Left;
+    {$endif}
+    FEmpties[NewIndex] := Empty;
+    FMask := FMask or (1 shl NewIndex);
   end;
+  Empty.Next := Next;
+  if (Next <> nil) then
+  begin
+    Next.Prev := Empty;
+  end;
+  Empty.Prev := nil;
 
-  // offset
+  // result
+  Dec(NativeUInt(Empty), Empty.Size);
+  Result := Pointer(NativeUInt(Empty) - PHeaderMedium(Empty).PreviousSize);
+end;
+
+// returns Pointer after aligning erea
+// called in .GetAdvanced and .GrowPenalty
+// (before left) must be allocated
+function TMediumManager.AlignOffsetEmpty(Header: PHeaderMedium; AlignOffset: NativeUInt): Pointer;
+label
+  invalid_ptr;
+var
+  Flags: NativeUInt;
+  Empty, Next: PHeaderMediumEmpty;
+begin
+  Dec(AlignOffset, 16);
+  Dec(Header);
   if (AlignOffset <> 0) then
   begin
-    Header := OffsetHeaderMediumEmpty(Header, AlignOffset);
-    if (Header = nil) then goto ptr_invalid;
-  end;
+    { new empty }
+    Empty := Pointer(Header);
+    Dec(NativeUInt(Header), AlignOffset);
+    Empty.Size := AlignOffset;
+    Header.Flags := AlignOffset;
 
-  // result
-  CurrentB16Count := B16Count;
-  Header.Flags := CurrentB16Count + ALIGN_OFFSETS.AllocatedFlags;
-  PHeaderMediumList(Header)[CurrentB16Count].PreviousSize := CurrentB16Count shl 4;
-  Result := Pointer(@PHeaderMediumList(Header)[0]);
-end;
-
-{
-  TAllocatedMediumInformation = packed record
-    SelfRightB16Count: Word:12;
-    Reserved: Byte:4;
-    Align: TMemoryAlign:3;
-    RightEmpty: Boolean:1;
-    LeftEmptyB16Count: Word:12;
-  end;
-}
-
-const
-  OFFSET_MEDIUM_LEFT_B16COUNT = (32 - 12);
-  FLAG_MEDIUM_RIGHT_EMPTY = NativeUInt(1 shl (OFFSET_MEDIUM_ALIGN + 3));
-
-function InspectAllocatedMedium(P: Pointer): NativeUInt;
-label
-  ptr_invalid;
-var
-  StoredP: Pointer;
-  Header: PHeaderMedium;
-  Size, Flags: NativeUInt;
-begin
-  // flags
-  StoredP := P;
-  Header := P;
-  Dec(Header);
-  Result := Header.Flags;
-  if (Result and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then
-    goto ptr_invalid;
-  Result := Result and (MASK_MEDIUM_ALIGN or MAX_MEDIUM_B16COUNT);
-
-  // previous
-  Size := Header.PreviousSize;
-  if (Size <> 0) then
-  begin
-    Dec(Header);
-    Dec(NativeUInt(Header), Size);
-    if (Size and MASK_MEDIUM_SIZE_TEST <> MASK_MEDIUM_SIZE_VALUE) then goto ptr_invalid;
-    Flags := Header.Flags;
-    if (Flags and MASK_MEDIUM_TEST <> MASK_MEDIUM_VALUE) then goto ptr_invalid;
-    if (Word(Flags) = Word(Size shr 4)) then
+    // inline IncludeEmpty
     begin
-      if (Flags and MASK_MEDIUM_ALLOCATED = 0) then
+      AlignOffset := Byte(MEDIUM_INDEXES[AlignOffset shr 4]);
+      with Self do
       begin
-        Result := Result + Cardinal((Flags + 1) shl OFFSET_MEDIUM_LEFT_B16COUNT);
+        Next := FEmpties[AlignOffset];
+        FEmpties[AlignOffset] := Empty;
+        FMask := FMask or (1 shl AlignOffset);
       end;
-    end else
-    begin
-    ptr_invalid:
-      Result := High(NativeUInt);
-      Exit;
+      Empty.Next := Next;
+      if (Next <> nil) then
+      begin
+        Next.Prev := Empty;
+      end;
+      Empty.Prev := nil;
     end;
+
+    Result := @Empty.SiblingPtr;
+    Exit;
   end else
   begin
-    if (Header <> Pointer(@PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).Items)) then
-      goto ptr_invalid;
-  end;
+    { grow allocated 16 bytes }
+    AlignOffset := Header.PreviousSize;
+    Dec(Header);
+    if (AlignOffset and (MASK_MEDIUM_EMPTY_TEST and MASK_MEDIUM_ALLOCATED_TEST) <> 0) then goto invalid_ptr;
+    Dec(NativeUInt(Header), AlignOffset);
+    Flags := Header.Flags;
+    if (Word(Flags) <> Word(AlignOffset)) then goto invalid_ptr;
+    Flags := Flags and MASK_MEDIUM_ALLOCATED_TEST;
+    Inc(AlignOffset, 16);
+    if (Flags <> MASK_MEDIUM_ALLOCATED_VALUE) then goto invalid_ptr;
 
-  // right
-  Size := NativeUInt(Word(Result)) shl 4;
-  Header := StoredP;
-  Inc(NativeUInt(Header), Size);
-  if (Size <> Header.PreviousSize) then goto ptr_invalid;
-  StoredP := Pointer(@PHeaderMediumList(Header)[0]);
-  Flags := Header.Flags;
-  if (Flags and MASK_MEDIUM_TEST <> MASK_MEDIUM_VALUE) then goto ptr_invalid;
-  if (Flags and MASK_MEDIUM_ALLOCATED = 0) then
-  begin
-    Size := {B16Count}Word(Flags);
-    Inc(Result, FLAG_MEDIUM_RIGHT_EMPTY + 1);
-    Inc(Result, {B16Count}Size);
-    Size := Size shl 4;
-    Header := StoredP;
-    Inc(NativeUInt(Header), Size);
-    if (Size <> Header.PreviousSize) then goto ptr_invalid;
+    Header.WSize := AlignOffset;
+    Inc(NativeUInt(Header), AlignOffset);
+    PHeaderMediumEmpty(Header).Size := AlignOffset;
+    Result := @PHeaderMediumEmpty(Header).SiblingPtr;
+    Exit;
+
+  invalid_ptr:
+    Result := Pointer(Self.RaiseInvalidPtr);
   end;
 end;
 
-function TThreadHeap.FreeMedium(P: Pointer): Integer;
-const
-  MAX_MEDIUMEMPTY_SIZE = SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium);
-{$ifdef PUREPASCAL}
+function TMediumManager.Get(B16Count: NativeUInt): Pointer;
+label
+  index_done, invalid_ptr, retrieve_result;
 var
+  Mask, Index: NativeInt;
+  P: PByte;
+  Empty, Next: PHeaderMediumEmpty;
   Header: PHeaderMedium;
-  Flags, EmptyFlags: NativeUInt;
-  Pool: PK64PoolMedium;
+  Size, Last: NativeUInt;
 begin
-  // header flags
-  Header := P;
-  Dec(Header);
-  Flags := Header.Flags;
+  Index{Mask} := MEDIUM_MASKS_CLEAR[NativeInt(MEDIUM_INDEXES[B16Count - 1])] and Self.FMask;
 
-  // if (Prev.Allocated) and (Next.Empty) then Grow(Next)
-  EmptyFlags := Flags and MASK_MEDIUM_ALLOCATED_TEST;
-  if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
+  if (Index{Mask} <> 0) then
   begin
-    EmptyFlags := PHeaderMedium(NativeUInt(Header) - Header.PreviousSize - SizeOf(THeaderMedium)).Flags;
-    EmptyFlags := EmptyFlags and MASK_MEDIUM_ALLOCATED_TEST;
-    if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
+    // Index := FirstBit(Mask)
+    Mask := Index{Mask};
+    P := Pointer(@Mask);
+    Inc(PWord(P), Byte(PWord(P)^ = 0));
+    Inc(P, Byte(P^ = 0));
+    Index := (NativeUInt(P) - NativeUInt(@Mask)) shl 3 + BIT_SCANS[P^];
+
+  index_done:
+    Empty := Self.FEmpties[Index];
+    {$ifdef DEBUG}
+    if (Empty = nil) then goto invalid_ptr;
+    {$endif}
+
+    Size := B16Count shl 4;
+    Last := Empty.Size;
+    {$ifdef DEBUG}
+    if (Last and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then goto invalid_ptr;
+    if (Index <> MEDIUM_INDEXES[Last shr 4]) then goto invalid_ptr;
+    {$endif}
+    Header := Pointer(@Empty.Size);
+    Dec(NativeUInt(Header), Last);
+    if (NativeInt(Header) and MASK_K4_TEST <> 0) then
     begin
-      Inc(Header);
-      Flags := (Flags shl 4) and ($ffff shl 4);
-      Inc(NativeUInt(Header), Flags);
-      EmptyFlags := Header.Flags;
-      if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) and
-        (Header.PreviousSize = Flags) then
+      // store Result
+      Pointer(Mask) := Header;
+
+      // Header actualize, Vacant := Last - Size
+      Dec(Header);
+      {$ifdef DEBUG}
+      if (Header.Flags <> Last) then goto invalid_ptr;
+      {$endif}
+      Dec(Last, Size);
+      {$ifdef DEBUG}
+      if (NativeInt(Last) < 0) then goto invalid_ptr;
+      {$endif}
+
+      if (Last{Vacant} > 32) then
       begin
-        // MediumEmpty.Size := MediumEmpty.Size + Size + 16
-        EmptyFlags := EmptyFlags shl 4;
-        Inc(Flags, 16);
-        Inc(NativeUInt(Header{Empty}), EmptyFlags);
-        Inc(Flags, EmptyFlags);
-        if (Flags <> MAX_MEDIUMEMPTY_SIZE) then
+        // mark allocated (Result)
         begin
-          PHeaderMediumEmptyEx(Header{Empty}).Size := Flags;
+          // [left...
+          Inc(Size, MASK_MEDIUM_ALLOCATED_VALUE);
+          Header.Flags := Size;
+          Dec(Size, MASK_MEDIUM_ALLOCATED_VALUE);
 
-          // new empty flags
-          Dec(NativeUInt(Header), Flags);
-          Flags := Flags shr 4;
-          Header.Flags := Flags;
-
-          // result
-          Result := FREEMEM_DONE;
-          Exit;
-        end else
-        begin
-          Pool := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR);
-          Result := Pool.ThreadHeap.DisposeK64PoolMedium(Pool);
-          Exit;
+          // ...right]
+          Inc(Header);
+          Inc(NativeUInt(Header), Size);
+          Header.PreviousSize := Size;
         end;
+
+        // mark new empty (Vacant - SizeOf(Header))
+        begin
+          // [left...
+          Dec(Last, 16);
+          Header.Flags := Last;
+
+          // ...right]
+          Inc(NativeUInt(Header), Last);
+          PHeaderMediumEmpty(Header).Size := Last;
+        end;
+
+        // detect last(Size+1/16) and new(Last) indexes
+        begin
+          Inc(Size, Last);
+          Last := Last shr 4;
+          Size := Size shr 4;
+          Last{new} := MEDIUM_INDEXES[Last];
+          Size{last} := MEDIUM_INDEXES[Size + 1];
+        end;
+        if (Size = Last) then goto retrieve_result{in asm: inline ret};
+
+        // inline ChangeEmptyIndex
+        begin
+          // dequeue
+          Empty := PHeaderMediumEmpty(Header);
+          Next := Empty.Next;
+          Self.FEmpties[Size{last}] := Next;
+
+          // optional clear prev, exclude bit
+          if (Next <> nil) then
+          begin
+            Next.Prev := nil;
+            Size{NewFMask} := 0;
+          end else
+          begin
+            Size{NewFMask} := (1 shl Size{lasr});
+          end;
+          Size{NewFMask} := Size{NewFMask} xor NativeUInt(Self.FMask);
+
+          // enqueue
+          Next := Self.FEmpties[Last{new}];
+          Empty.Next := Next;
+          Self.FEmpties[Last{new}] := Empty;
+          Self.FMask := Size{NewFMask} or (1 shl Last{new});
+          if (Next <> nil) then
+          begin
+            Next.Prev := Empty;
+          end;
+        end;
+
+        goto retrieve_result{in asm: inline ret};
       end else
       begin
-        Dec(Header);
-        Dec(NativeUInt(Header), Flags);
+        // full: left allocated
+        Inc(Size, Last);
+        Header.Flags := Size + MASK_MEDIUM_ALLOCATED_VALUE;
+        Inc(NativeUInt(Header), Size);
+        PHeaderMediumEmpty(Header).Size := Size;
+
+        // exclude empty
+        Result := Self.ExcludeEmpty(MEDIUM_INDEXES[Size shr 4], Pointer(Header));
       end;
-    end;
-  end;
-
-  Inc(Header);
-  Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyFreeMedium(Pointer(Header));
-end;
-{$else}
-asm
-  // if (not Self.Allocated) or (not Prev.Allocated) or
-  //  (not Next.Allocated) then PenaltyFreeMedium
-  {$ifdef CPUX86}
-    mov eax, [EDX - 16].THeaderMedium.Flags
-    mov ecx, MASK_MEDIUM_ALLOCATED_TEST
-    and ecx, eax
-    cmp ecx, MASK_MEDIUM_ALLOCATED_VALUE
-    jne @penalty_freemem
-
-    lea ecx, [edx - 32]
-    sub ecx, [EDX - 16].THeaderMedium.PreviousSize
-    movzx eax, ax
-    mov ecx, [ECX].THeaderMedium.Flags
-    shl eax, 4
-    and ecx, MASK_MEDIUM_ALLOCATED_TEST
-    add edx, eax
-    cmp ecx, MASK_MEDIUM_ALLOCATED_VALUE
-    jne @penalty_freemem_restore
-
-    mov ecx, [EDX].THeaderMedium.Flags
-    test ecx, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_freemem_restore
-    shl ecx, 4
-    cmp eax, [EDX].THeaderMedium.PreviousSize
-    jne @penalty_freemem_restore
-  {$else .CPUX64}
-    mov rcx, [RDX - 16].THeaderMedium.Flags
-    mov r8, MASK_MEDIUM_ALLOCATED_TEST
-    and r8, rcx
-    cmp r8, MASK_MEDIUM_ALLOCATED_VALUE
-    jne @penalty_freemem
-
-    lea r8, [rdx - 32]
-    sub r8, [RDX - 16].THeaderMedium.PreviousSize
-    movzx rcx, cx
-    mov r8, [R8].THeaderMedium.Flags
-    shl rcx, 4
-    and r8, MASK_MEDIUM_ALLOCATED_TEST
-    add rdx, rcx
-    cmp r8, MASK_MEDIUM_ALLOCATED_VALUE
-    jne @penalty_freemem_restore
-
-    mov r8, [RDX].THeaderMedium.Flags
-    test r8, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_freemem_restore
-    shl r8, 4
-    cmp rcx, [RDX].THeaderMedium.PreviousSize
-    jne @penalty_freemem_restore
-  {$endif}
-
-  // if (MediumEmpty.Size + Size + 16 = MAX_MEDIUMEMPTY_SIZE) then
-  //   Pool.ThreadHeap.DisposeK64PoolMedium(Pool)
-  {$ifdef CPUX86}
-    add eax, ecx
-    add edx, ecx
-    cmp eax, MAX_MEDIUMEMPTY_SIZE - 16
-    lea eax, [eax + 16]
-  {$else .CPUX64}
-    add rcx, r8
-    add rdx, r8
-    cmp rcx, MAX_MEDIUMEMPTY_SIZE - 16
-    lea rcx, [rcx + 16]
-  {$endif}
-  je @dispose_pool
-
-  // result
-  {$ifdef CPUX86}
-    mov [EDX].THeaderMediumEmptyEx.Size, eax
-    sub edx, eax
-    shr eax, 4
-    mov [EDX].THeaderMedium.Flags, eax
-
-    mov eax, FREEMEM_DONE
-  {$else .CPUX64}
-    mov [RDX].THeaderMediumEmptyEx.Size, rcx
-    sub rdx, rcx
-    shr rcx, 4
-    mov [RDX].THeaderMedium.Flags, rcx
-
-    mov rax, FREEMEM_DONE
-  {$endif}
-
-  // Exit
-  ret
-@dispose_pool:
-  {$ifdef CPUX86}
-    and edx, MASK_K64_CLEAR
-    mov eax, [EDX].TK64PoolMedium.ThreadHeap
-  {$else .CPUX64}
-    and rdx, MASK_K64_CLEAR
-    mov rcx, [RDX].TK64PoolMedium.ThreadHeap
-  {$endif}
-  jmp TThreadHeap.DisposeK64PoolMedium
-@penalty_freemem_restore:
-  {$ifdef CPUX86}
-    sub edx, eax
-  {$else .CPUX64}
-    sub rdx, rcx
-  {$endif}
-@penalty_freemem:
-  {$ifdef CPUX86}
-    mov eax, MASK_K64_CLEAR
-    and eax, edx
-    mov eax, [EAX].TK64PoolMedium.ThreadHeap
-  {$else .CPUX64}
-    mov rcx, MASK_K64_CLEAR
-    and rcx, rdx
-    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
-  {$endif}
-  jmp TThreadHeap.PenaltyFreeMedium
-end;
-{$endif}
-
-function TThreadHeap.PenaltyFreeMedium(P: Pointer): Integer;
-var
-  Information: NativeUInt;
-  Pool: PK64PoolMedium;
-  Empty, Left, Right: PHeaderMediumEmpty;
-  Size: NativeUInt;
-begin
-  // inspect
-  Empty := P;
-  Information := InspectAllocatedMedium(P);
-  if (Information > ((1 shl OFFSET_MEDIUM_LEFT_B16COUNT) - 1)) then
-  begin
-    if (Information = High(NativeUInt)) then
-    begin
-      Result := {Self}PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR).ThreadHeap.ErrorInvalidPtr;
-      Exit;
     end else
     begin
-      // left empty: remove from pool
-      Dec(Empty, 2);
-      Left := Empty.Prev;
-      Right := Empty.Next;
-      Left.Next := Right;
-      Right.Prev := Left;
-      Inc(Empty, 2);
+      // 4Kb alignment penalty
+      Result := Self.GetAdvanced(Size shr 4, 0);
+    end;
+
+    Exit;
+  end else
+  begin
+    if (PThreadHeap(NativeInt(@Self) - NativeInt(@PThreadHeap(nil).FMedium)).NewK64PoolMedium <> nil) then
+    begin
+      Index := 31;
+      goto index_done;
+    end else
+    begin
+      Result := Self.ErrorOutOfMemory;
+      Exit;
     end;
   end;
 
-  // mark empty header
-  // optional dispose medium pool
-  Size := NativeUInt(Word(Information)) shl 4;
-  Dec(Empty);
-  Inc(NativeUInt(Empty), Size);
-  Inc(Size, (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4);
-  PHeaderMediumEmptyEx(Empty).Size := Size;
-  if (Size <> SizeOf(THeaderMediumList) - {Start}SizeOf(THeaderMedium)) then
-  begin
-    Dec(NativeUInt(Empty), Size);
-    PHeaderMedium(Empty).Flags := Size shr 4;
+invalid_ptr:
+  Result := Pointer(Self.RaiseInvalidPtr);
+  Exit;
 
-    // right not empty: push back
-    if (Information and FLAG_MEDIUM_RIGHT_EMPTY = 0) then
-    begin
-      Pool := PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR);
-      Inc(NativeUInt(Empty), Size);
-      Left := Pool.Empties.Last.Prev;
-      Left.Next := Empty;
-      Empty.Prev := Left;
-      Empty.Next := @Pool.Empties.Last;
-      Pool.Empties.Last.Prev := Empty;
-    end;
+retrieve_result:
+  Result := Pointer(Mask);
+end;
+
+function TMediumManager.GetAdvanced(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
+label
+  index_done, new_k64pool, invalid_ptr, retrieve_result;
+var
+  ALIGN_OFFSETS: PMediumAlignOffsets;
+  Mask, Index, Counter: NativeInt;
+  P: PByte;
+  Empty: PHeaderMediumEmpty;
+  Header: PHeaderMedium;
+  Last, Size, AlignOffset: NativeUInt;
+  _Self, StoredSelf: PMediumManager;
+begin
+  // basic parameters
+  ALIGN_OFFSETS := @MEDIUM_ALIGN_OFFSETS[Align];
+  StoredSelf := @Self;
+  Size := B16Count shl 4;
+  _Self := @Self;
+
+  // basic mask (another clear algorithm), allocation
+  Index{Mask} := MEDIUM_MASKS_CLEAR[NativeUInt(MEDIUM_INDEXES[B16Count]) - 1] and _Self.FMask;
+  if (Index{Mask} <> 0) then
+  begin
+    Mask := Index{Mask};
+    repeat
+      // Index := FirstBit(Mask)
+      // Mask.ExcludeBit(Index)
+      P := Pointer(@Mask);
+      Inc(PWord(P), Byte(PWord(P)^ = 0));
+      Inc(P, Byte(P^ = 0));
+      Index := (NativeUInt(P) - NativeUInt(@Mask)) shl 3 + BIT_SCANS[P^];
+      Mask := Mask xor (1 shl Index);
+
+    index_done:
+      Empty := _Self.FEmpties[Index];
+      {$ifdef DEBUG}
+      if (Empty = nil) then goto invalid_ptr;
+      {$endif}
+
+      // check each empty (-counter limit)
+      Counter := ((Index + (32 - 27)) and 32) shl (16 - 5) + (-16);
+      repeat
+        // take piece header
+        begin
+          Last := Empty.Size;
+          {$ifdef DEBUG}
+          if (Last and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then goto invalid_ptr;
+          if (Index <> MEDIUM_INDEXES[Last shr 4]) then goto invalid_ptr;
+          {$endif}
+          Header := Pointer(Empty);
+          Dec(NativeUInt(Header), Last);
+          {$ifdef DEBUG}
+          if (Header.Flags <> Last) then goto invalid_ptr;
+          {$endif}
+        end;
+
+        // align offset
+        AlignOffset := ALIGN_OFFSETS.Values[(NativeInt(Header) and MASK_K4_TEST) shr 4];
+
+        // is size suitable
+        if (Last{Header.Size} >= (Size + AlignOffset){Requirement}) then
+        begin
+          // actualize header, Vacant := Last - AlignOffset - Size, store (Result header)
+          Dec(Last, AlignOffset);
+          Inc(NativeUInt(Header), AlignOffset);
+          Dec(Last, Size);
+          Pointer(Mask) := Header;
+
+          if (Last{Vacant} > 32) then
+          begin
+            // mark allocated (Result)
+            begin
+              // [left...
+              Header.Flags := Size + ALIGN_OFFSETS.AllocatedFlags;
+
+              // ...right]
+              Inc(Header);
+              Inc(NativeUInt(Header), Size);
+              Header.PreviousSize := Size;
+            end;
+
+            // mark new empty (Vacant - SizeOf(Header))
+            begin
+              // [left...
+              Dec(Last, 16);
+              Header.Flags := Last;
+
+              // ...right]
+              Inc(NativeUInt(Header), Last);
+              PHeaderMediumEmpty(Header).Size := Last;
+            end;
+
+            // detect last(Size + 16) and new(Last) indexes
+            begin
+              Inc(Size, AlignOffset);
+              Inc(Size, Last);
+              Last := Last shr 4;
+              Size := Size shr 4;
+              Last{new} := MEDIUM_INDEXES[Last];
+              Size{last} := MEDIUM_INDEXES[Size + 1];
+            end;
+
+            // optional empty change index
+            if (Size = Last) then
+            begin
+              // old index
+              if (AlignOffset = 0) then goto retrieve_result;
+            end else
+            begin
+              // change index
+              StoredSelf.ChangeEmptyIndex((Last{new} shl 5) + Size{last}, Pointer(Header));
+              if (AlignOffset = 0) then goto retrieve_result;
+            end;
+          end else
+          begin
+            // full: left allocated
+            Inc(Size, Last);
+            Header.Flags := Size + ALIGN_OFFSETS.AllocatedFlags;
+            Inc(NativeUInt(Header), Size);
+            PHeaderMediumEmpty(Header).Size := Size;
+
+            // exclude empty
+            StoredSelf.ExcludeEmpty(MEDIUM_INDEXES[(Size + AlignOffset) shr 4], PHeaderMediumEmpty(Header));
+            if (AlignOffset = 0) then goto retrieve_result;
+          end;
+
+          // align offset
+          Result := StoredSelf.AlignOffsetEmpty(Pointer(Mask), AlignOffset);
+          Exit;
+        end;
+
+        // next empty/counter
+        Empty := PHeaderMediumEmpty(NativeUInt(Header) + Last){Empty}.Next;
+        Counter := Counter + 2;
+      until (NativeInt(Empty) and Counter = 0);
+
+      _Self := StoredSelf;
+    until (Mask = 0);
+    goto new_k64pool;
   end else
   begin
-    Pool := PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR);
-    Result := Pool.ThreadHeap.DisposeK64PoolMedium(Pool);
+  new_k64pool:
+    if (PThreadHeap(NativeInt(_Self) - NativeInt(@PThreadHeap(nil).FMedium)).NewK64PoolMedium <> nil) then
+    begin
+      _Self := StoredSelf;
+      Index := 31;
+      goto index_done;
+    end else
+    begin
+      Result := StoredSelf.ErrorOutOfMemory;
+      Exit;
+    end;
+  end;
+
+invalid_ptr:
+  Result := Pointer(StoredSelf.RaiseInvalidPtr);
+  Exit;
+
+retrieve_result:
+  Result := Pointer(Mask + SizeOf(THeaderMedium));
+end;
+
+function TMediumManager.Reduce(P: Pointer; NewB16Count: NativeUInt{Word}): Pointer;
+label
+  invalid_ptr_retrieve_flags, invalid_ptr_retrieve_last,
+  invalid_ptr_retrieve, invalid_ptr;
+var
+  Header: PHeaderMedium;
+  Last, Size, Flags: NativeUInt;
+  Empty, Next: PHeaderMediumEmpty;
+begin
+  // actualize
+  Size := NativeUInt(Word(NewB16Count)) shl 4;
+
+  // last size, next header
+  Header := Pointer(NativeInt(P) - SizeOf(THeaderMedium));
+  Last := Header.Flags;
+  if (Last and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then goto invalid_ptr;
+  Last := Word(Last);
+  Inc(Header);
+  Inc(NativeUInt(Header), Last);
+  if (Header.PreviousSize <> Last) then goto invalid_ptr_retrieve;
+
+  // vacant, reduce + empty optional: grow/new, Result
+  Dec(Last, Size);
+  Flags := Header.Flags;
+  if (Flags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) then
+  begin
+    { grow empty piece }
+
+    // check empty previous size
+    begin
+      Inc(NativeUInt(Header), Flags);
+      if (PHeaderMediumEmpty(Header).Size <> Flags) then goto invalid_ptr_retrieve_flags;
+    end;
+
+    // mark new empty
+    begin
+      Inc(Flags, Last);
+      PHeaderMediumEmpty(Header).Size := Flags;
+      Dec(NativeUInt(Header), Flags);
+      Header.Flags := Flags;
+    end;
+
+    // mark new allocated (Result)
+    begin
+      Header.PreviousSize := Size;
+      Dec(Header);
+      Dec(NativeUInt(Header), Size);
+      Header.WSize := Size;
+      Inc(Header);
+    end;
+
+    // store full size (Result + Empty), empty indexes
+    begin
+      Inc(Size, Flags);
+      Last := NativeUInt(-(NativeInt(Last) - NativeInt(Flags)));
+      Flags := Byte(MEDIUM_INDEXES[Flags shr 4]);
+      Last := Byte(MEDIUM_INDEXES[Last shr 4]);
+    end;
+
+    // Result (optional call empty change index)
+    if (Flags = Last) then
+    begin
+      Result := Pointer(Header);
+    end else
+    begin
+      Inc(NativeUInt(Header), Size);
+      Result :=
+      {$ifdef CPUX86}
+      PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+      {$else}
+      Self
+      {$endif}
+        .ChangeEmptyIndex((Flags shl 5) + Last, Pointer(Header));
+    end;
+    Exit;
+  end else
+  begin
+    // check allocated
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then
+      goto invalid_ptr_retrieve_last;
+
+    { make empty piece: vacant - 16 }
+
+    // mark new empty
+    begin
+      Dec(Last, 16);
+      Header.PreviousSize := Last;
+      Dec(Header);
+      Dec(NativeUInt(Header), Last);
+      Header.Flags := Last;
+    end;
+
+    // mark new allocated (Result)
+    begin
+      Header.PreviousSize := Size;
+      Dec(Header);
+      Dec(NativeUInt(Header), Size);
+      Header.WSize := Size;
+      Inc(Header);
+    end;
+
+    // inline IncludeEmpty
+    begin
+      Inc(Size, Last);
+      Empty := Pointer(Header);
+      Inc(NativeUInt(Empty), Size);
+      Last := Byte(MEDIUM_INDEXES[Last shr 4]);
+      with {$ifdef CPUX86}
+             PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+           {$else}
+             Self
+           {$endif} do
+      begin
+        Next := FEmpties[Last];
+        FEmpties[Last] := Empty;
+        FMask := FMask or (1 shl Last);
+      end;
+      Empty.Next := Next;
+      if (Next <> nil) then
+      begin
+        Next.Prev := Empty;
+      end;
+      Empty.Prev := nil;
+    end;
+
+    // done
+    Result := Pointer(Header);
     Exit;
   end;
 
-  // result
+invalid_ptr_retrieve_flags:
+  {$ifdef CPUX86}
+  Dec(NativeUInt(Header), Flags);
+  {$endif}
+
+invalid_ptr_retrieve_last:
+  {$ifdef CPUX86}
+  Inc(Last, Size);
+  {$endif}
+
+invalid_ptr_retrieve:
+  {$ifdef CPUX86}
+  Dec(NativeUInt(Header), Last);
+  {$endif}
+
+invalid_ptr:
+  Result := Pointer(
+    {$ifdef CPUX86}
+    PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+    {$else}
+    Self
+    {$endif}
+    .RaiseInvalidPtr
+  );
+end;
+
+function TMediumManager.Grow(P: Pointer; GrowFlags: NativeUInt{NewB16Count: Word; Copy: Boolean}): Pointer;
+label
+  invalid_ptr_retrieve_empty, invalid_ptr_retrieve, invalid_ptr, penalty;
+var
+  Header: PHeaderMedium;
+  Flags, EmptyFlags: NativeUInt;
+begin
+  // header(P), flags
+  begin
+    Header := P;
+    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
+    GrowFlags := GrowFlags shl 4;
+  end;
+
+  // check allocated, next header, growing size
+  begin
+    EmptyFlags{Buffer} := Flags and MASK_MEDIUM_ALLOCATED_TEST;
+    Flags := Word(Flags);
+    if (EmptyFlags{Buffer} <> MASK_MEDIUM_ALLOCATED_VALUE) then goto invalid_ptr;
+    Inc(NativeUInt(Header), Flags);
+    Dec(GrowFlags, Flags);
+    if (Header.PreviousSize <> Flags) then goto invalid_ptr_retrieve;
+  end;
+
+  // is next header empty
+  EmptyFlags := Header.Flags;
+  if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) then
+  begin
+    // is empty size enough
+    begin
+      Inc(EmptyFlags, 16);
+      if (Word(EmptyFlags) < Word(GrowFlags)) then goto penalty;
+      Dec(EmptyFlags, 16);
+    end;
+
+    // growing size
+    GrowFlags := Word(GrowFlags);
+
+    // check empty
+    begin
+      Inc(NativeUInt(Header), EmptyFlags);
+      if (PHeaderMediumEmpty(Header).Size <> EmptyFlags) then goto invalid_ptr_retrieve_empty;
+    end;
+
+    // is (empty size + 16 - growing size > 32) --> (empty size - growing size > 16)
+    Dec(EmptyFlags, GrowFlags);
+    if (NativeInt(EmptyFlags) > 16) then
+    begin
+      { reduce empty }
+
+      // new allocted size, store last empty size
+      begin
+        Inc(Flags, GrowFlags);
+        Inc(GrowFlags, EmptyFlags);
+      end;
+
+      // mark new empty
+      begin
+        PHeaderMediumEmpty(Header).Size := EmptyFlags;
+        Dec(NativeUInt(Header), EmptyFlags);
+        Header.Flags := EmptyFlags;
+      end;
+
+      // mark new allocated (Result)
+      begin
+        Header.PreviousSize := Flags;
+        Dec(Header);
+        Dec(NativeUInt(Header), Flags);
+        Header.WSize := Flags;
+        Inc(Header);
+      end;
+
+      // store full size (Result + Empty), empty indexes
+      begin
+        Inc(Flags, EmptyFlags);
+        GrowFlags := Byte(MEDIUM_INDEXES[GrowFlags shr 4]);
+        EmptyFlags := Byte(MEDIUM_INDEXES[EmptyFlags shr 4]);
+      end;
+
+      // Result (optional call empty change index)
+      if (GrowFlags = EmptyFlags) then
+      begin
+        Result := Pointer(Header);
+      end else
+      begin
+        Inc(NativeUInt(Header), Flags);
+        Result :=
+        {$ifdef CPUX86}
+        PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+        {$else}
+        Self
+        {$endif}
+          .ChangeEmptyIndex((EmptyFlags shl 5) + GrowFlags, Pointer(Header));
+      end;
+      Exit;
+    end else
+    begin
+      { exclude empty }
+
+      // empty index, new allocated size
+      begin
+        Inc(EmptyFlags, GrowFlags);
+        Inc(Flags, 16);
+        Inc(Flags, EmptyFlags);
+        EmptyFlags := Byte(MEDIUM_INDEXES[EmptyFlags shr 4]);
+      end;
+
+      // mark allocated
+      begin
+        PHeaderMediumEmpty(Header).Size := Flags;
+        Dec(NativeUInt(Header), Flags);
+        Header.WSize := Flags;
+        Inc(NativeUInt(Header), Flags);
+      end;
+
+      // exclude empty
+      Result :=
+      {$ifdef CPUX86}
+      PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+      {$else}
+      Self
+      {$endif}
+        .ExcludeEmpty(EmptyFlags, Pointer(Header));
+      Exit;
+    end;
+  end else
+  begin
+    if (EmptyFlags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then
+      goto invalid_ptr_retrieve;
+
+  penalty:
+    Dec(NativeUInt(Header), Flags);
+    Inc(GrowFlags, Flags);
+    Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+      .GrowPenalty(Pointer(Header), GrowFlags);
+    Exit;
+  end;
+
+invalid_ptr_retrieve_empty:
+  Dec(NativeUInt(Header), EmptyFlags);
+
+invalid_ptr_retrieve:
+  Dec(NativeUInt(Header), Flags);
+
+invalid_ptr:
+  Result := Pointer(PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.
+    FMedium.RaiseInvalidPtr);
+end;
+
+function TMediumManager.GrowPenalty(P: Pointer; GrowFlags: NativeUInt{NewSize: Word; shifted Copy: Boolean}): Pointer;
+var
+  _Self: PMediumManager;
+  ALIGN_OFFSETS: PMediumAlignOffsets;
+  Header, Ptr: PHeaderMedium;
+  CurrentSize, TotalSize, LeftSize, AlignOffset: NativeUInt;
+  Empty, Next, RightEmpty: PHeaderMediumEmpty;
+  Stored: record
+    P: Pointer;
+    B16Count: NativeUInt;
+    RightEmpty: PHeaderMediumEmpty;
+  end;
+begin
+  // stored, current size, total size
+  begin
+    Header := P;
+    Stored.P := Header;
+    Dec(Header);
+    CurrentSize := Header.Flags;
+    ALIGN_OFFSETS := @MEDIUM_ALIGN_OFFSETS[CurrentSize shr OFFSET_MEDIUM_ALIGN];
+    Inc(Header);
+    CurrentSize := Word(CurrentSize);
+    Inc(NativeUInt(Header), CurrentSize);
+    TotalSize{RightSize} := Header.Flags;
+    AlignOffset{Mask} := NativeUInt(-NativeInt(Byte(TotalSize and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE)));
+    Stored.RightEmpty := Pointer((NativeUInt(Header) + TotalSize{RightSize}) and AlignOffset{Mask});
+    Dec(NativeUInt(Header), CurrentSize);
+    Dec(Header);
+    Inc(TotalSize{RightSize}, 16);
+    TotalSize{RightSize} := TotalSize{RightSize} and AlignOffset{Mask};
+    Inc(TotalSize, CurrentSize);
+    Stored.B16Count := CurrentSize shr 4;
+  end;
+
+  // left size, total size, actual header
+  begin
+    LeftSize := Header.PreviousSize;
+    AlignOffset{Mask} := NativeUInt(-NativeInt(Byte(LeftSize = PHeaderMedium(NativeUInt(Header) - 16 - LeftSize).Flags)));
+    Inc(LeftSize, 16);
+    LeftSize := LeftSize and AlignOffset{Mask};
+    Dec(NativeUInt(Header), LeftSize);
+    Inc(TotalSize, LeftSize);
+  end;
+
+  // align offset, is size not suitable
+  begin
+    AlignOffset := ALIGN_OFFSETS.Values[(NativeInt(Header) and MASK_K4_TEST) shr 4];
+    Inc(AlignOffset, GrowFlags);
+    if (Word(TotalSize) < Word(AlignOffset){Requirement}) then
+    begin
+      GrowFlags := GrowFlags shr 4;
+      AlignOffset{Align} := ALIGN_OFFSETS.AllocatedFlags shr OFFSET_MEDIUM_ALIGN;
+      if (Word(GrowFlags) <= MIDDLE_MEDIUM_B16COUNT) and (AlignOffset{Align} = 0) then
+      begin
+        Result := Self.Get(GrowFlags and $ffff);
+      end else
+      begin
+        Result := Self.GetAdvanced(GrowFlags and $ffff, AlignOffset{Align});
+      end;
+
+      if (GrowFlags and FLAG_MEDIUM_COPY <> 0) and (Result <> nil) then
+        NcMoveB16(P16(Stored.P)^, P16(Result)^, Stored.B16Count);
+
+      Self.Free(Stored.P);
+      Exit;
+    end;
+    Dec(AlignOffset, GrowFlags);
+  end;
+
+  // exclude left empty (guaranteed empty), align offset
+  begin
+    Dec(LeftSize, 16);
+    Inc(NativeUInt(Header), LeftSize);
+    Header := Self.ExcludeEmpty(MEDIUM_INDEXES[LeftSize shr 4], Pointer(Header));
+    if (AlignOffset <> 0) then
+    begin
+      Dec(Header);
+      Dec(TotalSize, AlignOffset);
+      Inc(NativeUInt(Header), AlignOffset);
+      Header := Self.AlignOffsetEmpty(Header, AlignOffset);
+    end;
+  end;
+
+  // flags, optional copy
+  begin
+    Ptr := Stored.P;
+    Dec(Ptr);
+    Ptr.Flags := 0;
+    if (GrowFlags > NativeUInt(High(Word))) then
+    begin
+      Inc(Ptr);
+      NcMoveB16(P16(Ptr)^, P16(Header)^, Stored.B16Count);
+    end;
+    Dec(Header);
+    GrowFlags := Word(GrowFlags);
+  end;
+
+  // optional right exclude
+  RightEmpty := Stored.RightEmpty;
+  if (RightEmpty <> nil) then
+  begin
+    Self.ExcludeEmpty(MEDIUM_INDEXES[RightEmpty.Size shr 4], RightEmpty);
+  end;
+
+  // mark allocated: full/empty
+  Dec(TotalSize, GrowFlags);
+  if (TotalSize{Vacant} > 32) then
+  begin
+    // mark allocated (Result)
+    Stored.P := Pointer(NativeUInt(Header) + 16);
+    begin
+      // [left...
+      Header.Flags := ALIGN_OFFSETS.AllocatedFlags + GrowFlags;
+
+      // ...right]
+      Inc(Header);
+      Inc(NativeUInt(Header), GrowFlags);
+      Header.PreviousSize := GrowFlags;
+    end;
+
+    // mark new empty (Vacant - SizeOf(Header))
+    begin
+      // [left...
+      Dec(TotalSize, 16);
+      Header.Flags := TotalSize;
+
+      // ...right]
+      Empty := Pointer(NativeUInt(Header) + TotalSize);
+      Empty.Size := TotalSize;
+    end;
+
+    // inline IncludeEmpty
+    begin
+      AlignOffset := Byte(MEDIUM_INDEXES[TotalSize shr 4]);
+      _Self := @Self;
+      with _Self^ do
+      begin
+        Next := FEmpties[AlignOffset];
+        FEmpties[AlignOffset] := Empty;
+        FMask := FMask or (1 shl AlignOffset);
+      end;
+      Empty.Next := Next;
+      if (Next <> nil) then
+      begin
+        Next.Prev := Empty;
+      end;
+      Empty.Prev := nil;
+    end;
+
+    // result
+    Result := Stored.P;
+  end else
+  begin
+    // full: left allocated
+    Inc(GrowFlags, TotalSize);
+    Header.Flags := ALIGN_OFFSETS.AllocatedFlags + GrowFlags;
+    Inc(Header);
+    PHeaderMedium(NativeUInt(Header) + GrowFlags).PreviousSize := GrowFlags;
+
+    // result
+    Result := Pointer(Header);
+  end;
+end;
+
+function TMediumManager.Free(P: Pointer): Integer;
+const
+  TOP_MEDIUM_EMPTY_INDEX = High(THeaderMediumList) - 1;
+label
+  current_right, current_right_markresize, left_current_right,
+  current, current_markinclude, left_current,
+  dispose_pool_left, dispose_pool_right,
+  invalid_ptr_retrieve_right, invalid_ptr_retrieve, invalid_ptr;
+var
+  Header: PHeaderMedium;
+  Flags, RightFlags, LeftFlags: NativeUInt;
+  Pool: PK64PoolMedium;
+  Empty: PHeaderMediumEmpty;
+begin
+  // check allocated (flags only), size, HeaderOf(P)
+  begin
+    Header := Pointer(NativeInt(P) - SizeOf(THeaderMedium));
+    Flags := Header.Flags;
+    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then goto invalid_ptr;
+    Flags := Word(Flags);
+  end;
+
+  // is left empty, HeaderOf(P) - 16
+  begin
+    LeftFlags := Header.PreviousSize;
+    Dec(Header);
+    Dec(NativeUInt(Header), LeftFlags);
+    RightFlags{Buffer} := Byte(Header.Flags = LeftFlags);
+    Inc(NativeUInt(Header), LeftFlags);
+    LeftFlags := LeftFlags and NativeUInt(-NativeInt(RightFlags{Buffer}));
+  end;
+
+  // check allocated size, HeaderOf(Right)
+  begin
+    Inc(Header, 2);
+    Inc(NativeUInt(Header), Flags);
+    if (Header.PreviousSize <> Flags) then goto invalid_ptr_retrieve;
+  end;
+
+  // is right empty: resize/new
+  begin
+    RightFlags := Header.Flags;
+    if (RightFlags and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then goto current;
+  end;
+
+  // check right empty, EmptyOf(Right)
+  begin
+    Inc(NativeUInt(Header), RightFlags);
+    if (PHeaderMediumEmpty(Header).Size <> RightFlags) then goto invalid_ptr_retrieve_right;
+  end;
+
+current_right:
+  // (current + right) empty size, HeaderOf(current P)
+  begin
+    Inc(Flags, 16);
+    Inc(Flags, RightFlags);
+    Dec(NativeUInt(Header), Flags);
+  end;
+
+  // is left empty --> exclude left, total size
+  if (LeftFlags <> 0) then goto left_current_right;
+
+  // optional dispose pool
+  if (Flags = FULL_MEDIUM_EMPTY_SIZE) then goto dispose_pool_right;
+
+current_right_markresize:
+  // mark new empty size, EmptyOf(updated P)
+  begin
+    Header.Flags := Flags;
+    Inc(NativeUInt(Header), Flags);
+    PHeaderMediumEmpty(Header).Size := Flags;
+  end;
+
+  // optional change empty index, Result
+  begin
+    RightFlags := MEDIUM_INDEXES[RightFlags shr 4];
+    Flags := MEDIUM_INDEXES[Flags shr 4];
+    if (Flags = RightFlags) then
+    begin
+      Result := FREEMEM_DONE;
+    end else
+    begin
+      {$ifdef CPUX86}
+      PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+      {$else}
+      Self
+      {$endif}
+        .ChangeEmptyIndex((Flags shl 5) + RightFlags, Pointer(Header));
+
+      Result := FREEMEM_DONE;
+    end;
+    Exit;
+  end;
+
+left_current_right:
+  // new empty size, EmptyOf(Left)
+  begin
+    Inc(Flags, 16);
+    Inc(Flags, LeftFlags);
+    Dec(Header);
+  end;
+
+  // exclude left
+  Header{P} :=
+  {$ifdef CPUX86}
+  PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+  {$else}
+  Self
+  {$endif}
+    .ExcludeEmpty(MEDIUM_INDEXES[LeftFlags shr 4], Pointer(Header));
+
+  // HeaderOf(Left = updated P), optional dispose pool (header of last P)
+  begin
+    Dec(Header);
+    if (Flags <> FULL_MEDIUM_EMPTY_SIZE) then goto current_right_markresize;
+    Inc(NativeUInt(Header), Header.Flags);
+    Inc(Header);
+  end;
+
+dispose_pool_right:
+  // cleanup P flags
+  Header.Flags := 0;
+
+  // exclude and dispose
+  Header{Pool} := Pointer(NativeInt(Header) and MASK_K64_CLEAR);
+  PK64PoolMedium(Header{Pool}).ThreadHeap.FMedium.ExcludeEmpty(MEDIUM_INDEXES[RightFlags shr 4],
+    Pointer(@PK64PoolMedium(Header{Pool}).Items[TOP_MEDIUM_EMPTY_INDEX]));
+  Result := PK64PoolMedium(Header{Pool}).ThreadHeap.DisposeK64PoolMedium(Pointer(Header{Pool}));
+  Exit;
+
+
+current:
+  // retrieve P
+  Dec(NativeUInt(Header), Flags);
+
+  // is left empty
+  if (LeftFlags <> 0) then goto left_current;
+
+current_markinclude:
+  // mark new empty size
+  begin
+    Dec(Header);
+    Header.Flags := Flags;
+    Empty := Pointer(Header);
+    Inc(NativeUInt(Empty), Flags);
+    Empty.Size := Flags;
+  end;
+
+  // inline IncludeEmpty
+  begin
+    Flags := Byte(MEDIUM_INDEXES[Flags shr 4]);
+    Header{Self} := Pointer({$ifdef CPUX86}@PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium{$else}@Self{$endif});
+    begin
+      RightFlags{Next} := NativeUInt(PMediumManager(Header{Self}).FEmpties[Flags]);
+      PMediumManager(Header{Self}).FEmpties[Flags] := Empty;
+      PMediumManager(Header{Self}).FMask := PMediumManager(Header{Self}).FMask or (1 shl Flags);
+    end;
+    Empty.Next := Pointer(RightFlags{Next});
+    if (RightFlags{Next} <> 0) then
+    begin
+      PHeaderMediumEmpty(RightFlags{Next}).Prev := Empty;
+    end;
+    Empty.Prev := nil;
+  end;
+
+  // done
   Result := FREEMEM_DONE;
-end;
+  Exit;
 
-function TThreadHeap.RegetMediumToMedium(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-{$ifdef PUREPASCAL}
-var
-  Header: PHeaderMedium;
-  Flags, EmptyFlags: NativeUInt;
-begin
-  // header flags
-  Header := P;
-  Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-
-  // if (Next.Empty) then try Reduce (Next)
-  EmptyFlags := Flags and MASK_MEDIUM_ALLOCATED_TEST;
-  Flags := Word(Flags);
-  if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
+left_current:
+  // new empty size, EmptyOf(Left)
   begin
-    Dec(NewB16Count{GrowCount}, Flags);
-    Flags := Flags shl 4;
-    Inc(NativeUInt(Header), Flags);
-    EmptyFlags := Header.Flags;
-    if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) and
-      (Header.PreviousSize = Flags) then
-    begin
-      Inc(NewB16Count, 2);
-      if (EmptyFlags >= NewB16Count{ + 2}) then
-      begin
-        Dec(NewB16Count, 2);
-        EmptyFlags := EmptyFlags shl 4;
-        NewB16Count := NewB16Count shl 4;
-        Inc(NativeUInt(Header), EmptyFlags);
-
-        Dec(EmptyFlags, NewB16Count);
-        Inc(NewB16Count, Flags);
-        PHeaderMediumEmptyEx(Header{Empty}).Size := EmptyFlags;
-
-        Dec(NativeUInt(Header), EmptyFlags);
-        EmptyFlags := EmptyFlags shr 4;
-        Header.Flags := EmptyFlags;
-        Header.PreviousSize := NewB16Count;
-
-        // result
-        Dec(Header);
-        Dec(NativeUInt(Header), NewB16Count);
-        NewB16Count := NewB16Count shr 4;
-        Header.B16Count := NewB16Count;
-        Result := Pointer(@PHeaderMediumList(Header)[0]);
-        Exit;
-      end;
-      Dec(NewB16Count, 2);
-    end;
-
-    Dec(NativeUInt(Header), Flags);
-    Flags := Flags shr 4;
-    Inc(NewB16Count, Flags);
+    Inc(Flags, 16);
+    Inc(Flags, LeftFlags);
+    Dec(Header, 2);
   end;
 
-  Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyRegetMediumToMedium(Pointer(Header), NewB16Count);
-end;
-{$else}
-asm
-  // if (not Allocated(P)) then PenaltyRegetMediumToMedium
+  // exclude left
+  Header :=
   {$ifdef CPUX86}
-    mov eax, [EDX - 16].THeaderMedium.Flags
-    push ebx
-    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
-    and ebx, eax
-    movzx eax, ax
-    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
-  {$else .CPUX64}
-    mov rcx, [RDX - 16].THeaderMedium.Flags
-    mov r9, MASK_MEDIUM_ALLOCATED_TEST
-    and r9, rcx
-    movzx rcx, cx
-    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+  {$else}
+  Self
   {$endif}
-  jne @penalty_regetmem
+    .ExcludeEmpty(MEDIUM_INDEXES[LeftFlags shr 4], Pointer(Header));
 
-  // GrowCount := NewB16Count - Header(P).P16Count
-  // if (not Next.Empty) then PenaltyRegetMediumToMedium
-  {$ifdef CPUX86}
-    sub ecx, eax
-    shl eax, 4
-    cmp [EDX + eax].THeaderMedium.PreviousSize, eax
-    lea edx, [edx + eax]
-    jne @penalty_regetmem_restore
-    mov ebx, [EDX].THeaderMedium.Flags
-    test ebx, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_regetmem_restore
-  {$else .CPUX64}
-    sub r8, rcx
-    shl rcx, 4
-    cmp [RDX + rcx].THeaderMedium.PreviousSize, rcx
-    lea rdx, [rdx + rcx]
-    jne @penalty_regetmem_restore
-    mov r9, [RDX].THeaderMedium.Flags
-    test r9, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_regetmem_restore
-  {$endif}
+  // optional dispose pool
+  if (Flags <> FULL_MEDIUM_EMPTY_SIZE) then goto current_markinclude;
 
-  // if (EmptyFlags < NewB16Count + 2) then PenaltyRegetMediumToMedium
-  {$ifdef CPUX86}
-    add ecx, 2
-    cmp ebx, ecx
-    lea ecx, [ecx - 2]
-  {$else .CPUX64}
-    add r8, 2
-    cmp r9, r8
-    lea r8, [r8 - 2]
-  {$endif}
-  jb @penalty_regetmem_restore
-
-  // empty reduce routine, result
-  {$ifdef CPUX86}
-    shl ebx, 4
-    shl ecx, 4
-    add edx, ebx
-
-    sub ebx, ecx
-    add ecx, eax
-    mov [EDX].THeaderMediumEmptyEx.Size, ebx
-
-    sub edx, ebx
-    shr ebx, 4
-    mov [EDX].THeaderMedium.PreviousSize, ecx
-    mov [EDX].THeaderMedium.Flags, ebx
-
-    sub edx, ecx
-    shr ecx, 4
-    pop ebx
-    mov [EDX - 16].THeaderMedium.B16Count, cx
-    xchg eax, edx
-  {$else .CPUX64}
-    shl r9, 4
-    shl r8, 4
-    add rdx, r9
-
-    sub r9, r8
-    add r8, rcx
-    mov [RDX].THeaderMediumEmptyEx.Size, r9
-
-    sub rdx, r9
-    shr r9, 4
-    mov [RDX].THeaderMedium.PreviousSize, r8
-    mov [RDX].THeaderMedium.Flags, r9
-
-    sub rdx, r8
-    shr r8, 4
-    mov [RDX - 16].THeaderMedium.B16Count, r8w
-    xchg rax, rdx
-  {$endif}
-
-  // Exit
-  ret
-@penalty_regetmem_restore:
-  {$ifdef CPUX86}
-    sub edx, eax
-    shr eax, 4
-    add ecx, eax
-  {$else .CPUX64}
-    sub rdx, rcx
-    shr rcx, 4
-    add r8, rcx
-  {$endif}
-@penalty_regetmem:
-  {$ifdef CPUX86}
-    mov eax, MASK_K64_CLEAR
-    and eax, edx
-    mov eax, [EAX].TK64PoolMedium.ThreadHeap
-    pop ebx
-  {$else .CPUX64}
-    mov rcx, MASK_K64_CLEAR
-    and rcx, rdx
-    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
-  {$endif}
-  jmp TThreadHeap.PenaltyRegetMediumToMedium
-end;
-{$endif}
-
-function TThreadHeap.PenaltyRegetMediumToMedium(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-label
-  free_and_get, ptr_invalid;
-var
-  ALIGN_OFFSETS: PMediumAlignOffsets;
-  Header, NextHeader: PHeaderMedium;
-  Information, Size: NativeUInt;
-  VacantB16Count, AlignOffset: NativeUInt;
-  Pool: PK64PoolMedium;
-  Empty, Left, Right: PHeaderMediumEmpty;
-  ThreadHeap: PThreadHeap;
-begin
-  // inspect
-  Header := P;
-  Information := InspectAllocatedMedium(P);
-
+dispose_pool_left:
+  // HeaderOf(Left) --> cleanup P flags
   Dec(Header);
-  if (Information = High(NativeUInt)) then goto ptr_invalid;
-  if (Word(Information) >= Word(NewB16Count)) then
-  begin
-    // grow right, make empty piece shorter (or remove)
-    VacantB16Count := NativeUInt(Word(Information)) - NewB16Count;
-    if (VacantB16Count > 1) then
-    begin
-      VacantB16Count := VacantB16Count - 1;
-      PHeaderMediumList(Header)[NativeUInt(Word(Information))].PreviousSize := VacantB16Count shl 4;
-      PHeaderMediumList(Header)[NewB16Count].Flags := {NewB16Count, Align: ma16Bytes, Allocated: False}VacantB16Count;
-    end else
-    begin
-      Inc(NewB16Count, VacantB16Count);
-      Empty := Pointer(@PHeaderMediumList(Header)[NativeUInt(Word(Information)) - 1]);
-      Left := Empty.Prev;
-      Right := Empty.Next;
-      Left.Next := Right;
-      Right.Prev := Left;
-    end;
-  end else
-  begin
-    if (Information > ((1 shl OFFSET_MEDIUM_LEFT_B16COUNT) - 1)) then
-    begin
-      // try grow left
-      ALIGN_OFFSETS := @MEDIUM_ALIGN_OFFSETS[(Information shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign))];
-      Size := (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4;
-      AlignOffset := ALIGN_OFFSETS.Values[((NativeUInt(Header) - Size) and MASK_K4_TEST) shr 4];
-      if ((Size shr 4) + NativeUInt(Word(Information)) < AlignOffset + NewB16Count) then goto free_and_get;
+  Inc(NativeUInt(Header), Header.Flags);
+  PHeaderMediumEmpty(Header).SiblingHeaderMedium.Flags := 0;
+  Pool := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR);
+  Result := Pool.ThreadHeap.DisposeK64PoolMedium(Pool);
+  Exit;
 
-      // remove left empty
-      Empty := Pointer(NativeUInt(Header) - SizeOf(THeaderMediumEmpty));
-      Left := Empty.Prev;
-      Right := Empty.Next;
-      Left.Next := Right;
-      Right.Prev := Left;
-
-      // left align offset
-      if (AlignOffset <> 0) then
-      begin
-        Size := (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4;
-        NextHeader := Header;
-        Header := OffsetHeaderMediumEmpty(Pointer(NativeUInt(Header) - Size), AlignOffset);
-        if (Header = nil) then
-        begin
-          Header := NextHeader;
-          goto ptr_invalid;
-        end;
-      end else
-      begin
-        Dec(NativeUInt(Header), (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4);
-      end;
-
-      // create, resize of remove right empty piece
-      VacantB16Count := NativeUInt(Word(Information)) +
-        (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) - AlignOffset - NewB16Count;
-      NextHeader := @PHeaderMediumList(Header)[NewB16Count];
-      if (VacantB16Count > 1) then
-      begin
-        VacantB16Count := VacantB16Count - 1;
-        NextHeader.Flags := {NewB16Count, Align: ma16Bytes, Allocated: False}VacantB16Count;
-        Empty := Pointer(@PHeaderMediumList(NextHeader)[VacantB16Count - 1]);
-        PHeaderMediumEmptyEx(Empty).Size := VacantB16Count shl 4;
-
-        if (Information and FLAG_MEDIUM_RIGHT_EMPTY = 0) then
-        begin
-          Pool := PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR);
-          Left := Pool.Empties.Last.Prev;
-          Left.Next := Empty;
-          Empty.Prev := Left;
-          Empty.Next := @Pool.Empties.Last;
-          Pool.Empties.Last.Prev := Empty;
-        end;
-      end else
-      begin
-        Inc(NewB16Count, VacantB16Count);
-
-        if (Information and FLAG_MEDIUM_RIGHT_EMPTY <> 0) then
-        begin
-          Empty := Pointer(@PHeaderMediumList(Header)[NewB16Count - 1]);
-          Left := Empty.Prev;
-          Right := Empty.Next;
-          Left.Next := Right;
-          Right.Prev := Left;
-        end;
-      end;
-    end else
-    begin
-    free_and_get:
-      ThreadHeap := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap;
-      if (ThreadHeap.FreeMedium(@PHeaderMediumList(Header)[0]) <> FREEMEM_DONE) then
-      begin
-      ptr_invalid:
-        ThreadHeap := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap;
-        Result := Pointer(ThreadHeap.RaiseInvalidPtr);
-        Exit;
-      end;
-
-      Result := ThreadHeap.GetMedium(NewB16Count, (Information shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-      Exit;
-    end;
-  end;
-
-  // result
-  Header.Flags := (Information and MASK_MEDIUM_ALIGN) + MASK_MEDIUM_ALLOCATED + NewB16Count;
-  Size := NewB16Count shl 4;
-  Inc(Header);
-  Inc(NativeUInt(Header), Size);
-  Header.PreviousSize := Size;
-  Dec(NativeUInt(Header), Size);
-  Result := Header;
-end;
-
-function TThreadHeap.ReallocMediumToMedium(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-{$ifdef PUREPASCAL}
-var
-  Header: PHeaderMedium;
-  Flags, EmptyFlags: NativeUInt;
-begin
-  // header flags
-  Header := P;
-  Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-
-  // if (Next.Empty) then try Reduce (Next)
-  EmptyFlags := Flags and MASK_MEDIUM_ALLOCATED_TEST;
-  Flags := Word(Flags);
-  if (EmptyFlags = MASK_MEDIUM_ALLOCATED_VALUE) then
-  begin
-    Dec(NewB16Count{GrowCount}, Flags);
-    Flags := Flags shl 4;
-    Inc(NativeUInt(Header), Flags);
-    EmptyFlags := Header.Flags;
-    if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) and
-      (Header.PreviousSize = Flags) then
-    begin
-      Inc(NewB16Count, 2);
-      if (EmptyFlags >= NewB16Count{ + 2}) then
-      begin
-        Dec(NewB16Count, 2);
-        EmptyFlags := EmptyFlags shl 4;
-        NewB16Count := NewB16Count shl 4;
-        Inc(NativeUInt(Header), EmptyFlags);
-
-        Dec(EmptyFlags, NewB16Count);
-        Inc(NewB16Count, Flags);
-        PHeaderMediumEmptyEx(Header{Empty}).Size := EmptyFlags;
-
-        Dec(NativeUInt(Header), EmptyFlags);
-        EmptyFlags := EmptyFlags shr 4;
-        Header.Flags := EmptyFlags;
-        Header.PreviousSize := NewB16Count;
-
-        // result
-        Dec(Header);
-        Dec(NativeUInt(Header), NewB16Count);
-        NewB16Count := NewB16Count shr 4;
-        Header.B16Count := NewB16Count;
-        Result := Pointer(@PHeaderMediumList(Header)[0]);
-        Exit;
-      end;
-      Dec(NewB16Count, 2);
-    end;
-
-    Dec(NativeUInt(Header), Flags);
-    Flags := Flags shr 4;
-    Inc(NewB16Count, Flags);
-  end;
-
-  Result := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.PenaltyReallocMediumToMedium(Pointer(Header), NewB16Count);
-end;
-{$else}
-asm
-  // if (not Allocated(P)) then PenaltyReallocMediumToMedium
+invalid_ptr_retrieve_right:
   {$ifdef CPUX86}
-    mov eax, [EDX - 16].THeaderMedium.Flags
-    push ebx
-    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
-    and ebx, eax
-    movzx eax, ax
-    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
-  {$else .CPUX64}
-    mov rcx, [RDX - 16].THeaderMedium.Flags
-    mov r9, MASK_MEDIUM_ALLOCATED_TEST
-    and r9, rcx
-    movzx rcx, cx
-    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
-  {$endif}
-  jne @penalty_reallocmem
-
-  // GrowCount := NewB16Count - Header(P).P16Count
-  // if (not Next.Empty) then PenaltyReallocMediumToMedium
-  {$ifdef CPUX86}
-    sub ecx, eax
-    shl eax, 4
-    cmp [EDX + eax].THeaderMedium.PreviousSize, eax
-    lea edx, [edx + eax]
-    jne @penalty_reallocmem_restore
-    mov ebx, [EDX].THeaderMedium.Flags
-    test ebx, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_reallocmem_restore
-  {$else .CPUX64}
-    sub r8, rcx
-    shl rcx, 4
-    cmp [RDX + rcx].THeaderMedium.PreviousSize, rcx
-    lea rdx, [rdx + rcx]
-    jne @penalty_reallocmem_restore
-    mov r9, [RDX].THeaderMedium.Flags
-    test r9, MASK_MEDIUM_EMPTY_TEST
-    jnz @penalty_reallocmem_restore
+  Dec(NativeUInt(Header), RightFlags);
   {$endif}
 
-  // if (EmptyFlags < NewB16Count + 2) then PenaltyReallocMediumToMedium
+invalid_ptr_retrieve:
   {$ifdef CPUX86}
-    add ecx, 2
-    cmp ebx, ecx
-    lea ecx, [ecx - 2]
-  {$else .CPUX64}
-    add r8, 2
-    cmp r9, r8
-    lea r8, [r8 - 2]
-  {$endif}
-  jb @penalty_reallocmem_restore
-
-  // empty reduce routine, result
-  {$ifdef CPUX86}
-    shl ebx, 4
-    shl ecx, 4
-    add edx, ebx
-
-    sub ebx, ecx
-    add ecx, eax
-    mov [EDX].THeaderMediumEmptyEx.Size, ebx
-
-    sub edx, ebx
-    shr ebx, 4
-    mov [EDX].THeaderMedium.PreviousSize, ecx
-    mov [EDX].THeaderMedium.Flags, ebx
-
-    sub edx, ecx
-    shr ecx, 4
-    pop ebx
-    mov [EDX - 16].THeaderMedium.B16Count, cx
-    xchg eax, edx
-  {$else .CPUX64}
-    shl r9, 4
-    shl r8, 4
-    add rdx, r9
-
-    sub r9, r8
-    add r8, rcx
-    mov [RDX].THeaderMediumEmptyEx.Size, r9
-
-    sub rdx, r9
-    shr r9, 4
-    mov [RDX].THeaderMedium.PreviousSize, r8
-    mov [RDX].THeaderMedium.Flags, r9
-
-    sub rdx, r8
-    shr r8, 4
-    mov [RDX - 16].THeaderMedium.B16Count, r8w
-    xchg rax, rdx
+  Dec(NativeUInt(Header), Flags);
   {$endif}
 
-  // Exit
-  ret
-@penalty_reallocmem_restore:
+invalid_ptr:
+  Result :=
   {$ifdef CPUX86}
-    sub edx, eax
-    shr eax, 4
-    add ecx, eax
-  {$else .CPUX64}
-    sub rdx, rcx
-    shr rcx, 4
-    add r8, rcx
+  PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
+  {$else}
+  Self
   {$endif}
-@penalty_reallocmem:
-  {$ifdef CPUX86}
-    mov eax, MASK_K64_CLEAR
-    and eax, edx
-    mov eax, [EAX].TK64PoolMedium.ThreadHeap
-    pop ebx
-  {$else .CPUX64}
-    mov rcx, MASK_K64_CLEAR
-    and rcx, rdx
-    mov rcx, [RCX].TK64PoolMedium.ThreadHeap
-  {$endif}
-  jmp TThreadHeap.PenaltyReallocMediumToMedium
-end;
-{$endif}
-
-function TThreadHeap.PenaltyReallocMediumToMedium(P: Pointer;
-  NewB16Count: NativeUInt): Pointer;
-label
-  get_copy_free, ptr_invalid;
-var
-  ALIGN_OFFSETS: PMediumAlignOffsets;
-  Header, NextHeader: PHeaderMedium;
-  Information, Size: NativeUInt;
-  VacantB16Count, AlignOffset: NativeUInt;
-  Pool: PK64PoolMedium;
-  Empty, Left, Right: PHeaderMediumEmpty;
-  ThreadHeap: PThreadHeap;
-begin
-  // inspect
-  Header := P;
-  Information := InspectAllocatedMedium(P);
-
-  Dec(Header);
-  if (Information = High(NativeUInt)) then goto ptr_invalid;
-  if (Word(Information) >= Word(NewB16Count)) then
-  begin
-    // grow right, make empty piece shorter (or remove)
-    VacantB16Count := NativeUInt(Word(Information)) - NewB16Count;
-    if (VacantB16Count > 1) then
-    begin
-      VacantB16Count := VacantB16Count - 1;
-      PHeaderMediumList(Header)[NativeUInt(Word(Information))].PreviousSize := VacantB16Count shl 4;
-      PHeaderMediumList(Header)[NewB16Count].Flags := {NewB16Count, Align: ma16Bytes, Allocated: False}VacantB16Count;
-    end else
-    begin
-      Inc(NewB16Count, VacantB16Count);
-      Empty := Pointer(@PHeaderMediumList(Header)[NativeUInt(Word(Information)) - 1]);
-      Left := Empty.Prev;
-      Right := Empty.Next;
-      Left.Next := Right;
-      Right.Prev := Left;
-    end;
-  end else
-  begin
-    if (Information > ((1 shl OFFSET_MEDIUM_LEFT_B16COUNT) - 1)) then
-    begin
-      // try grow left
-      ALIGN_OFFSETS := @MEDIUM_ALIGN_OFFSETS[(Information shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign))];
-      Size := (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4;
-      AlignOffset := ALIGN_OFFSETS.Values[((NativeUInt(Header) - Size) and MASK_K4_TEST) shr 4];
-      if ((Size shr 4) + NativeUInt(Word(Information)) < AlignOffset + NewB16Count) then goto get_copy_free;
-
-      // remove left empty
-      Empty := Pointer(NativeUInt(Header) - SizeOf(THeaderMediumEmpty));
-      Left := Empty.Prev;
-      Right := Empty.Next;
-      Left.Next := Right;
-      Right.Prev := Left;
-
-      // copying
-      NcMoveB16(P16(@PHeaderMediumList(Header)[0])^,
-        P16(NativeUInt(Header) + SizeOf(THeaderMedium) -
-         {Size}((Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4) +
-         (AlignOffset shl 4))^,
-        Header.B16Count);
-
-      // left align offset
-      if (AlignOffset <> 0) then
-      begin
-        Size := (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4;
-        NextHeader := Header;
-        Header := OffsetHeaderMediumEmpty(Pointer(NativeUInt(Header) - Size), AlignOffset);
-        if (Header = nil) then
-        begin
-          Header := NextHeader;
-          goto ptr_invalid;
-        end;
-      end else
-      begin
-        Dec(NativeUInt(Header), (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) shl 4);
-      end;
-
-      // create, resize of remove right empty piece
-      VacantB16Count := NativeUInt(Word(Information)) +
-        (Information shr OFFSET_MEDIUM_LEFT_B16COUNT) - AlignOffset - NewB16Count;
-      NextHeader := @PHeaderMediumList(Header)[NewB16Count];
-      if (VacantB16Count > 1) then
-      begin
-        VacantB16Count := VacantB16Count - 1;
-        NextHeader.Flags := {NewB16Count, Align: ma16Bytes, Allocated: False}VacantB16Count;
-        Empty := Pointer(@PHeaderMediumList(NextHeader)[VacantB16Count - 1]);
-        PHeaderMediumEmptyEx(Empty).Size := VacantB16Count shl 4;
-
-        if (Information and FLAG_MEDIUM_RIGHT_EMPTY = 0) then
-        begin
-          Pool := PK64PoolMedium(NativeInt(Empty) and MASK_K64_CLEAR);
-          Left := Pool.Empties.Last.Prev;
-          Left.Next := Empty;
-          Empty.Prev := Left;
-          Empty.Next := @Pool.Empties.Last;
-          Pool.Empties.Last.Prev := Empty;
-        end;
-      end else
-      begin
-        Inc(NewB16Count, VacantB16Count);
-
-        if (Information and FLAG_MEDIUM_RIGHT_EMPTY <> 0) then
-        begin
-          Empty := Pointer(@PHeaderMediumList(Header)[NewB16Count - 1]);
-          Left := Empty.Prev;
-          Right := Empty.Next;
-          Left.Next := Right;
-          Right.Prev := Left;
-        end;
-      end;
-    end else
-    begin
-    get_copy_free:
-      ThreadHeap := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap;
-      Result := ThreadHeap.GetMedium(NewB16Count, (Information shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-      if (Result <> nil) then
-        NcMoveB16(P16(@PHeaderMediumList(Header)[0])^, P16(Result)^, Header.B16Count);
-
-      if (ThreadHeap.FreeMedium(@PHeaderMediumList(Header)[0]) <> FREEMEM_DONE) then
-      begin
-      ptr_invalid:
-        ThreadHeap := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap;
-        Result := Pointer(ThreadHeap.RaiseInvalidPtr);
-      end;
-      Exit;
-    end;
-  end;
-
-  // result
-  Header.Flags := (Information and MASK_MEDIUM_ALIGN) + MASK_MEDIUM_ALLOCATED + NewB16Count;
-  Size := NewB16Count shl 4;
-  Inc(Header);
-  Inc(NativeUInt(Header), Size);
-  Header.PreviousSize := Size;
-  Dec(NativeUInt(Header), Size);
-  Result := Header;
+    .ErrorInvalidPtr;
 end;
 
 function TThreadHeap.FreeDifficult(P: Pointer; ReturnAddress: Pointer): Integer;
@@ -6859,7 +6713,7 @@ var
   Line: PK1LineSmall;
   ItemSet: TBitSet8;
   Index: NativeInt;
-  Flags, B16Count: NativeUInt;
+  Flags, Size: NativeUInt;
 begin
   Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
   PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
@@ -6901,9 +6755,9 @@ begin
 
     // check pointer
     Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-    B16Count := Word(Flags);
+    Size := Word(Flags);
     if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+      (PHeaderMedium(NativeUInt(P) + Size).PreviousSize <> Size) then
     begin
       Result := Self.ErrorInvalidPtr;
       Exit;
@@ -6917,94 +6771,13 @@ begin
   Result := FREEMEM_DONE;
 end;
 
-function TThreadHeap.RegetDifficult(P: Pointer; NewB16Count: NativeUInt;
-  ReturnAddress: Pointer): Pointer;
-var
-  Pool: Pointer;
-  PoolThreadHeap: PThreadHeap;
-  Line: PK1LineSmall;
-  ItemSet: TBitSet8;
-  Index: NativeInt;
-  IsSmall: Boolean;
-  Align: TMemoryAlign;
-  R: Integer;
-  Flags, B16Count: NativeUInt;
-begin
-  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
-  PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
-  if (PoolThreadHeap <> nil) then
-  begin
-    // pool small
-    if (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-      Self.RaiseInvalidPtr;
-
-    // check pointer
-    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
-    repeat
-      ItemSet := Line.Header.ItemSet;
-    until (ItemSet.V64 = Line.Header.ItemSet.V64);
-    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
-    if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
-      (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
-      Self.RaiseInvalidPtr;
-
-    // small flags
-    IsSmall := True;
-    Align := ma16Bytes;
-  end else
-  begin
-    // pool medium
-    PoolThreadHeap := TK64PoolMedium(Pool^).ThreadHeap;
-    if (PoolThreadHeap = nil) or (NativeInt(PoolThreadHeap) and MASK_64_TEST <> 0) or
-      (PoolThreadHeap <> Pointer(not PoolThreadHeap.FMarkerNotSelf)) then
-      Self.RaiseInvalidPtr;
-
-    // check pointer
-    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-    B16Count := Word(Flags);
-    if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
-      Self.RaiseInvalidPtr;
-
-    // medium flags
-    IsSmall := False;
-    Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-  end;
-
-  // free small/medium
-  if (PoolThreadHeap = @Self) then
-  begin
-    if (IsSmall) then R := Self.FreeSmall(P)
-    else R := Self.FreeMedium(P);
-
-    if (R = FREEMEM_INVALID) then
-      Self.RaiseInvalidPtr;
-  end else
-  begin
-    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
-  end;
-
-  // allocate
-  case (NewB16Count) of
-    0..MAX_SMALL_B16COUNT:
-    begin
-      if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
-      else Result := Self.GetMedium(NewB16Count, Ord(Align));
-    end;
-    MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-      Result := Self.GetMedium(NewB16Count, Ord(Align));
-  else
-    Result := MemoryManager.BrainMM.GetMemoryPages(
-      (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-      PAGESMODE_SYSTEM);
-    if (Result = nil) then
-      Result := Self.ErrorOutOfMemory;
-  end;
-end;
-
-function TThreadHeap.ReallocDifficult(P: Pointer; NewB16Count: NativeUInt;
-  ReturnAddress: Pointer): Pointer;
+function TThreadHeap.ResizeDifficult(PFlags: NativeInt{Copy: Boolean; P: Pointer};
+  NewB16Count: NativeUInt; ReturnAddress: Pointer): Pointer;
+const
+  MASK_P_CLEAR = -4;
+  FLAG_IS_SMALL = 2;
+label
+  medium_advanced, return_made_none;
 var
   LastB16Count: NativeUInt;
   Pool: Pointer;
@@ -7012,12 +6785,12 @@ var
   Line: PK1LineSmall;
   ItemSet: TBitSet8;
   Index: NativeInt;
-  IsSmall: Boolean;
-  Align: TMemoryAlign;
+  Align: NativeUInt{TMemoryAlign};
   R: Integer;
-  Flags, B16Count: NativeUInt;
+  Flags, Size: NativeUInt;
+  P: Pointer;
 begin
-  Pool := Pointer(NativeInt(P) and MASK_K64_CLEAR);
+  Pool := Pointer(PFlags and MASK_K64_CLEAR);
   PoolThreadHeap := TK64PoolSmall(Pool^).ThreadHeap;
   if (PoolThreadHeap <> nil) then
   begin
@@ -7027,19 +6800,21 @@ begin
       Self.RaiseInvalidPtr;
 
     // check pointer
-    Line := PK1LineSmall(NativeInt(P) and MASK_K1_CLEAR);
+    Line := PK1LineSmall(PFlags and MASK_K1_CLEAR);
     repeat
       ItemSet := Line.Header.ItemSet;
     until (ItemSet.V64 = Line.Header.ItemSet.V64);
-    Index := (NativeInt(P) and MASK_K1_TEST) shr 4;
+    Index := (PFlags and (MASK_K1_TEST and MASK_P_CLEAR)) shr 4;
     if (ItemSet.VLow32 and 3 = 0{not FullQueue}) and
       (ItemSet.VIntegers[Index shr 5] and (1 shl (Index and 31)) <> 0{not Allocated}) then
       Self.RaiseInvalidPtr;
 
     // small size/flags
-    LastB16Count := NativeUInt(Line.Header.ModeSize) shr 4;
-    Align := ma16Bytes;
-    IsSmall := True;
+    Align{LastB16Count} := NativeUInt(Line.Header.ModeSize) shr 4;
+    if (Align{LastB16Count} >= NewB16Count) then goto return_made_none;
+    LastB16Count := Align;
+    Align := Ord(ma16Bytes);
+    Inc(PFlags, FLAG_IS_SMALL);
   end else
   begin
     // pool medium
@@ -7049,27 +6824,36 @@ begin
       Self.RaiseInvalidPtr;
 
     // check pointer
-    Flags := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).Flags;
-    B16Count := Word(Flags);
+    Flags := PHeaderMedium((PFlags and MASK_P_CLEAR) - SizeOf(THeaderMedium)).Flags;
+    Size := Word(Flags);
     if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) or
-      (PHeaderMediumList(P)[B16Count - 1].PreviousSize <> B16Count shl 4) then
+      (PHeaderMedium(PFlags and MASK_P_CLEAR + NativeInt(Size)).PreviousSize <> Size) then
       Self.RaiseInvalidPtr;
 
     // medium size/flags
-    LastB16Count := PHeaderMedium(NativeInt(P) - SizeOf(THeaderMedium)).B16Count;
-    Align := TMemoryAlign((Flags shr OFFSET_MEDIUM_ALIGN) and NativeUInt(High(TMemoryAlign)));
-    IsSmall := False;
+    Align{LastB16Count} := NativeUInt(PHeaderMedium((PFlags and MASK_P_CLEAR) - SizeOf(THeaderMedium)).WSize) shr 4;
+    if (NativeUInt(Align{LastB16Count} - NewB16Count) <= 1) then goto return_made_none;
+    LastB16Count := Align;
+    Align := Flags shr OFFSET_MEDIUM_ALIGN;
   end;
 
   // allocate
   case (NewB16Count) of
     0..MAX_SMALL_B16COUNT:
     begin
-      if (Align = ma16Bytes) then Result := Self.GetSmall(NewB16Count)
-      else Result := Self.GetMedium(NewB16Count, Ord(Align));
+      if (Align <> NativeUInt(ma16Bytes)) then goto medium_advanced;
+      Result := Self.GetSmall(NewB16Count)
     end;
-    MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-      Result := Self.GetMedium(NewB16Count, Ord(Align));
+    MAX_SMALL_B16COUNT+1..MIDDLE_MEDIUM_B16COUNT:
+    begin
+      if (Align <> NativeUInt(ma16Bytes)) then goto medium_advanced;
+      Result := Self.FMedium.Get(NewB16Count);
+    end;
+    MIDDLE_MEDIUM_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+    begin
+    medium_advanced:
+      Result := Self.FMedium.GetAdvanced(NewB16Count, Align{TMemoryAlign});
+    end;
   else
     Result := MemoryManager.BrainMM.GetMemoryPages(
       (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
@@ -7079,24 +6863,29 @@ begin
   end;
 
   // copy (minimum)
-  if (Result <> nil) then
+  if (NativeInt(Result) and (-(PFlags and 1)) <> 0) then
   begin
     if (LastB16Count > NewB16Count) then LastB16Count := NewB16Count;
-    NcMoveB16(P16(P)^, P16(Result)^, LastB16Count);
+    NcMoveB16(P16(PFlags and MASK_P_CLEAR)^, P16(Result)^, LastB16Count);
   end;
 
   // free small/medium
+  P := Pointer(PFlags and MASK_P_CLEAR);
   if (PoolThreadHeap = @Self) then
   begin
-    if (IsSmall) then R := Self.FreeSmall(P)
-    else R := Self.FreeMedium(P);
+    if (PFlags and FLAG_IS_SMALL <> 0) then R := Self.FreeSmall(P)
+    else R := Self.FMedium.Free(P);
 
     if (R = FREEMEM_INVALID) then
       Self.RaiseInvalidPtr;
   end else
   begin
-    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, IsSmall);
+    PoolThreadHeap.PushThreadDeferred(P, ReturnAddress, (PFlags and FLAG_IS_SMALL <> 0));
   end;
+  Exit;
+
+return_made_none:
+  Result := Pointer(PFlags and MASK_P_CLEAR);
 end;
 
 function TThreadHeap.NewK64PoolSmall: PK64PoolSmall;
@@ -7519,12 +7308,15 @@ end;
 {$endif}
 
 function TThreadHeap.NewK64PoolMedium: PK64PoolMedium;
+const
+  HIGH_EMPTY_INDEX = High(PThreadHeap(nil).FMedium.FEmpties);
 var
   PagesMode: NativeUInt;
-  Start: PHeaderMedium;
+  Start, Finish: PHeaderMedium;
   Empty: PHeaderMediumEmpty;
-  Next: PK64PoolMedium;
+  Next: Pointer;
 begin
+  // allocate
   PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
   Result := MemoryManager.BrainMM.GetMemoryBlock(BLOCK_64K, PagesMode);
   if (Result = nil) then
@@ -7533,32 +7325,36 @@ begin
     Exit;
   end;
 
-  Result.MarkerNil := nil;
-  Result.ThreadHeap := @Self;
+  // mark
+  begin
+    Result.ThreadHeap := @Self;
+    Result.MarkerNil := nil;
+    Result.FlagsFakeAllocated := MASK_MEDIUM_ALLOCATED;
 
-  Result.FakeAllocated.PreviousSize := NativeUInt(-1);
-  Result.FakeAllocated.Flags := MASK_MEDIUM_ALLOCATED;
+    Start := @Result.Items[Low(Result.Items)];
+    Start.PreviousSize := 0;
+    Start.Flags := FULL_MEDIUM_EMPTY_SIZE + {Align: ma16Bytes, Allocated: False}0;
 
-  Start := @Result.Items[Low(Result.Items)];
-  Start.PreviousSize := 0;
-  Start.Flags := {B16Count}(High(Result.Items) + 1) + {Align: ma16Bytes, Allocated: False}0;
-  Result.Finish.PreviousSize := (High(Result.Items) + 1) * SizeOf(THeaderMedium);
-  Result.Finish.Flags := {failure B16Count}0 + (Ord(ma16Bytes) shl 16) + MASK_MEDIUM_ALLOCATED;
+    Finish := @Result.Items[High(Result.Items)];
+    Finish.PreviousSize := FULL_MEDIUM_EMPTY_SIZE;
+    Finish.Flags := MASK_MEDIUM_ALLOCATED;
+  end;
 
-  Empty := Pointer(@Result.Items[High(Result.Items)]);
-  Result.Empties.First.Prev := nil;
-  Result.Empties.First.Next := Empty;
-  Empty.Prev := @Result.Empties.First;
-  Empty.Next := @Result.Empties.Last;
-  Result.Empties.Last.Prev := Empty;
-  Result.Empties.Last.Next := nil;
-
-  // Enqueue
-  Next := QK64PoolMedium;
-  QK64PoolMedium := Result;
+  // QK64PoolMedium enqueue
+  Next := Self.FMedium.QK64PoolMedium;
+  Self.FMedium.QK64PoolMedium := Result;
   Result.Queue.Prev := nil;
   Result.Queue.Next := Next;
-  if (Next <> nil) then Next.Queue.Prev := Result;
+  if (Next <> nil) then PK64PoolMedium(Next).Queue.Prev := Result;
+
+  // empty enque
+  Empty := Pointer(@Result.Items[High(Result.Items) - 1]);
+  Next := Self.FMedium.FEmpties[HIGH_EMPTY_INDEX];
+  Self.FMedium.FEmpties[HIGH_EMPTY_INDEX] := Empty;
+  Self.FMedium.FMask := Self.FMedium.FMask or (NativeInt(1) shl HIGH_EMPTY_INDEX);
+  Empty.Prev := nil;
+  Empty.Next := Next;
+  if (Next <> nil) then PHeaderMediumEmpty(Next).Prev := Empty;
 end;
 
 function TThreadHeap.DisposeK64PoolMedium(PoolMedium: PK64PoolMedium): Integer;
@@ -7571,7 +7367,7 @@ begin
   Next := PoolMedium.Queue.Next;
   if (Prev = nil) then
   begin
-    QK64PoolMedium := Next;
+    FMedium.QK64PoolMedium := Next;
   end else
   begin
     Prev.Queue.Next := Next;
@@ -7764,10 +7560,10 @@ begin
   end;
 
   // pool medium
-  PoolMedium := Heap.QK64PoolMedium;
+  PoolMedium := Heap.FMedium.QK64PoolMedium;
   if (PoolMedium <> nil) then
   begin
-    Heap.QK64PoolMedium := nil;
+    Heap.FMedium.QK64PoolMedium := nil;
     repeat
       Next := PoolMedium.Queue.Next;
 
@@ -7810,9 +7606,10 @@ begin
 
     B16Count := (Size + 15) shr 4;
     case (B16Count) of
-      0..MAX_SMALL_B16COUNT: Result := Heap.GetSmall(B16Count);
-      MAX_SMALL_B16COUNT+1..MAX_MEDIUM_B16COUNT:
-        Result := Heap.GetMedium(B16Count, Ord(ma16Bytes));
+      MAX_SMALL_B16COUNT+1..MIDDLE_MEDIUM_B16COUNT:
+        Result := Heap.FMedium.Get(B16Count);
+      MIDDLE_MEDIUM_B16COUNT+1..MAX_MEDIUM_B16COUNT:
+        Result := Heap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes));
     else
       Result := MemoryManager.BrainMM.GetMemoryPages(
         (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, PAGESMODE_JIT);
@@ -7877,7 +7674,7 @@ begin
         medium:
           if (PK64PoolMedium(Pool).ThreadHeap = Heap) then
           begin
-            Heap.FreeMedium(P);
+            Heap.FMedium.Free(P);
             Exit;
           end;
         end;
@@ -8200,16 +7997,16 @@ var
   BrainMMRegistered: ^TBrainMemoryManager;
 {$endif}
 begin
-  InitializeOffsetsMedium;
+  InitializeMediumIndexes;
+  InitializeMediumOffsets;
 
   MemoryManager.BrainMM.ThreadFuncEvent := BrainMMThreadFuncEvent;
   MemoryManager.BrainMM.EndThreadEvent := BrainMMEndThreadEvent;
   MemoryManager.BrainMM.GetMemoryBlock := BrainMMGetMemoryBlock;
   MemoryManager.BrainMM.FreeMemoryBlock := BrainMMFreeMemoryBlock;
   MemoryManager.BrainMM.GetMemoryPages := BrainMMGetMemoryPages;
-  MemoryManager.BrainMM.RegetMemoryPages := BrainMMRegetMemoryPages;
-  MemoryManager.BrainMM.ReallocMemoryPages := BrainMMReallocMemoryPages;
   MemoryManager.BrainMM.FreeMemoryPages := BrainMMFreeMemoryPages;
+  MemoryManager.BrainMM.ResizeMemoryPages := BrainMMResizeMemoryPages;
   MemoryManager.BrainMM.GetMemAligned := BrainMMGetMemAligned;
   MemoryManager.BrainMM.RegetMem := BrainMMRegetMem;
   MemoryManager.Standard.GetMem := BrainMMGetMem;
@@ -8255,6 +8052,17 @@ begin
       if (BrainMMRegistered.POINTERS[i] <> nil) then
         MemoryManager.POINTERS[i] := BrainMMRegistered.POINTERS[i];
     end;
+  end;
+  {$else .POSIX}
+  begin
+    // ToDo
+    UnknownThreadHeap := CreateThreadHeap(False);
+    UnknownThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
+    {$ifdef PUREPASCAL}
+      MainThreadHeap := CreateThreadHeap(True);
+    {$else}
+      MainThreadHeap := ThreadHeapInstance;
+    {$endif}
   end;
   {$endif}
 
