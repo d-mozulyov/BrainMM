@@ -277,11 +277,12 @@ const
 
   MAX_SMALL_SIZE = 128;
   MAX_SMALL_B16COUNT = MAX_SMALL_SIZE div 16;
-  MIDDLE_MEDIUM_SIZE = 6 * 1024;
+  MIDDLE_MEDIUM_SIZE = 6 * SIZE_K1;
   MIDDLE_MEDIUM_B16COUNT = MIDDLE_MEDIUM_SIZE div 16;
-  MAX_MEDIUM_SIZE = 8 * (4 * 1024) - 16;
+  MAX_MEDIUM_INTERNAL_GROW_LIMIT = 32;
+  MAX_MEDIUM_SIZE = (32 * SIZE_K1) - 16 - MAX_MEDIUM_INTERNAL_GROW_LIMIT;
   MAX_MEDIUM_B16COUNT = MAX_MEDIUM_SIZE div 16;
-  MAX_BIG_SIZE = 8 * (64 * 1024);
+  MAX_BIG_SIZE = 8 * SIZE_K64;
   MAX_BIG_B16COUNT = MAX_BIG_SIZE div 16;
 
   PAGESMODE_USER = 0;
@@ -353,7 +354,7 @@ const
 
   MASK_MEDIUM_EMPTY_TEST = not NativeUInt(NativeInt(High(Word)) and -16);
   MASK_MEDIUM_EMPTY_VALUE = 0;
-  MASK_MEDIUM_ALLOCATED_TEST = not NativeUInt(MAX_MEDIUM_SIZE or MASK_MEDIUM_ALIGN);
+  MASK_MEDIUM_ALLOCATED_TEST = not NativeUInt((MAX_MEDIUM_SIZE + MAX_MEDIUM_INTERNAL_GROW_LIMIT) or MASK_MEDIUM_ALIGN);
   MASK_MEDIUM_ALLOCATED_VALUE = MASK_MEDIUM_ALLOCATED;
 
   FLAG_MEDIUM_COPY_SHIFT = 16;
@@ -583,6 +584,7 @@ type
     function ChangeEmptyIndex(Flags: NativeUInt{LastIndex, NewIndex:5}; Empty: PHeaderMediumEmpty): Pointer;
     function AlignOffsetEmpty(Header: PHeaderMedium; AlignOffset: NativeUInt): Pointer;
     function GrowPenalty(P: Pointer; GrowFlags: NativeUInt{NewSize: Word; shifted Copy: Boolean}): Pointer;
+    function FreeDisposePenalty(Header: PHeaderMedium; FlagIsTop: Boolean): Integer;
   public
     FEmpties: array[0..31] of PHeaderMediumEmpty;
     FMask: NativeInt;
@@ -661,13 +663,12 @@ type
           ThreadFuncEvent: function(Attribute: PThreadAttr; ThreadFunc: TThreadFunc; Parameter: Pointer; var ThreadId: NativeUInt): Integer;
           {$endif}
           EndThreadEvent: procedure(ExitCode: Integer);
-
           GetMemoryBlock: function(BlockSize: TMemoryBlockSize; PagesMode: NativeUInt): MemoryBlock;
           FreeMemoryBlock: function(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
           GetMemoryPages: function(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
           FreeMemoryPages: function(Pages: MemoryPages; PagesMode: NativeUInt): Boolean;
           ResizeMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; ResizePagesFlags: NativeUInt): MemoryPages;
-          Reserved: array[1..4] of Pointer;
+          Reserved: array[1..5] of Pointer;
           GetMemAligned: function(Align: TMemoryAlign; Size: NativeUInt): Pointer;
           RegetMem: function(P: Pointer; NewSize: NativeUInt): Pointer;
         end;
@@ -681,7 +682,7 @@ type
           Reserved: array[1..4] of Pointer;
         end;
        );
-    1: (POINTERS: array[1..23] of Pointer);
+    1: (POINTERS: array[1..24] of Pointer);
   end;
 
   TK4Page = array[0..4 * 1024 - 1] of Byte;
@@ -1233,7 +1234,7 @@ begin
     if (Item and SPINEX_LOCK_MASK <> 0) then SpinWait(SpinEx, SPINEX_LOCK_MASK);
 
     // make entered
-    Item := AtomicIncrement(NativeInt(SpinEx));
+    Item := AtomicIncrement(NativeInt(SpinEx), 1);
     if (Item and SPINEX_LOCK_MASK <> 0) then
     begin
       // retrieve counter, wait locked
@@ -1629,40 +1630,6 @@ const
     0, 1, 0, 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
   );
 
-function BitScan(var BitSet: TBitSet8): NativeInt;
-{$ifdef PUREPASCAL}
-var
-  P: PByte;
-begin
-  P := @BitSet.VBytes[0];
-  Inc(PInteger(P), Byte(PInteger(P)^ = 0));
-  Inc(PWord(P), Byte(PWord(P)^ = 0));
-  Inc(P, Byte(P^ = 0));
-
-  Result := (NativeUInt(P) - NativeUInt(@BitSet)) shl 3 + BIT_SCANS[P^];
-  Result := Result or -(Result shr 6);
-end;
-{$else}
-asm
-  {$ifdef CPUX86}
-    mov edx, [eax]
-    lea ecx, [eax + 4]
-    test edx, edx
-    DB $0F, $44, $C1 // cmovz eax, ecx
-    lea ecx, [ecx - 4]
-    mov edx, [eax]
-    sub ecx, eax
-    and ecx, 32
-    or eax, -1
-    bsf eax, edx
-    or eax, ecx
-  {$else .CPUX64}
-    mov rdx, [rcx]
-    or rax, -1
-    bsf rax, rdx
-  {$endif}
-end;
-{$endif}
 
 function BitReserve(var BitSet: TBitSet8): NativeInt;
 {$ifdef PUREPASCAL}
@@ -1698,7 +1665,8 @@ asm
     lea ecx, [ecx - 4]
     mov edx, [eax]
     push ecx
-    bsf ecx, edx
+    rep bsf ecx, edx
+    test edx, edx
     jz @failure
     btr edx, ecx
     mov [eax], edx
@@ -1708,7 +1676,8 @@ asm
     lea eax, [edx + ecx]
   {$else .CPUX64}
     mov rdx, [rcx]
-    bsf rax, rdx
+    rep bsf rax, rdx
+    test rdx, rdx
     jz @failure
     btr rdx, rax
     mov [rcx], rdx
@@ -2494,7 +2463,7 @@ begin
   GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   if (GlobalStorage.K64BlockCache.Count < 16) then
   begin
-    AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count));
+    AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count), 1);
     GlobalStorage.K64BlockCache.Stack.Push(Block);
     Result := True;
   end else
@@ -3109,7 +3078,8 @@ asm
     test edx, edx
     DB $0F, $44, $C8 // cmovz ecx, eax
     mov edx, [ecx]
-    bsf eax, edx
+    rep bsf eax, edx
+    test edx, edx
     jz @requeue_line_loop_prefix
     btr edx, eax
     mov [ecx], edx
@@ -3117,7 +3087,8 @@ asm
     test ecx, MASK_K1_TEST
     DB $0F, $45, $C2 // cmovnz eax, edx
   {$else .CPUX64}
-    bsf rax, r9
+    rep bsf rax, r9
+    test r9, r9
     jz @requeue_line_loop_prefix
     btr r9, rax
     mov [R8].TK1LineSmall.Header.ItemSet.V64, r9
@@ -5536,6 +5507,7 @@ end;
 // returns last empty Pointer
 // empty size should be actual filled
 function TMediumManager.ExcludeEmpty(LastIndex: NativeUInt; Empty: PHeaderMediumEmpty): Pointer;
+{$ifdef PUREPASCAL}
 var
   Prev, Next: PHeaderMediumEmpty;
 begin
@@ -5572,10 +5544,116 @@ begin
   // result
   Result := Pointer(NativeUInt(@Empty.SiblingHeaderMedium) - Empty.Size);
 end;
+{$else}
+asm
+  {$ifdef DEBUG}
+    // if (not Self.FMask.Checked(LastIndex)) then Exit Self.RaiseInvalidPtr
+    {$ifdef CPUX86}
+      push ecx
+      mov ecx, [EAX].TMediumManager.FMask
+      bt ecx, edx
+      pop ecx
+    {$else .CPUX64}
+      mov rax, [RCX].TMediumManager.FMask
+      bt rax, rdx
+    {$endif}
+    jnc TMediumManager.RaiseInvalidPtr
+  {$endif}
+
+  // prev(v4)/next(v5)
+  // if (Prev = nil) and (Next = nil) then goto index_clear
+  {$ifdef CPUX86}
+    push ebx
+    push esi
+    mov ebx, [ECX].THeaderMediumEmpty.Prev
+    mov esi, [ECX].THeaderMediumEmpty.Next
+    or esi, ebx
+    mov esi, [ECX].THeaderMediumEmpty.Next
+  {$else .CPUX64}
+    mov rax, [R8].THeaderMediumEmpty.Prev
+    mov r10, [R8].THeaderMediumEmpty.Next
+    mov r9, rax
+    or rax, r10
+  {$endif}
+  jz @index_clear
+
+  // (Prev(v4) = nil)? Self.FEmpties[LastIndex]/Prev(v4).Next := Next(v5)
+  {$ifdef CPUX86}
+    lea eax, [EAX + edx * 4]
+    lea edx, [EBX].THeaderMediumEmpty.Next
+    test ebx, ebx
+    DB $0F, $45, $C2 // cmovnz eax, edx
+    mov [eax], esi
+  {$else .CPUX64}
+    lea rcx, [RCX + rdx * 8]
+    lea rdx, [R9].THeaderMediumEmpty.Next
+    test r9, r9
+    cmovnz rcx, rdx
+    mov [rcx], r10
+  {$endif}
+
+  // (Next(v5) <> nil)? Next.Prev := Prev(v4)
+  {$ifdef CPUX86}
+    lea eax, [esp - 4]
+    lea edx, [ESI].THeaderMediumEmpty.Prev
+    test esi, esi
+    DB $0F, $45, $C2 // cmovnz eax, edx
+    mov [eax], ebx
+  {$else .CPUX64}
+    lea rcx, [rsp - 8]
+    lea rdx, [R10].THeaderMediumEmpty.Prev
+    test r10, r10
+    cmovnz rcx, rdx
+    mov [rcx], r9
+  {$endif}
+
+  // result: Pointer(NativeUInt(@Empty.SiblingHeaderMedium) - Empty.Size)
+  {$ifdef CPUX86}
+    lea eax, [ECX].THeaderMediumEmpty.SiblingHeaderMedium
+    mov ecx, [ECX].THeaderMediumEmpty.Size
+    sub eax, ecx
+    pop esi
+    pop ebx
+  {$else .CPUX64}
+    lea rax, [R8].THeaderMediumEmpty.SiblingHeaderMedium
+    mov r8, [R8].THeaderMediumEmpty.Size
+    sub rax, r8
+  {$endif}
+  ret
+
+@index_clear:
+  // Self.FEmpties[LastIndex] := nil / Self.FMask.Uncheck(LastIndex)
+  {$ifdef CPUX86}
+     mov [EAX + edx * 4], ebx
+     mov ebx, [EAX].TMediumManager.FMask
+     btr ebx, edx
+     mov [EAX].TMediumManager.FMask, ebx
+  {$else .CPUX64}
+     mov [RCX + rdx * 8], r9
+     mov r9, [RCX].TMediumManager.FMask
+     btr r9, rdx
+     mov [RCX].TMediumManager.FMask, r9
+  {$endif}
+
+  // result (duplicate): Pointer(NativeUInt(@Empty.SiblingHeaderMedium) - Empty.Size)
+  {$ifdef CPUX86}
+    lea eax, [ECX].THeaderMediumEmpty.SiblingHeaderMedium
+    mov ecx, [ECX].THeaderMediumEmpty.Size
+    sub eax, ecx
+    pop esi
+    pop ebx
+  {$else .CPUX64}
+    lea rax, [R8].THeaderMediumEmpty.SiblingHeaderMedium
+    mov r8, [R8].THeaderMediumEmpty.Size
+    sub rax, r8
+  {$endif}
+end;
+{$endif}
 
 // returns allocated Pointer before empty area
 // empty size/prevous should be actual filled
 function TMediumManager.ChangeEmptyIndex(Flags: NativeUInt{LastIndex, NewIndex:5}; Empty: PHeaderMediumEmpty): Pointer;
+{$ifdef PUREPASCAL}
 label
   set_b16count;
 var
@@ -5639,11 +5717,200 @@ begin
   Dec(NativeUInt(Empty), Empty.Size);
   Result := Pointer(NativeUInt(Empty) - PHeaderMedium(Empty).PreviousSize);
 end;
+{$else}
+asm
+  // x64: Flags --> LastIndex(v2), NewIndex(v6)
+  {$ifdef CPUX64}
+    mov r11, rdx
+    and rdx, 31
+    shr r11, 5
+  {$endif}
+
+  {$ifdef DEBUG}
+    // if (not Self.FMask.Checked(LastIndex)) then Exit Self.RaiseInvalidPtr
+    {$ifdef CPUX86}
+      push ecx
+      mov ecx, [EAX].TMediumManager.FMask
+      bt ecx, edx // 5 bits: 0..31
+      pop ecx
+    {$else .CPUX64}
+      mov rax, [RCX].TMediumManager.FMask
+      bt rax, rdx
+    {$endif}
+    jnc TMediumManager.RaiseInvalidPtr
+  {$endif}
+
+  // prev(v4)/next(v5), x86: store flags(v6)
+  // if (Prev = nil) and (Next = nil) then goto index_clear
+  {$ifdef CPUX86}
+    push ebx
+    push esi
+    push edi
+    mov ebx, [ECX].THeaderMediumEmpty.Prev
+    mov esi, [ECX].THeaderMediumEmpty.Next
+    mov edi, ebx
+    or edi, esi
+    mov edi, edx
+  {$else .CPUX64}
+    mov rax, [R8].THeaderMediumEmpty.Prev
+    mov r10, [R8].THeaderMediumEmpty.Next
+    mov r9, rax
+    or rax, r10
+  {$endif}
+  jz @index_clear
+
+  // x86: Flags --> LastIndex(edx)
+  // (Prev(v4) = nil)? Self.FEmpties[LastIndex]/Prev(v4).Next := Next(v5)
+  {$ifdef CPUX86}
+    and edx, 31
+    test ebx, ebx
+    lea edx, [EAX + edx * 4]
+    lea ebx, [EBX + THeaderMediumEmpty.Next]
+    DB $0F, $45, $D3 // cmovnz edx, ebx
+    lea ebx, [EBX - THeaderMediumEmpty.Next]
+    mov [edx], esi
+  {$else .CPUX64}
+    test r9, r9
+    lea rdx, [RCX + rdx * 8]
+    lea rax, [R9].THeaderMediumEmpty.Next
+    cmovnz rdx, rax
+    mov [rdx], r10
+  {$endif}
+
+  // (Next(v5) <> nil)? Next.Prev := Prev(v4)
+  {$ifdef CPUX86}
+    test esi, esi
+    lea edx, [esp - THeaderMediumEmpty.Prev - 4]
+    DB $0F, $44, $F2 // cmovz esi, edx
+    mov [ESI].THeaderMediumEmpty.Prev, ebx
+  {$else .CPUX64}
+    test r10, r10
+    lea rdx, [rsp - THeaderMediumEmpty.Prev - 8]
+    cmovz r10, rdx
+    mov [r10], r9
+  {$endif}
+
+@enqueue:
+  // x86: Flags(v6) --> NewIndex(v6)
+  // Next(v5) := Self.FEmpties[NewIndex(v6)]
+  {$ifdef CPUX86}
+    shr edi, 5
+    mov esi, [EAX + edi * 4]
+  {$else .CPUX64}
+    mov r10, [RCX + r11 * 8]
+  {$endif}
+
+  {$ifdef DEBUG}
+    // if ((Self.FMask shr NewIndex) and 1 <> Byte(Next <> nil)) then Exit Self.RaiseInvalidPtr
+    {$ifdef CPUX86}
+      push ecx
+      mov ebx, [EAX].TMediumManager.FMask
+      mov ecx, edi
+      shr ebx, cl
+      and ebx, 1
+      test esi, esi
+      setnz cl
+      movzx ecx, cl
+      cmp ebx, ecx
+      pop ecx
+      je @correctly
+      pop edi
+      pop esi
+      pop ebx
+    {$else .CPUX64}
+      push rcx
+      mov r9, [RCX].TMediumManager.FMask
+      mov rcx, r11
+      shr r9, cl
+      and r9, 1
+      test r10, r10
+      setnz cl
+      movzx rcx, cl
+      cmp r9, rcx
+      pop rcx
+      je @correctly
+    {$endif}
+    jmp TMediumManager.RaiseInvalidPtr
+  @correctly:
+  {$endif}
+
+  // Self.FEmpties[NewIndex] := Empty, Self.FMask.SetChecked(NewIndex), Empty.Next := Next
+  {$ifdef CPUX86}
+     mov [EAX + edi * 4], ecx
+     mov ebx, [EAX].TMediumManager.FMask
+     bts ebx, edi
+     mov [EAX].TMediumManager.FMask, ebx
+     mov [ECX].THeaderMediumEmpty.Next, esi
+  {$else .CPUX64}
+     mov [RCX + r11 * 8], r8
+     mov r9, [RCX].TMediumManager.FMask
+     bts r9, r11
+     mov [RCX].TMediumManager.FMask, r9
+     mov [R8].THeaderMediumEmpty.Next, r10
+  {$endif}
+
+  // (Next(v5) <> nil)? Next.Prev := Empty(v3), Empty.Prev := nil
+  {$ifdef CPUX86}
+    test esi, esi
+    lea edx, [esp - THeaderMediumEmpty.Prev - 4]
+    DB $0F, $44, $F2 // cmovz esi, edx
+    mov [ESI].THeaderMediumEmpty.Prev, ecx
+    xor edx, edx
+    mov [ECX].THeaderMediumEmpty.Prev, edx
+  {$else .CPUX64}
+    test r10, r10
+    lea rdx, [rsp - THeaderMediumEmpty.Prev - 8]
+    cmovz r10, rdx
+    mov [r10], r8
+    xor rdx, rdx
+    mov [R8].THeaderMediumEmpty.Prev, rdx
+  {$endif}
+
+  // result: empty - empty.size - prev_empty.size
+  {$ifdef CPUX86}
+    mov edx, [ECX].THeaderMediumEmpty.Size
+    sub ecx, edx
+    mov edx, [ECX].THeaderMedium.PreviousSize
+    sub ecx, edx
+    pop edi
+    pop esi
+    pop ebx
+    xchg eax, ecx
+  {$else .CPUX64}
+    mov rdx, [R8].THeaderMediumEmpty.Size
+    sub r8, rdx
+    mov rdx, [R8].THeaderMedium.PreviousSize
+    sub r8, rdx
+    xchg rax, r8
+  {$endif}
+  ret
+
+@index_clear:
+  // x86: Flags --> LastIndex(edx)
+  // Self.FEmpties[LastIndex] := nil / Self.FMask.Uncheck(LastIndex)
+  {$ifdef CPUX86}
+     and edx, 31
+     mov [EAX + edx * 4], ebx
+     mov ebx, [EAX].TMediumManager.FMask
+     btr ebx, edx
+     mov [EAX].TMediumManager.FMask, ebx
+  {$else .CPUX64}
+     mov [RCX + rdx * 8], r9
+     mov r9, [RCX].TMediumManager.FMask
+     btr r9, rdx
+     mov [RCX].TMediumManager.FMask, r9
+  {$endif}
+  jmp @enqueue
+end;
+{$endif}
 
 // returns Pointer after aligning erea
 // called in .GetAdvanced and .GrowPenalty
 // (before left) must be allocated
 function TMediumManager.AlignOffsetEmpty(Header: PHeaderMedium; AlignOffset: NativeUInt): Pointer;
+const
+  MASK_PREVIOUS_TEST = MASK_MEDIUM_EMPTY_TEST and MASK_MEDIUM_ALLOCATED_TEST;
+{$ifdef PUREPASCAL}
 label
   invalid_ptr;
 var
@@ -5684,7 +5951,7 @@ begin
     { grow allocated 16 bytes }
     AlignOffset := Header.PreviousSize;
     Dec(Header);
-    if (AlignOffset and (MASK_MEDIUM_EMPTY_TEST and MASK_MEDIUM_ALLOCATED_TEST) <> 0) then goto invalid_ptr;
+    if (AlignOffset and MASK_PREVIOUS_TEST <> 0) then goto invalid_ptr;
     Dec(NativeUInt(Header), AlignOffset);
     Flags := Header.Flags;
     if (Word(Flags) <> Word(AlignOffset)) then goto invalid_ptr;
@@ -5702,8 +5969,146 @@ begin
     Result := Pointer(Self.RaiseInvalidPtr);
   end;
 end;
+{$else}
+asm
+  // check align offset, decrement header, x86: store v4
+  {$ifdef CPUX86}
+    push ebx
+    sub ecx, 16
+    lea edx, [edx - 16]
+  {$else .CPUX64}
+    sub r8, 16
+    lea rdx, [rdx - 16]
+  {$endif}
+  jz @grow_allocated_16
+
+  // new empty (v4)
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMediumEmpty.Size, ecx
+    mov ebx, edx
+    sub edx, ecx
+    mov [EDX].THeaderMedium.Flags, ecx
+  {$else .CPUX64}
+    mov [RDX].THeaderMediumEmpty.Size, r8
+    mov r9, rdx
+    sub rdx, r8
+    mov [RDX].THeaderMedium.Flags, r8
+  {$endif}
+
+  // AlignOffset --> Index
+  {$ifdef CPUX86}
+    shr ecx, 4
+    movzx ecx, byte ptr [MEDIUM_INDEXES + ecx]
+  {$else .CPUX64}
+    shr r8, 4
+    lea r10, MEDIUM_INDEXES
+    movzx r8, byte ptr [r10 + r8]
+  {$endif}
+
+  // Self.FMask.SetChecked(AlignOffset)
+  {$ifdef CPUX86}
+    mov edx, [EAX].TMediumManager.FMask
+    bts edx, ecx
+    mov [EAX].TMediumManager.FMask, edx
+  {$else .CPUX64}
+    mov rdx, [RCX].TMediumManager.FMask
+    bts rdx, r8
+    mov [RCX].TMediumManager.FMask, rdx
+  {$endif}
+
+  // Next(v2) := Self.FEmpties[AlignOffset] / Self.FEmpties[AlignOffset] := Empty(v4)
+  // Empty.Prev := nil / Empty.Next := Next
+  {$ifdef CPUX86}
+    mov edx, [EAX + ecx * 4]
+    mov [EAX + ecx * 4], ebx
+    xor ecx, ecx
+    mov [EBX].THeaderMediumEmpty.Prev, ecx
+    mov [EBX].THeaderMediumEmpty.Next, edx
+  {$else .CPUX64}
+    mov rdx, [RCX + r8 * 8]
+    mov [RCX + r8 * 8], r9
+    xor r8, r8
+    mov [R9].THeaderMediumEmpty.Prev, r8
+    mov [R9].THeaderMediumEmpty.Next, rdx
+  {$endif}
+
+  // (Next(v2) <> nil)? Next.Prev := Empty(v4)
+  {$ifdef CPUX86}
+    test edx, edx
+    lea ecx, [esp - THeaderMediumEmpty.Prev - 4]
+    DB $0F, $44, $D1 // cmovz edx, ecx
+    mov [EDX].THeaderMediumEmpty.Prev, ebx
+  {$else .CPUX64}
+    test rdx, rdx
+    lea r8, [rsp - THeaderMediumEmpty.Prev - 8]
+    cmovz rdx, r8
+    mov [RDX].THeaderMediumEmpty.Prev, r9
+  {$endif}
+
+  // result
+  {$ifdef CPUX86}
+    lea eax, [EBX].THeaderMediumEmpty.SiblingPtr
+    pop ebx
+  {$else .CPUX64}
+    lea rax, [R9].THeaderMediumEmpty.SiblingPtr
+  {$endif}
+  ret
+
+@grow_allocated_16:
+  // header, new size, checks
+  {$ifdef CPUX86}
+    mov ecx, [EDX].THeaderMedium.PreviousSize
+    sub edx, 16
+    test ecx, MASK_PREVIOUS_TEST
+    jnz @invalid_ptr
+    sub edx, ecx
+    mov ebx, [EDX].THeaderMedium.Flags
+    cmp bx, cx
+    jne @invalid_ptr
+    and ebx, MASK_MEDIUM_ALLOCATED_TEST
+    add ecx, 16
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+    jne  @invalid_ptr
+  {$else .CPUX64}
+    mov r8, [RDX].THeaderMedium.PreviousSize
+    sub rdx, 16
+    test r8, MASK_PREVIOUS_TEST
+    jnz @invalid_ptr
+    sub rdx, r8
+    mov r9, [RDX].THeaderMedium.Flags
+    cmp r9w, r8w
+    jne @invalid_ptr
+    and r9, MASK_MEDIUM_ALLOCATED_TEST
+    add r8, 16
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+    jne  @invalid_ptr
+  {$endif}
+
+  // new size, result
+  {$ifdef CPUX86}
+     mov [EDX].THeaderMedium.WSize, cx
+     add edx, ecx
+     mov [EDX].THeaderMediumEmpty.Size, ecx
+     lea eax, [EDX].THeaderMediumEmpty.SiblingPtr
+     pop ebx
+  {$else .CPUX64}
+     mov [RDX].THeaderMedium.WSize, r8w
+     add rdx, r8
+     mov [RDX].THeaderMediumEmpty.Size, r8
+     lea rax, [RDX].THeaderMediumEmpty.SiblingPtr
+  {$endif}
+  ret
+
+@invalid_ptr:
+  {$ifdef CPUX86}
+     pop ebx
+  {$endif}
+  jmp TMediumManager.RaiseInvalidPtr
+end;
+{$endif}
 
 function TMediumManager.Get(B16Count: NativeUInt): Pointer;
+{$ifdef PUREPASCAL}
 label
   index_done, invalid_ptr, retrieve_result;
 var
@@ -5758,9 +6163,9 @@ begin
         // mark allocated (Result)
         begin
           // [left...
-          Inc(Size, MASK_MEDIUM_ALLOCATED_VALUE);
+          Inc(Size, MASK_MEDIUM_ALLOCATED);
           Header.Flags := Size;
-          Dec(Size, MASK_MEDIUM_ALLOCATED_VALUE);
+          Dec(Size, MASK_MEDIUM_ALLOCATED);
 
           // ...right]
           Inc(Header);
@@ -5823,9 +6228,9 @@ begin
       begin
         // full: left allocated
         Inc(Size, Last);
-        Header.Flags := Size + MASK_MEDIUM_ALLOCATED_VALUE;
+        Header.Flags := Size + MASK_MEDIUM_ALLOCATED;
         Inc(NativeUInt(Header), Size);
-        PHeaderMediumEmpty(Header).Size := Size;
+        { PHeaderMediumEmpty(Header).Size := Size; }
 
         // exclude empty
         Result := Self.ExcludeEmpty(MEDIUM_INDEXES[Size shr 4], Pointer(Header));
@@ -5857,6 +6262,365 @@ invalid_ptr:
 retrieve_result:
   Result := Pointer(Mask);
 end;
+{$else}
+asm
+  // x86: store v4
+  // Mask := MEDIUM_MASKS_CLEAR[NativeInt(MEDIUM_INDEXES[B16Count - 1])] and Self.FMask
+  // if (Mask = 0) then goto NewK64PoolMedium
+  {$ifdef CPUX86}
+    push ebx
+    movsx ebx, byte ptr [MEDIUM_INDEXES + edx - 1]
+    mov ecx, [EAX].TMediumManager.FMask
+    mov ebx, dword ptr [MEDIUM_MASKS_CLEAR + ebx * 4 + 4]
+    and ebx, ecx
+  {$else .CPUX64}
+    lea rax, [MEDIUM_INDEXES - 1]
+    movsx r9, byte ptr [rax + rdx]
+    mov r8, [RCX].TMediumManager.FMask
+    lea rax, [MEDIUM_MASKS_CLEAR + 8]
+    mov r9, qword ptr [rax + r9 * 8]
+    and r9, r8
+  {$endif}
+  jz @new_pool
+
+  // Index(v3) := FirstBit(Mask(v4))
+  {$ifdef CPUX86}
+    rep bsf ecx, ebx
+  {$else .CPUX64}
+    rep bsf r8, r9
+  {$endif}
+
+@index_done:
+  // Empty; Debug: store Index, check Empty
+  {$ifdef DEBUG}
+    {$ifdef CPUX86}
+       mov [esp - 4], ecx
+       mov ecx, [EAX + ecx * 4]
+       test ecx, ecx
+    {$else .CPUX64}
+       mov r10, r8
+       mov r8, [RCX + r8 * 8]
+       test r8, r8
+    {$endif}
+    jz @invalid_ptr
+  {$else .RELEASE}
+    {$ifdef CPUX86}
+      mov ecx, [EAX + ecx * 4]
+    {$else .CPUX64}
+      mov r8, [RCX + r8 * 8]
+    {$endif}
+  {$endif}
+
+  // Size, Last; Debug: check Last
+  {$ifdef CPUX86}
+    shl edx, 4
+    mov ebx, [ECX].THeaderMediumEmpty.Size
+    {$ifdef DEBUG}
+      test ebx, MASK_MEDIUM_EMPTY_TEST
+      jnz @invalid_ptr
+      mov [esp - 8], ebx
+      shr ebx, 4
+      movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+      cmp ebx, [esp - 4]
+      mov ebx, [esp - 8]
+      jne @invalid_ptr
+    {$endif}
+  {$else .CPUX64}
+    shl rdx, 4
+    mov r9, [R8].THeaderMediumEmpty.Size
+    {$ifdef DEBUG}
+      test r9, MASK_MEDIUM_EMPTY_TEST
+      jnz @invalid_ptr
+      mov r11, r9
+      shr r9, 4
+      lea rax, MEDIUM_INDEXES
+      movzx r9, byte ptr [rax + r9]
+      cmp r9, r10
+      mov r9, r11
+      jne @invalid_ptr
+    {$endif}
+  {$endif}
+
+  // Result ptr; if (Alignment = 4kb) then Exit Self.GetAdvanced
+  {$ifdef CPUX86}
+    lea ecx, [ecx + THeaderMediumEmpty.Size]
+    sub ecx, ebx
+    test ecx, MASK_K4_TEST
+  {$else .CPUX64}
+    lea r8, [r8 + THeaderMediumEmpty.Size]
+    sub r8, r9
+    test r8, MASK_K4_TEST
+  {$endif}
+  jz @penalty
+
+  // vacant size
+  // Debug: check flags/vacant
+  {$ifdef CPUX86}
+    {$ifdef DEBUG}
+      cmp [ECX - 16].THeaderMedium.Flags, ebx
+      jne @invalid_ptr
+    {$endif}
+    sub ebx, edx
+    {$ifdef DEBUG}
+      jl @invalid_ptr
+    {$endif}
+  {$else .CPUX64}
+    {$ifdef DEBUG}
+      cmp [R8 - 16].THeaderMedium.Flags, r9
+      jne @invalid_ptr
+    {$endif}
+    sub r9, rdx
+    {$ifdef DEBUG}
+      jl @invalid_ptr
+    {$endif}
+  {$endif}
+
+  // if (Last{Vacant} <= 32) then FullAllocated
+  {$ifdef CPUX86}
+    cmp ebx, 32
+  {$else .CPUX64}
+    cmp r9, 32
+  {$endif}
+  jbe @full_allocated
+
+  // store result
+  {$ifdef CPUX86}
+    mov [esp - 16], ecx
+  {$else .CPUX64}
+    mov r10, r8
+  {$endif}
+
+  // mark allocated (Result)
+  {$ifdef CPUX86}
+    lea edx, [edx + MASK_MEDIUM_ALLOCATED]
+    mov [ecx - 16].THeaderMedium.Flags, edx
+    lea edx, [edx - MASK_MEDIUM_ALLOCATED]
+    mov [ecx + edx].THeaderMedium.PreviousSize, edx
+    add ecx, edx
+  {$else .CPUX64}
+    lea rdx, [rdx + MASK_MEDIUM_ALLOCATED]
+    mov [r8 - 16].THeaderMedium.Flags, rdx
+    lea rdx, [rdx - MASK_MEDIUM_ALLOCATED]
+    mov [r8 + rdx].THeaderMedium.PreviousSize, rdx
+    add r8, rdx
+  {$endif}
+
+  // mark new empty (Vacant - SizeOf(Header))
+  {$ifdef CPUX86}
+    sub ebx, 16
+    mov [ECX].THeaderMedium.Flags, ebx
+    add ecx, ebx
+    mov [ECX].THeaderMediumEmpty.Size, ebx
+  {$else .CPUX64}
+    sub r9, 16
+    mov [R8].THeaderMedium.Flags, r9
+    add r8, r9
+    mov [R8].THeaderMediumEmpty.Size, r9
+  {$endif}
+
+  // detect last(v2) and new(v4) indexes
+  {$ifdef CPUX86}
+    add edx, ebx
+    shr ebx, 4
+    shr edx, 4
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+    movzx edx, byte ptr [MEDIUM_INDEXES + edx + 1]
+  {$else .CPUX64}
+    add rdx, r9
+    shr r9, 4
+    shr rdx, 4
+    lea rax, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [rax + r9]
+    lea rax, [MEDIUM_INDEXES + 1]
+    movzx rdx, byte ptr [rax + rdx]
+  {$endif}
+
+  // if (v2 <> v4) then goto inline ChangeEmptyIndex
+  {$ifdef CPUX86}
+    cmp edx, ebx
+  {$else .CPUX64}
+    cmp rdx, r9
+  {$endif}
+  jne @change_empty_index
+
+  // Result
+  {$ifdef CPUX86}
+    mov eax, [esp - 16]
+    pop ebx
+  {$else .CPUX64}
+    xchg rax, r10
+  {$endif}
+  ret
+
+@change_empty_index:
+  // x86: store v5, v6
+  // x64: re-store Result (rax)
+  {$ifdef CPUX86}
+    push esi
+    push edi
+  {$else .CPUX64}
+    xchg rax, r10
+  {$endif}
+
+  // Next(v5), set next empties[Index(v2)]
+  {$ifdef CPUX86}
+    mov esi, [ECX].THeaderMediumEmpty.Next
+    mov [EAX + edx * 4], esi
+  {$else .CPUX64}
+    mov r10, [R8].THeaderMediumEmpty.Next
+    mov [RCX + rdx * 8], r10
+  {$endif}
+
+  // NewFMask(v6) := BitChecked(v2)
+  {$ifdef CPUX86}
+    xor edi, edi
+    bts edi, edx
+  {$else .CPUX64}
+    xor r11, r11
+    bts r11, rdx
+  {$endif}
+
+  // (Next(v5) <> nil)? Next(v5).Prev := nil, NewFMask(v6) := 0
+  {$ifdef CPUX86}
+    xor edx, edx
+    test esi, esi
+    DB $0F, $45, $FA // cmovnz edi, edx
+    lea esp, [esp - THeaderMediumEmpty.Prev - 4]
+    DB $0F, $44, $F4 // cmovz esi, esp
+    lea esp, [esp + THeaderMediumEmpty.Prev + 4]
+    mov [ESI].THeaderMediumEmpty.Prev, edx
+  {$else .CPUX64}
+    xor rdx, rdx
+    test r10, r10
+    cmovnz r11, rdx
+    lea rsp, [rsp - THeaderMediumEmpty.Prev - 8]
+    cmovz r10, rsp
+    lea rsp, [rsp + THeaderMediumEmpty.Prev + 8]
+    mov [R10].THeaderMediumEmpty.Prev, rdx
+  {$endif}
+
+  // include another NewFMask bits
+  {$ifdef CPUX86}
+    mov edx, [EAX].TMediumManager.FMask
+    xor edi, edx
+  {$else .CPUX64}
+    mov rdx, [RCX].TMediumManager.FMask
+    xor r11, rdx
+  {$endif}
+
+  // Self.FMask := NewFMask + CheckBit(v4)
+  {$ifdef CPUX86}
+    bts edi, ebx
+    mov [EAX].TMediumManager.FMask, edi
+  {$else .CPUX64}
+    bts r11, r9
+    mov [RCX].TMediumManager.FMask, r11
+  {$endif}
+
+  // enqueue
+  {$ifdef CPUX86}
+    mov esi, [EAX + ebx * 4]
+    mov [EAX + ebx * 4], ecx
+    mov [ECX].THeaderMediumEmpty.Next, esi
+  {$else .CPUX64}
+    mov r10, [RCX + r9 * 8]
+    mov [RCX + r9 * 8], r8
+    mov [R8].THeaderMediumEmpty.Next, r10
+  {$endif}
+
+  // (Next(v5) <> nil)? Next(v5).Prev := Empty(v3)
+  {$ifdef CPUX86}
+    test esi, esi
+    lea edx, [esp - THeaderMediumEmpty.Prev - 4]
+    DB $0F, $44, $F2 // cmovz esi, edx
+    mov [ESI].THeaderMediumEmpty.Prev, ecx
+  {$else .CPUX64}
+    test r10, r10
+    lea rdx, [rsp - THeaderMediumEmpty.Prev - 8]
+    cmovz r10, rdx
+    mov [r10].THeaderMediumEmpty.Prev, r8
+  {$endif}
+
+  // Result
+  {$ifdef CPUX86}
+    mov eax, [esp - 8]
+    pop edi
+    pop esi
+    pop ebx
+  {$endif}
+  ret
+
+@full_allocated:
+  {$ifdef CPUX86}
+    add edx, ebx
+    sub ecx, 16
+    lea ebx, [edx + MASK_MEDIUM_ALLOCATED]
+    mov [ECX].THeaderMedium.Flags, ebx
+    add ecx, edx
+    shr edx, 4
+    movzx edx, byte ptr [MEDIUM_INDEXES + edx]
+    pop ebx
+  {$else .CPUX64}
+    add rdx, r9
+    sub r8, 16
+    lea r9, [rdx + MASK_MEDIUM_ALLOCATED]
+    mov [R8].THeaderMedium.Flags, r9
+    add r8, rdx
+    shr rdx, 4
+    lea rax, MEDIUM_INDEXES
+    movzx rdx, byte ptr [rax + rdx]
+  {$endif}
+  jmp TMediumManager.ExcludeEmpty
+
+@penalty:
+  {$ifdef CPUX86}
+    pop ebx
+    shr edx, 4
+    xor ecx, ecx
+  {$else .CPUX64}
+    shr rdx, 4
+    xor r8, r8
+  {$endif}
+  jmp TMediumManager.GetAdvanced
+
+@new_pool:
+  // if (HeapOf(Self).NewK64PoolMedium) then IndexDone(31)
+  {$ifdef CPUX86}
+    push eax
+    push edx
+    lea eax, [eax - TThreadHeap.FMedium]
+    call TThreadHeap.NewK64PoolMedium
+    test eax, eax
+    pop edx
+    pop eax
+    mov ecx, 31
+  {$else .CPUX64}
+    push rcx
+    push rdx
+    {stack align} push rax
+    lea rcx, [rcx - TThreadHeap.FMedium]
+    call TThreadHeap.NewK64PoolMedium
+    test rax, rax
+    {stack align} pop rax
+    pop rdx
+    pop rcx
+    mov r8d, 31
+  {$endif}
+  jnz @index_done
+
+  // Exit Self.ErrorOutOfMemory
+  {$ifdef CPUX86}
+    pop ebx
+  {$endif}
+  jmp TMediumManager.ErrorOutOfMemory
+
+@invalid_ptr:
+  {$ifdef CPUX86}
+    pop ebx
+  {$endif}
+  jmp TMediumManager.RaiseInvalidPtr
+end;
+{$endif}
 
 function TMediumManager.GetAdvanced(B16Count: NativeUInt; Align: NativeUInt{TMemoryAlign}): Pointer;
 label
@@ -6020,6 +6784,7 @@ retrieve_result:
 end;
 
 function TMediumManager.Reduce(P: Pointer; NewB16Count: NativeUInt{Word}): Pointer;
+{$ifdef PUREPASCAL}
 label
   invalid_ptr_retrieve_flags, invalid_ptr_retrieve_last,
   invalid_ptr_retrieve, invalid_ptr;
@@ -6174,8 +6939,276 @@ invalid_ptr:
     .RaiseInvalidPtr
   );
 end;
+{$else}
+asm
+  // x86: store v4, x64: store Self (rax)
+  // retrieve Size
+  {$ifdef CPUX86}
+    push ebx
+    movzx ecx, cx
+    shl ecx, 4
+  {$else .CPUX64}
+    xchg rax, rcx
+    movzx r8, r8w
+    shl r8, 4
+  {$endif}
+
+  // last size, next header
+  {$ifdef CPUX86}
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, eax
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @invalid_ptr
+    movzx eax, ax
+    cmp [edx + eax].THeaderMedium.PreviousSize, eax
+    lea edx, [edx + eax]
+    jne @invalid_ptr_retrieve
+  {$else .CPUX64}
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, rcx
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @invalid_ptr
+    movzx rcx, cx
+    cmp [rdx + rcx].THeaderMedium.PreviousSize, rcx
+    lea rdx, [rdx + rcx]
+    jne @invalid_ptr_retrieve
+  {$endif}
+
+  // vacant, check right empty
+  {$ifdef CPUX86}
+    mov ebx, [EDX].THeaderMedium.Flags
+    sub eax, ecx
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+  {$else .CPUX64}
+    mov r9, [RDX].THeaderMedium.Flags
+    sub rcx, r8
+    test r9, MASK_MEDIUM_EMPTY_TEST
+  {$endif}
+  jnz @right_not_empty
+
+  // check empty previous size
+  {$ifdef CPUX86}
+    add edx, ebx
+    cmp [EDX].THeaderMediumEmpty.Size, ebx
+  {$else .CPUX64}
+    add rdx, r9
+    cmp [RDX].THeaderMediumEmpty.Size, r9
+  {$endif}
+  jne @invalid_ptr_retrieve_flags
+
+  // mark new empty
+  {$ifdef CPUX86}
+    add ebx, eax
+    mov [EDX].THeaderMediumEmpty.Size, ebx
+    sub edx, ebx
+    mov [EDX].THeaderMedium.Flags, ebx
+  {$else .CPUX64}
+    add r9, rcx
+    mov [RDX].THeaderMediumEmpty.Size, r9
+    sub rdx, r9
+    mov [RDX].THeaderMedium.Flags, r9
+  {$endif}
+
+  // mark new allocated (Result)
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    sub edx, ecx
+    mov [EDX - 16].THeaderMedium.WSize, cx
+  {$else .CPUX64}
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    sub rdx, r8
+    mov [RDX - 16].THeaderMedium.WSize, r8w
+  {$endif}
+
+  // store full size (Result + Empty), empty indexes
+  {$ifdef CPUX86}
+    sub eax, ebx
+    add ecx, ebx
+    neg eax
+    shr ebx, 4
+    shr eax, 4
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+    movzx eax, byte ptr [MEDIUM_INDEXES + eax]
+  {$else .CPUX64}
+    sub rcx, r9
+    add r8, r9
+    neg rcx
+    shr r9, 4
+    shr rcx, 4
+    lea r10, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [r10 + r9]
+    movzx rcx, byte ptr [r10 + rcx]
+  {$endif}
+
+  // Result (optional call empty change index)
+  {$ifdef CPUX86}
+    add ecx, edx
+    cmp eax, ebx
+    jne @change_empty_index
+    pop ebx
+    xchg eax, edx
+    ret
+  @change_empty_index:
+    shl ebx, 5
+    and edx, MASK_K64_CLEAR
+    mov edx, [EDX].TK64PoolMedium.ThreadHeap
+    add eax, ebx
+    pop ebx
+    lea edx, [EDX + TThreadHeap.FMedium]
+    xchg eax, edx
+    jmp TMediumManager.ChangeEmptyIndex
+  {$else .CPUX64}
+    add r8, rdx
+    xchg rax, rdx
+    cmp rcx, r9
+    lea r9, [r9 * 8]
+    lea rcx, [rcx + r9 * 4]
+    xchg rcx, rdx
+    jne TMediumManager.ChangeEmptyIndex
+    ret
+  {$endif}
+
+@right_not_empty:
+  // check allocated
+  {$ifdef CPUX86}
+    and ebx, MASK_MEDIUM_ALLOCATED_TEST
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    and r9, MASK_MEDIUM_ALLOCATED_TEST
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @invalid_ptr_retrieve_last
+
+  // mark new empty
+  {$ifdef CPUX86}
+    sub eax, 16
+    mov [EDX].THeaderMedium.PreviousSize, eax
+    sub edx, 16
+    sub edx, eax
+    mov [EDX].THeaderMedium.Flags, eax
+  {$else .CPUX64}
+    sub rcx, 16
+    mov [RDX].THeaderMedium.PreviousSize, rcx
+    sub rdx, 16
+    sub rdx, rcx
+    mov [RDX].THeaderMedium.Flags, rcx
+  {$endif}
+
+  // mark new allocated (Result)
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    sub edx, ecx
+    mov [EDX - 16].THeaderMedium.WSize, cx
+  {$else .CPUX64}
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    sub rdx, r8
+    mov [RDX - 16].THeaderMedium.WSize, r8w
+  {$endif}
+
+  // Result (v2), Empty (v3), Index (v1), Self (v4)
+  {$ifdef CPUX86}
+    mov ebx, MASK_K64_CLEAR
+    and ebx, edx
+    mov ebx, [EBX].TK64PoolMedium.ThreadHeap
+    lea ebx, [EBX].TThreadHeap.FMedium
+
+    add ecx, edx
+    add ecx, eax
+    shr eax, 4
+    movzx eax, byte ptr [MEDIUM_INDEXES + eax]
+  {$else .CPUX64}
+    xchg rax, r9
+
+    add r8, rdx
+    add r8, rcx
+    shr rcx, 4
+    lea rax, [MEDIUM_INDEXES]
+    movzx rcx, byte ptr [rax + rcx]
+  {$endif}
+
+  // SetChecked, Next(v1), Empty
+  {$ifdef CPUX86}
+    push esi
+    mov esi, [EBX].TMediumManager.FMask
+    bts esi, eax
+    mov [EBX].TMediumManager.FMask, esi
+    pop esi
+
+    lea ebx, [EBX + eax * 4]
+    mov eax, [ebx]
+    mov [ebx], ecx
+  {$else .CPUX64}
+    mov r10, [R9].TMediumManager.FMask
+    bts r10, rcx
+    mov [R9].TMediumManager.FMask, r10
+
+    lea r9, [R9 + rcx * 8]
+    mov rcx, [R9]
+    mov [R9], r8
+  {$endif}
+
+  // Empty = (nil, Next); (Next <> nil)? Next.Prev := Empty
+  // v1: Next, v2: Result, v3: Empty, v4: none
+  {$ifdef CPUX86}
+    xor ebx, ebx
+    mov [ECX].THeaderMediumEmpty.Prev, ebx
+    mov [ECX].THeaderMediumEmpty.Next, eax
+
+    lea ebx, [esp - THeaderMediumEmpty.Prev - 4]
+    test eax, eax
+    DB $0F, $44, $C3 // cmovz eax, ebx
+    mov [EAX].THeaderMediumEmpty.Prev, ecx
+  {$else .CPUX64}
+    xor r9, r9
+    mov [R8].THeaderMediumEmpty.Prev, r9
+    mov [R8].THeaderMediumEmpty.Next, rcx
+
+    lea r9, [rsp - THeaderMediumEmpty.Prev - 8]
+    test rcx, rcx
+    cmovz rcx, r9
+    mov [RCX].THeaderMediumEmpty.Prev, r8
+  {$endif}
+
+  // Result
+  {$ifdef CPUX86}
+    xchg eax, edx
+    pop ebx
+  {$else .CPUX64}
+    xchg rax, rdx
+  {$endif}
+  ret
+
+@invalid_ptr_retrieve_flags:
+  {$ifdef CPUX86}
+  sub edx, ebx
+  {$endif}
+
+@invalid_ptr_retrieve_last:
+  {$ifdef CPUX86}
+  add eax, ecx
+  {$endif}
+
+@invalid_ptr_retrieve:
+  {$ifdef CPUX86}
+  sub edx, eax
+  {$endif}
+
+@invalid_ptr:
+  {$ifdef CPUX86}
+    and edx, MASK_K64_CLEAR
+    mov eax, [EDX].TK64PoolMedium.ThreadHeap
+    lea eax, [EAX].TThreadHeap.FMedium
+  {$else .CPUX64}
+    lea rcx, [RAX].TThreadHeap.FMedium
+  {$endif}
+  jmp TMediumManager.RaiseInvalidPtr
+end;
+{$endif}
 
 function TMediumManager.Grow(P: Pointer; GrowFlags: NativeUInt{NewB16Count: Word; Copy: Boolean}): Pointer;
+{$ifdef PUREPASCAL}
 label
   invalid_ptr_retrieve_empty, invalid_ptr_retrieve, invalid_ptr, penalty;
 var
@@ -6199,7 +7232,7 @@ begin
     if (Header.PreviousSize <> Flags) then goto invalid_ptr_retrieve;
   end;
 
-  // is next header empty
+  // is right header empty
   EmptyFlags := Header.Flags;
   if (EmptyFlags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE) then
   begin
@@ -6323,6 +7356,259 @@ invalid_ptr:
   Result := Pointer(PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.
     FMedium.RaiseInvalidPtr);
 end;
+{$else}
+asm
+  // x86: store v4, x64: store Self (rax)
+  // current Flags(v3), grow Size/Flags(v1)
+  {$ifdef CPUX86}
+    push ebx
+    mov eax, [EDX - 16].THeaderMedium.Flags
+    shl ecx, 4
+    xchg eax, ecx
+  {$else .CPUX64}
+    xchg rax, rcx
+    mov rcx, [RDX - 16].THeaderMedium.Flags
+    shl r8, 4
+    xchg rcx, r8
+  {$endif}
+
+  // check allocated, next header, growing size
+  {$ifdef CPUX86}
+    mov ebx, MASK_MEDIUM_ALLOCATED_TEST
+    and ebx, ecx
+    movzx ecx, cx
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @invalid_ptr
+    sub eax, ecx
+    cmp [EDX + ECX].THeaderMedium.PreviousSize, ecx
+    lea edx, [EDX + ECX]
+  {$else .CPUX64}
+    mov r9, MASK_MEDIUM_ALLOCATED_TEST
+    and r9, r8
+    movzx r8, r8w
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+    jne @invalid_ptr
+    sub rcx, r8
+    cmp [RDX + R8].THeaderMedium.PreviousSize, r8
+    lea rdx, [RDX + R8]
+  {$endif}
+  jne @invalid_ptr_retrieve
+
+  // is right header empty
+  {$ifdef CPUX86}
+    mov ebx, [EDX].THeaderMedium.Flags
+    test ebx, MASK_MEDIUM_EMPTY_TEST
+  {$else .CPUX64}
+    mov r9, [RDX].THeaderMedium.Flags
+    test r9, MASK_MEDIUM_EMPTY_TEST
+  {$endif}
+  jnz @right_not_empty
+
+  // is empty size enough
+  {$ifdef CPUX86}
+    lea eax, [eax - 16]
+    cmp bx, ax
+    lea eax, [eax + 16]
+  {$else .CPUX64}
+    lea rcx, [rcx - 16]
+    cmp r9w, cx
+    lea rcx, [rcx + 16]
+  {$endif}
+  jb @penalty_grow
+
+  // growing size
+  {$ifdef CPUX86}
+    movzx eax, ax
+  {$else .CPUX64}
+    movzx rcx, cx
+  {$endif}
+
+  // check empty
+  {$ifdef CPUX86}
+    add edx, ebx
+    cmp [EDX].THeaderMediumEmpty.Size, ebx
+  {$else .CPUX64}
+    add rdx, r9
+    cmp [RDX].THeaderMediumEmpty.Size, r9
+  {$endif}
+  jne @invalid_ptr_retrieve_empty
+
+  // is (empty size + 16 - growing size > 32) --> (empty size - growing size > 16)
+  {$ifdef CPUX86}
+    sub ebx, eax
+    cmp ebx, 16
+  {$else .CPUX64}
+    sub r9, rcx
+    cmp r9, 16
+  {$endif}
+  jle @full_allocated
+
+  // new allocted size, store last empty size
+  {$ifdef CPUX86}
+    add ecx, eax
+    add eax, ebx
+  {$else .CPUX64}
+    add r8, rcx
+    add rcx, r9
+  {$endif}
+
+  // mark new empty
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMediumEmpty.Size, ebx
+    sub edx, ebx
+    mov [EDX].THeaderMedium.Flags, ebx
+  {$else .CPUX64}
+    mov [RDX].THeaderMediumEmpty.Size, r9
+    sub rdx, r9
+    mov [RDX].THeaderMedium.Flags, r9
+  {$endif}
+
+  // mark new allocated (Result)
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMedium.PreviousSize, ecx
+    sub edx, ecx
+    mov [EDX - 16].THeaderMedium.WSize, cx
+  {$else .CPUX64}
+    mov [RDX].THeaderMedium.PreviousSize, r8
+    sub rdx, r8
+    mov [RDX - 16].THeaderMedium.WSize, r8w
+  {$endif}
+
+  // store full size (Result + Empty), empty indexes
+  {$ifdef CPUX86}
+    add ecx, ebx
+    shr eax, 4
+    shr ebx, 4
+    movzx eax, byte ptr [MEDIUM_INDEXES + eax]
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+  {$else .CPUX64}
+    add r8, r9
+    shr rcx, 4
+    shr r9, 4
+    lea r10, [MEDIUM_INDEXES]
+    movzx rcx, byte ptr [r10 + rcx]
+    movzx r9, byte ptr [r10 + r9]
+  {$endif}
+
+  // Result (optional call empty change index)
+  {$ifdef CPUX86}
+    add ecx, edx
+    cmp eax, ebx
+    jne @change_empty_index
+    pop ebx
+    xchg eax, edx
+    ret
+  @change_empty_index:
+    shl ebx, 5
+    and edx, MASK_K64_CLEAR
+    mov edx, [EDX].TK64PoolMedium.ThreadHeap
+    add eax, ebx
+    pop ebx
+    lea edx, [EDX + TThreadHeap.FMedium]
+    xchg eax, edx
+    jmp TMediumManager.ChangeEmptyIndex
+  {$else .CPUX64}
+    add r8, rdx
+    xchg rax, rdx
+    cmp rcx, r9
+    lea r9, [r9 * 8]
+    lea rcx, [rcx + r9 * 4]
+    xchg rcx, rdx
+    jne TMediumManager.ChangeEmptyIndex
+    ret
+  {$endif}
+
+@full_allocated:
+  // empty index, new allocated size
+  {$ifdef CPUX86}
+    add ebx, eax
+    add ecx, 16
+    add ecx, ebx
+    shr ebx, 4
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+  {$else .CPUX64}
+    add r9, rcx
+    add r8, 16
+    add r8, r9
+    shr r9, 4
+    lea r10, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [r10 + r9]
+  {$endif}
+
+  // mark allocated
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMediumEmpty.Size, ecx
+    sub edx, ecx
+    mov [EDX].THeaderMedium.WSize, cx
+  {$else .CPUX64}
+    mov [RDX].THeaderMediumEmpty.Size, r8
+    sub rdx, r8
+    mov [RDX].THeaderMedium.WSize, r8w
+  {$endif}
+
+  // exclude empty
+  {$ifdef CPUX86}
+    add ecx, edx
+    and edx, MASK_K64_CLEAR
+    mov eax, [EDX].TK64PoolMedium.ThreadHeap
+    pop edx
+    lea eax, [EAX].TThreadHeap.FMedium
+    xchg ebx, edx
+  {$else .CPUX64}
+    add r8, rdx
+    xchg rdx, r9
+    xchg rax, rcx
+  {$endif}
+  jmp TMediumManager.ExcludeEmpty
+
+@right_not_empty:
+  // check allocated flags
+  {$ifdef CPUX86}
+    and ebx, MASK_MEDIUM_ALLOCATED_TEST
+    cmp ebx, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    and r9, MASK_MEDIUM_ALLOCATED_TEST
+    cmp r9, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @invalid_ptr_retrieve
+
+@penalty_grow:
+  {$ifdef CPUX86}
+    sub edx, ecx
+    add ecx, eax
+    mov eax, MASK_K64_CLEAR
+    and eax, edx
+    mov eax, [EAX].TK64PoolMedium.ThreadHeap
+    pop ebx
+    lea eax, [EAX].TThreadHeap.FMedium
+  {$else .CPUX64}
+    sub rdx, r8
+    add r8, rcx
+    xchg rax, rcx
+  {$endif}
+  jmp TMediumManager.GrowPenalty
+
+@invalid_ptr_retrieve_empty:
+  {$ifdef CPUX86}
+  sub edx, ebx
+  {$endif}
+
+@invalid_ptr_retrieve:
+  {$ifdef CPUX86}
+  sub edx, ecx
+  {$endif}
+
+@invalid_ptr:
+  {$ifdef CPUX86}
+    and edx, MASK_K64_CLEAR
+    mov eax, [EDX].TK64PoolMedium.ThreadHeap
+    lea eax, [EAX].TThreadHeap.FMedium
+  {$else .CPUX64}
+    lea rcx, [RAX].TThreadHeap.FMedium
+  {$endif}
+  jmp TMediumManager.RaiseInvalidPtr
+end;
+{$endif}
 
 function TMediumManager.GrowPenalty(P: Pointer; GrowFlags: NativeUInt{NewSize: Word; shifted Copy: Boolean}): Pointer;
 var
@@ -6488,223 +7774,695 @@ begin
   end;
 end;
 
-function TMediumManager.Free(P: Pointer): Integer;
+function TMediumManager.FreeDisposePenalty(Header: PHeaderMedium; FlagIsTop: Boolean): Integer;
 const
   TOP_MEDIUM_EMPTY_INDEX = High(THeaderMediumList) - 1;
-label
-  current_right, current_right_markresize, left_current_right,
-  current, current_markinclude, left_current,
-  dispose_pool_left, dispose_pool_right,
-  invalid_ptr_retrieve_right, invalid_ptr_retrieve, invalid_ptr;
 var
-  Header: PHeaderMedium;
-  Flags, RightFlags, LeftFlags: NativeUInt;
   Pool: PK64PoolMedium;
   Empty: PHeaderMediumEmpty;
 begin
-  // check allocated (flags only), size, HeaderOf(P)
+  // parameters
+  Pool := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR);
+  if (FlagIsTop) then
   begin
-    Header := Pointer(NativeInt(P) - SizeOf(THeaderMedium));
-    Flags := Header.Flags;
+    Empty := Pointer(@Pool.Items[TOP_MEDIUM_EMPTY_INDEX]);
+  end else
+  begin
+    Empty := PHeaderMediumEmpty(NativeUInt(Header) - SizeOf(THeaderMedium));
+  end;
+
+  // exclude
+  Self.ExcludeEmpty(MEDIUM_INDEXES[Empty.Size shr 4], Empty);
+
+  // cleanup flags
+  Header.Flags := 0;
+
+  // dispose
+  Result := Pool.ThreadHeap.DisposeK64PoolMedium(Pool);
+end;
+
+function TMediumManager.Free(P: Pointer): Integer;
+const
+  INCREMENT_16_16 = 16 * ((1 shl 16) + 1);
+{$ifdef PUREPASCAL}
+label
+  exclude, include, done, dispose_left, dispose_top, invalid_ptr;
+var
+  Empty, Prev, Next: PHeaderMediumEmpty;
+  Flags, Index, LeftFlags, RightFlags: NativeUInt;
+  {$ifdef CPUX86}
+  Store: record
+    Flags: NativeUInt;
+  end;
+  {$endif}
+begin
+  // check allocated (flags only), size, EmptyOf(P)
+  begin
+    Empty := Pointer(NativeInt(P) - 32);
+    Flags := Empty.SiblingHeaderMedium.Flags;
     if (Flags and MASK_MEDIUM_ALLOCATED_TEST <> MASK_MEDIUM_ALLOCATED_VALUE) then goto invalid_ptr;
     Flags := Word(Flags);
   end;
 
-  // is left empty, HeaderOf(P) - 16
+  // is left empty
   begin
-    LeftFlags := Header.PreviousSize;
-    Dec(Header);
-    Dec(NativeUInt(Header), LeftFlags);
-    RightFlags{Buffer} := Byte(Header.Flags = LeftFlags);
-    Inc(NativeUInt(Header), LeftFlags);
-    LeftFlags := LeftFlags and NativeUInt(-NativeInt(RightFlags{Buffer}));
+    LeftFlags := Empty.SiblingHeaderMedium.PreviousSize;
+    Dec(NativeUInt(Empty), LeftFlags);
+    Index{Buffer} := Byte(PHeaderMedium(Empty).Flags = LeftFlags);
+    Inc(NativeUInt(Empty), LeftFlags);
   end;
 
-  // check allocated size, HeaderOf(Right)
+  // check allocated size, is right empty, modes
   begin
-    Inc(Header, 2);
-    Inc(NativeUInt(Header), Flags);
-    if (Header.PreviousSize <> Flags) then goto invalid_ptr_retrieve;
+    Inc(NativeUInt(Empty), Flags);
+    if (PHeaderMediumList(Empty)[2].PreviousSize <> Flags) then goto invalid_ptr;
+    Index := (Index shl 1) + Byte(PHeaderMediumList(Empty)[2].Flags and MASK_MEDIUM_EMPTY_TEST = MASK_MEDIUM_EMPTY_VALUE);
+    Inc(NativeUInt(Empty), 16);
   end;
 
-  // is right empty: resize/new
+  // different modes (empty is current)
+  if (Index <> 0) then
   begin
-    RightFlags := Header.Flags;
-    if (RightFlags and MASK_MEDIUM_EMPTY_TEST <> MASK_MEDIUM_EMPTY_VALUE) then goto current;
-  end;
-
-  // check right empty, EmptyOf(Right)
-  begin
-    Inc(NativeUInt(Header), RightFlags);
-    if (PHeaderMediumEmpty(Header).Size <> RightFlags) then goto invalid_ptr_retrieve_right;
-  end;
-
-current_right:
-  // (current + right) empty size, HeaderOf(current P)
-  begin
-    Inc(Flags, 16);
-    Inc(Flags, RightFlags);
-    Dec(NativeUInt(Header), Flags);
-  end;
-
-  // is left empty --> exclude left, total size
-  if (LeftFlags <> 0) then goto left_current_right;
-
-  // optional dispose pool
-  if (Flags = FULL_MEDIUM_EMPTY_SIZE) then goto dispose_pool_right;
-
-current_right_markresize:
-  // mark new empty size, EmptyOf(updated P)
-  begin
-    Header.Flags := Flags;
-    Inc(NativeUInt(Header), Flags);
-    PHeaderMediumEmpty(Header).Size := Flags;
-  end;
-
-  // optional change empty index, Result
-  begin
-    RightFlags := MEDIUM_INDEXES[RightFlags shr 4];
-    Flags := MEDIUM_INDEXES[Flags shr 4];
-    if (Flags = RightFlags) then
+    if (Index <> 1) then
     begin
-      Result := FREEMEM_DONE;
+      if (Index <> 3) then
+      begin
+        // left, current
+        Dec(NativeUInt(Empty), Flags);
+        Inc(Flags, Flags shl 16);
+        Index := PHeaderMedium(Empty).PreviousSize;
+        Inc(Flags, INCREMENT_16_16);
+        Inc(Flags, Index);
+        Dec(NativeUInt(Empty), 16);
+
+        Index := Byte(MEDIUM_INDEXES[Index shr 4]);
+        if (Word(Flags) <> FULL_MEDIUM_EMPTY_SIZE) then
+        begin
+          goto exclude;
+        end else
+        begin
+        dispose_left:
+          Result := Self.FreeDisposePenalty(@Empty.SiblingHeaderMedium, False);
+          Exit;
+        end;
+      end else
+      begin
+        // left, current, right
+
+        // right size
+        begin
+          RightFlags := PHeaderMediumList(Empty)[1].Flags;
+          Inc(NativeUInt(Empty), RightFlags);
+          if (PHeaderMediumList(Empty)[2].PreviousSize <> RightFlags) then goto invalid_ptr;
+          Inc(RightFlags, 16);
+          Dec(NativeUInt(Empty), Flags);
+          Inc(Flags, RightFlags);
+          Dec(NativeUInt(Empty), RightFlags);
+        end;
+
+        // left size, left exclude
+        begin
+          Index := Empty.Size;
+          Inc(Flags, 16);
+          Inc(Flags, Index);
+          Empty := Self.ExcludeEmpty(Byte(MEDIUM_INDEXES[Index shr 4]), Empty);
+          Inc(NativeUInt(Empty), Flags);
+          Dec(NativeUInt(Empty), 16);
+        end;
+
+        Index := Byte(MEDIUM_INDEXES[Empty.Size shr 4]);
+        if (Flags <> FULL_MEDIUM_EMPTY_SIZE) then
+        begin
+          goto exclude;
+        end else
+        begin
+          Dec(NativeUInt(Empty), Flags);
+          Inc(NativeUInt(Empty), PHeaderMedium(Empty).Flags);
+        dispose_top:
+          Result := Self.FreeDisposePenalty(@Empty.SiblingHeaderMedium, True);
+          Exit;
+        end;
+      end;
     end else
     begin
-      {$ifdef CPUX86}
-      PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
-      {$else}
-      Self
+      // current, right
+
+      // right size
+      begin
+        RightFlags := PHeaderMediumList(Empty)[1].Flags;
+        Inc(Flags, 16);
+        Inc(NativeUInt(Empty), RightFlags);
+        if (PHeaderMediumList(Empty)[2].PreviousSize <> RightFlags) then goto invalid_ptr;
+        Dec(NativeUInt(Empty), Flags);
+        Dec(NativeUInt(Empty), RightFlags);
+        Inc(Flags, RightFlags);
+      end;
+      if (Flags = FULL_MEDIUM_EMPTY_SIZE) then goto dispose_top;
+
+      // compare indexes
+      begin
+        Inc(NativeUInt(Empty), Flags);
+        Index := PHeaderMediumList(Empty)[2].PreviousSize;
+        Inc(NativeUInt(Empty), 16);
+        Index := Index shr 4;
+        Index := Byte(MEDIUM_INDEXES[Index]);
+
+        RightFlags := Byte(MEDIUM_INDEXES[Flags shr 4]);
+        if (Index = RightFlags) then goto done;
+      end;
+
+    exclude:
+      // inline ExcludeEmpty (Index)
+      {$ifdef DEBUG}
+      if (Self.FMask and (1 shl Index) = 0) then
+      begin
+        Result := Self.RaiseInvalidPtr;
+        Exit;
+      end;
       {$endif}
-        .ChangeEmptyIndex((Flags shl 5) + RightFlags, Pointer(Header));
+      begin
+        {$ifdef CPUX86}Store.Flags := Flags;{$endif}
+        Prev := Empty.Prev;
+        Next := Empty.Next;
+        if (NativeInt(Prev) or NativeInt(Next) = 0) then
+        begin
+          Self.FEmpties[Index] := Next{nil};
+          Self.FMask := Self.FMask and (not (1 shl Index));
+        end else
+        begin
+          if (Prev = nil) then
+          begin
+            Self.FEmpties[Index] := Next;
+          end else
+          begin
+            Prev.Next := Next;
+          end;
+          if (Next <> nil) then
+          begin
+            Next.Prev := Prev;
+          end;
+        end;
+        {$ifdef CPUX86}Flags := Store.Flags;{$endif}
+      end;
 
-      Result := FREEMEM_DONE;
+      // retrieve Empty, Flags
+      begin
+        Inc(NativeUInt(Empty), Flags shr 16);
+        Flags := Word(Flags);
+      end;
+
+      goto include;
     end;
-    Exit;
-  end;
-
-left_current_right:
-  // new empty size, EmptyOf(Left)
+  end else
   begin
-    Inc(Flags, 16);
-    Inc(Flags, LeftFlags);
-    Dec(Header);
-  end;
-
-  // exclude left
-  Header{P} :=
-  {$ifdef CPUX86}
-  PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
-  {$else}
-  Self
-  {$endif}
-    .ExcludeEmpty(MEDIUM_INDEXES[LeftFlags shr 4], Pointer(Header));
-
-  // HeaderOf(Left = updated P), optional dispose pool (header of last P)
-  begin
-    Dec(Header);
-    if (Flags <> FULL_MEDIUM_EMPTY_SIZE) then goto current_right_markresize;
-    Inc(NativeUInt(Header), Header.Flags);
-    Inc(Header);
-  end;
-
-dispose_pool_right:
-  // cleanup P flags
-  Header.Flags := 0;
-
-  // exclude and dispose
-  Header{Pool} := Pointer(NativeInt(Header) and MASK_K64_CLEAR);
-  PK64PoolMedium(Header{Pool}).ThreadHeap.FMedium.ExcludeEmpty(MEDIUM_INDEXES[RightFlags shr 4],
-    Pointer(@PK64PoolMedium(Header{Pool}).Items[TOP_MEDIUM_EMPTY_INDEX]));
-  Result := PK64PoolMedium(Header{Pool}).ThreadHeap.DisposeK64PoolMedium(Pointer(Header{Pool}));
-  Exit;
-
-
-current:
-  // retrieve P
-  Dec(NativeUInt(Header), Flags);
-
-  // is left empty
-  if (LeftFlags <> 0) then goto left_current;
-
-current_markinclude:
-  // mark new empty size
-  begin
-    Dec(Header);
-    Header.Flags := Flags;
-    Empty := Pointer(Header);
-    Inc(NativeUInt(Empty), Flags);
-    Empty.Size := Flags;
-  end;
-
-  // inline IncludeEmpty
-  begin
-    Flags := Byte(MEDIUM_INDEXES[Flags shr 4]);
-    Header{Self} := Pointer({$ifdef CPUX86}@PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium{$else}@Self{$endif});
+  include:
+    // inline IncludeEmpty
     begin
-      RightFlags{Next} := NativeUInt(PMediumManager(Header{Self}).FEmpties[Flags]);
-      PMediumManager(Header{Self}).FEmpties[Flags] := Empty;
-      PMediumManager(Header{Self}).FMask := PMediumManager(Header{Self}).FMask or (1 shl Flags);
+      Index := Byte(MEDIUM_INDEXES[Flags shr 4]);
+      begin
+        Next := Self.FEmpties[Index];
+        {$ifdef DEBUG}
+        if ((Self.FMask shr Index) and 1 <> Byte(Next <> nil)) then
+        begin
+          Result := Self.RaiseInvalidPtr;
+          Exit;
+        end;
+        {$endif}
+        Self.FEmpties[Index] := Empty;
+        Self.FMask := Self.FMask or (1 shl Index);
+      end;
+      Empty.Next := Next;
+      if (Next <> nil) then
+      begin
+        Next.Prev := Empty;
+      end;
+      Empty.Prev := nil;
     end;
-    Empty.Next := Pointer(RightFlags{Next});
-    if (RightFlags{Next} <> 0) then
+
+  done:
+    // current: mark empty
     begin
-      PHeaderMediumEmpty(RightFlags{Next}).Prev := Empty;
+      Empty.Size := Flags;
+      Dec(NativeUInt(Empty), Flags);
+      PHeaderMedium(Empty).Flags := Flags;
     end;
-    Empty.Prev := nil;
   end;
 
-  // done
+  // result
   Result := FREEMEM_DONE;
   Exit;
 
-left_current:
-  // new empty size, EmptyOf(Left)
-  begin
-    Inc(Flags, 16);
-    Inc(Flags, LeftFlags);
-    Dec(Header, 2);
-  end;
-
-  // exclude left
-  Header :=
-  {$ifdef CPUX86}
-  PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
-  {$else}
-  Self
-  {$endif}
-    .ExcludeEmpty(MEDIUM_INDEXES[LeftFlags shr 4], Pointer(Header));
-
-  // optional dispose pool
-  if (Flags <> FULL_MEDIUM_EMPTY_SIZE) then goto current_markinclude;
-
-dispose_pool_left:
-  // HeaderOf(Left) --> cleanup P flags
-  Dec(Header);
-  Inc(NativeUInt(Header), Header.Flags);
-  PHeaderMediumEmpty(Header).SiblingHeaderMedium.Flags := 0;
-  Pool := PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR);
-  Result := Pool.ThreadHeap.DisposeK64PoolMedium(Pool);
-  Exit;
-
-invalid_ptr_retrieve_right:
-  {$ifdef CPUX86}
-  Dec(NativeUInt(Header), RightFlags);
-  {$endif}
-
-invalid_ptr_retrieve:
-  {$ifdef CPUX86}
-  Dec(NativeUInt(Header), Flags);
-  {$endif}
-
 invalid_ptr:
-  Result :=
-  {$ifdef CPUX86}
-  PK64PoolMedium(NativeInt(Header) and MASK_K64_CLEAR).ThreadHeap.FMedium
-  {$else}
-  Self
-  {$endif}
-    .ErrorInvalidPtr;
+  Result := Self.ErrorInvalidPtr;
 end;
+{$else}
+asm
+  // check allocated flags, size, empty
+  {$ifdef CPUX86}
+    mov ecx, [EDX - 16].THeaderMedium.Flags
+    push ebx
+    push esi
+    push edi
+    mov esi, MASK_MEDIUM_ALLOCATED_TEST
+    and esi, ecx
+    lea edx, [edx - 32]
+    movzx ecx, cx
+    cmp esi, MASK_MEDIUM_ALLOCATED_VALUE
+  {$else .CPUX64}
+    mov r8, [RDX - 16].THeaderMedium.Flags
+    mov r10, MASK_MEDIUM_ALLOCATED_TEST
+    and r10, r8
+    lea rdx, [rdx - 32]
+    movzx r8, r8w
+    cmp r10, MASK_MEDIUM_ALLOCATED_VALUE
+  {$endif}
+  jne @invalid_ptr
+
+  // is left empty
+  {$ifdef CPUX86}
+    mov ebx, [EDX].THeaderMediumEmpty.SiblingHeaderMedium.PreviousSize
+    sub edx, ebx
+    cmp [EDX].THeaderMedium.Flags, ebx
+    lea edx, [EDX + ebx]
+    sete bl
+    movzx ebx, bl
+  {$else .CPUX64}
+    mov r9, [RDX].THeaderMediumEmpty.SiblingHeaderMedium.PreviousSize
+    sub rdx, r9
+    cmp [RDX].THeaderMedium.Flags, r9
+    lea rdx, [RDX + r9]
+    sete al
+    movzx r9, al
+  {$endif}
+
+  // check allocated size, is right empty, modes
+  {$ifdef CPUX86}
+    add edx, ecx
+    add ebx, ebx
+    cmp [EDX + 32].THeaderMedium.PreviousSize, ecx
+    jne @invalid_ptr
+    lea esi, [ebx + 1]
+    test [EDX + 32].THeaderMedium.Flags, MASK_MEDIUM_EMPTY_TEST
+    DB $0F, $44, $DE // cmovz ebx, esi
+    add edx, 16
+  {$else .CPUX64}
+    add rdx, r8
+    add r9, r9
+    cmp [RDX + 32].THeaderMedium.PreviousSize, r8
+    jne @invalid_ptr
+    lea r10, [r9 + 1]
+    test [RDX + 32].THeaderMedium.Flags, MASK_MEDIUM_EMPTY_TEST
+    cmovz r9, r10
+    add rdx, 16
+  {$endif}
+
+  // case Index of
+  {$ifdef CPUX86}
+    jmp dword ptr [@case + ebx * 4]
+    @case: DD @include, @current_right, @left_current, @left_current_right
+  {$else .CPUX64}
+    lea rax, [@case]
+    jmp qword ptr [rax + r9 * 8]
+    @case: DQ @include, @current_right, @left_current, @left_current_right
+  {$endif}
+@left_current:
+  // parameters, check full empty, jump exclude/enclude
+  {$ifdef CPUX86}
+    mov esi, ecx
+    sub edx, ecx
+    shl esi, 16
+    mov ebx, [EDX].THeaderMedium.PreviousSize
+    add ecx, esi
+    add ecx, INCREMENT_16_16
+    sub edx, 16
+    add ecx, ebx
+    shr ebx, 4
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+    cmp cx, FULL_MEDIUM_EMPTY_SIZE
+  {$else .CPUX64}
+    mov r10, r8
+    sub rdx, r8
+    shl r10, 16
+    mov r9, [RDX].THeaderMedium.PreviousSize
+    add r8, r10
+    add r8, INCREMENT_16_16
+    sub rdx, 16
+    add r8, r9
+    shr r9, 4
+    lea rax, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [rax + r9]
+    cmp r8w, FULL_MEDIUM_EMPTY_SIZE
+  {$endif}
+  jne @exclude
+
+  // dispose left
+  {$ifdef CPUX86}
+    pop edi
+    pop esi
+    pop ebx
+    lea edx, [EDX].THeaderMediumEmpty.SiblingHeaderMedium
+    xor ecx, ecx
+  {$else .CPUX64}
+    lea rdx, [RDX].THeaderMediumEmpty.SiblingHeaderMedium
+    xor r8, r8
+  {$endif}
+  jmp TMediumManager.FreeDisposePenalty
+
+@left_current_right:
+  // right size
+  {$ifdef CPUX86}
+    mov esi, [EDX].THeaderMediumEmpty.SiblingHeaderMedium.Flags
+    add edx, esi
+    cmp [EDX + 32].THeaderMedium.PreviousSize, esi
+    jne @invalid_ptr
+    add esi, 16
+    sub edx, ecx
+    add ecx, esi
+    sub edx, esi
+  {$else .CPUX64}
+    mov r10, [RDX].THeaderMediumEmpty.SiblingHeaderMedium.Flags
+    add rdx, r10
+    cmp [RDX + 32].THeaderMedium.PreviousSize, r10
+    jne @invalid_ptr
+    add r10, 16
+    sub rdx, r8
+    add r8, r10
+    sub rdx, r10
+  {$endif}
+
+  // left size, left exclude
+  {$ifdef CPUX86}
+    mov ebx, [EDX].THeaderMediumEmpty.Size
+    add ecx, 16
+    add ecx, ebx
+    shr ebx, 4
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+    push eax
+    push ecx
+    mov ecx, edx
+    mov edx, ebx
+      call TMediumManager.ExcludeEmpty
+    pop ecx
+    add eax, ecx
+    pop edx
+    mov ebx, [EAX - 16].THeaderMediumEmpty.Size
+    shr ebx, 4
+    sub eax, 16
+    xchg eax, edx
+    cmp ecx, FULL_MEDIUM_EMPTY_SIZE
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+  {$else .CPUX64}
+    mov r9, [RDX].THeaderMediumEmpty.Size
+    add r8, 16
+    add r8, r9
+    shr r9, 4
+    lea rax, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [rax + r9]
+    push rcx
+    {stack align}push r9
+    push r8
+    mov r8, rdx
+    mov rdx, r9
+      call TMediumManager.ExcludeEmpty
+    pop r8
+    {stack align}pop r9
+    add rax, r8
+    pop rdx
+    mov r9, [RAX - 16].THeaderMediumEmpty.Size
+    shr r9, 4
+    lea rcx, [rax - 16]
+    xchg rcx, rdx
+    cmp r8, FULL_MEDIUM_EMPTY_SIZE
+    lea rax, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [rax + r9]
+  {$endif}
+  jne @exclude
+
+  // empty correction
+  {$ifdef CPUX86}
+    sub edx, ecx
+    add edx, [EDX].THeaderMedium.Flags
+  {$else .CPUX64}
+    sub rdx, r8
+    add rdx, [RDX].THeaderMedium.Flags
+  {$endif}
+
+@dispose_top:
+  {$ifdef CPUX86}
+    lea edx, [EDX].THeaderMediumEmpty.SiblingHeaderMedium
+    mov ecx, 1
+    pop edi
+    pop esi
+    pop ebx
+  {$else .CPUX64}
+    lea rdx, [RDX].THeaderMediumEmpty.SiblingHeaderMedium
+    mov r8d, 1
+  {$endif}
+  jmp TMediumManager.FreeDisposePenalty
+
+@current_right:
+  // right size, check full empty
+  {$ifdef CPUX86}
+    mov esi, [EDX].THeaderMediumEmpty.SiblingHeaderMedium.Flags
+    add ecx, 16
+    add edx, esi
+    cmp [EDX + 32].THeaderMedium.PreviousSize, esi
+    jne @invalid_ptr
+    sub edx, ecx
+    sub edx, esi
+    add ecx, esi
+    cmp ecx, FULL_MEDIUM_EMPTY_SIZE
+  {$else .CPUX64}
+    mov r10, [RDX].THeaderMediumEmpty.SiblingHeaderMedium.Flags
+    add r8, 16
+    add rdx, r10
+    cmp [RDX + 32].THeaderMedium.PreviousSize, r10
+    jne @invalid_ptr
+    sub rdx, r8
+    sub rdx, r10
+    add r8, r10
+    cmp r8, FULL_MEDIUM_EMPTY_SIZE
+  {$endif}
+  je @dispose_top
+
+  // compare indexes
+  {$ifdef CPUX86}
+    add edx, ecx
+    mov ebx, [EDX + 32].THeaderMedium.PreviousSize
+    add edx, 16
+    mov esi, ecx
+    shr ebx, 4
+    shr esi, 4
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+    movzx esi, byte ptr [MEDIUM_INDEXES + esi]
+    cmp ebx, esi
+  {$else .CPUX64}
+    add rdx, r8
+    mov r9, [RDX + 32].THeaderMedium.PreviousSize
+    add rdx, 16
+    mov r10, r8
+    shr r9, 4
+    shr r10, 4
+    lea rax, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [rax + r9]
+    movzx r10, byte ptr [rax + r10]
+    cmp r9, r10
+  {$endif}
+  je @done
+
+@exclude:
+  {$ifdef DEBUG}
+     // if (not Self.FMask.Checked(Index)) then Exit Self.RaiseInvalidPtr
+    {$ifdef CPUX86}
+      mov esi, [EAX].TMediumManager.FMask
+      bt esi, ebx
+    {$else .CPUX64}
+      mov r10, [RCX].TMediumManager.FMask
+      bt r10, r9
+    {$endif}
+    jnc @raise_invalid_ptr
+  {$endif}
+
+  // prev, next, optional uncheck bit
+  {$ifdef CPUX86}
+    mov esi, [EDX].THeaderMediumEmpty.Prev
+    mov edi, [EDX].THeaderMediumEmpty.Next
+    or edi, esi
+    mov edi, [EDX].THeaderMediumEmpty.Next
+    jnz @exclude_swap_links
+    mov [EAX + ebx * 4], esi
+    mov edi, [EAX].TMediumManager.FMask
+    btr edi, ebx
+    mov [EAX].TMediumManager.FMask, edi
+  {$else .CPUX64}
+    mov r10, [RDX].THeaderMediumEmpty.Prev
+    mov r11, [RDX].THeaderMediumEmpty.Next
+    mov rax, r10
+    or rax, r11
+    jnz @exclude_swap_links
+    mov [RCX + r9 * 8], r10
+    mov r11, [RCX].TMediumManager.FMask
+    btr r11, r9
+    mov [RCX].TMediumManager.FMask, r11
+  {$endif}
+  jmp @exclude_done
+
+@exclude_swap_links:
+  // (Prev(v5) = nil)? Self.FEmpties[Index(v4)]/Prev(v5).Next := Next(v6)
+  {$ifdef CPUX86}
+    lea ebx, [EAX + ebx * 4]
+    test esi, esi
+    lea ebx, [EBX - THeaderMediumEmpty.Next]
+    DB $0F, $45, $DE // cmovnz ebx, esi
+    mov [EBX].THeaderMediumEmpty.Next, edi
+  {$else .CPUX64}
+    lea r9, [RCX + r9 * 8]
+    test r10, r10
+    lea r9, [R9 - THeaderMediumEmpty.Next]
+    cmovnz r9, r10
+    mov [R9].THeaderMediumEmpty.Next, r11
+  {$endif}
+
+  // (Next(v6) <> nil)? Next.Prev := Prev(v5)
+  {$ifdef CPUX86}
+    lea ebx, [esp - THeaderMediumEmpty.Prev - 4]
+    test edi, edi
+    DB $0F, $44, $FB // cmovz edi, ebx
+    mov [edi].THeaderMediumEmpty.Prev, esi
+  {$else .CPUX64}
+    lea r9, [rsp - THeaderMediumEmpty.Prev - 8]
+    test r11, r11
+    cmovz r11, r9
+    mov [r11].THeaderMediumEmpty.Prev, r10
+  {$endif}
+
+@exclude_done:
+  // retrieve Empty, Flags
+  {$ifdef CPUX86}
+    mov ebx, ecx
+    shr ebx, 16
+    movzx ecx, cx
+    add edx, ebx
+  {$else .CPUX64}
+    mov r9, r8
+    shr r9, 16
+    movzx r8, r8w
+    add rdx, r9
+  {$endif}
+
+@include:
+  // Index(v4), Next(v6)
+  {$ifdef CPUX86}
+    mov ebx, ecx
+    shr ebx, 4
+    movzx ebx, byte ptr [MEDIUM_INDEXES + ebx]
+    mov edi, [EAX + ebx * 4]
+  {$else .CPUX64}
+    mov r9, r8
+    shr r9, 4
+    lea rax, [MEDIUM_INDEXES]
+    movzx r9, byte ptr [rax + r9]
+    mov r11, [RCX + r9 * 8]
+  {$endif}
+
+  // Debug: if ((Self.FMask shr Index) and 1 <> Byte(Next <> nil)) then Exit Self.RaiseInvalidPtr
+  {$ifdef DEBUG}
+    {$ifdef CPUX86}
+      push ecx
+      mov esi, [EAX].TMediumManager.FMask
+      mov ecx, ebx
+      shr esi, cl
+      and esi, 1
+      test edi, edi
+      setnz cl
+      cmp esi, ecx
+      pop ecx
+    {$else .CPUX64}
+      push rcx
+      mov r10, [RCX].TMediumManager.FMask
+      mov rcx, r9
+      shr r10, cl
+      and r10, 1
+      test r11, r11
+      setnz cl
+      cmp r10, rcx
+      pop rcx
+    {$endif}
+    jne @raise_invalid_ptr
+  {$endif}
+
+   // Self.FEmpties[Index] := Empty, Self.FMask.SetChecked(Index), Empty.Next := Next
+  {$ifdef CPUX86}
+     mov [EAX + ebx * 4], edx
+     mov esi, [EAX].TMediumManager.FMask
+     bts esi, ebx
+     mov [EAX].TMediumManager.FMask, esi
+     mov [EDX].THeaderMediumEmpty.Next, edi
+  {$else .CPUX64}
+     mov [RCX + r9 * 8], rdx
+     mov r10, [RCX].TMediumManager.FMask
+     bts r10, r9
+     mov [RCX].TMediumManager.FMask, r10
+     mov [RDX].THeaderMediumEmpty.Next, r11
+  {$endif}
+
+  // (Next(v6) <> nil)? Next.Prev := Empty(v2), Empty.Prev := nil
+  {$ifdef CPUX86}
+    lea esi, [esp - THeaderMediumEmpty.Prev - 4]
+    test edi, edi
+    DB $0F, $44, $FE // cmovz edi, esi
+    mov [EDI].THeaderMediumEmpty.Prev, edx
+    xor eax, eax
+    mov [EDX].THeaderMediumEmpty.Prev, eax
+  {$else .CPUX64}
+    lea r10, [rsp - THeaderMediumEmpty.Prev - 8]
+    test r11, r11
+    cmovz r11, r10
+    mov [R11].THeaderMediumEmpty.Prev, rdx
+    xor rcx, rcx
+    mov [RDX].THeaderMediumEmpty.Prev, rcx
+  {$endif}
+
+@done:
+  // current: mark empty
+  {$ifdef CPUX86}
+    mov [EDX].THeaderMediumEmpty.Size, ecx
+    sub edx, ecx
+    mov [EDX].THeaderMedium.Flags, ecx
+  {$else .CPUX64}
+    mov [RDX].THeaderMediumEmpty.Size, r8
+    sub rdx, r8
+    mov [RDX].THeaderMedium.Flags, r8
+  {$endif}
+
+  // result
+  {$ifdef CPUX86}
+    pop edi
+    pop esi
+    pop ebx
+  {$endif}
+  mov eax, FREEMEM_DONE
+  ret
+
+@invalid_ptr:
+  {$ifdef CPUX86}
+    pop edi
+    pop esi
+    pop ebx
+  {$endif}
+  jmp TMediumManager.ErrorInvalidPtr
+
+{$ifdef DEBUG}
+@raise_invalid_ptr:
+  {$ifdef CPUX86}
+    pop edi
+    pop esi
+    pop ebx
+  {$endif}
+  jmp TMediumManager.RaiseInvalidPtr
+{$endif}
+end;
+{$endif}
 
 function TThreadHeap.FreeDifficult(P: Pointer; ReturnAddress: Pointer): Integer;
 var
