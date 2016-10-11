@@ -108,16 +108,31 @@ unit BrainMM;
   {$define PUREPASCAL}
 {$endif}
 
-{$ifNdef BRAINMM_NOREDIRECT}
-  {$ifNdef PUREPASCAL}
-    {$ifdef CONDITIONALEXPRESSIONS}
-      {$if Defined(CPUINTEL) and not Defined(FPC)}
-        {$define BRAINMM_REDIRECT}
-      {$ifend}
-    {$else}
+{$ifdef BRAINMM_NOREDIRECT}
+  {$undef BRAINMM_REDIRECT}
+{$else}
+  {$ifNdef BRAINMM_REDIRECT}
+    {$ifNdef DEBUG}
       {$define BRAINMM_REDIRECT}
     {$endif}
   {$endif}
+  {$ifdef PUREPASCAL}
+    {$undef BRAINMM_REDIRECT}
+  {$endif}
+  {$ifNdef CPUINTEL}
+    {$undef BRAINMM_REDIRECT}
+  {$endif}
+  {$ifNdef BRAINMM_REDIRECT}
+    {$define BRAINMM_NOREDIRECT}
+  {$endif}
+{$endif}
+
+{$ifdef CONDITIONALEXPRESSIONS}
+  {$if Defined(FPC) or (CompilerVersion < 18)}
+    {$define MANAGERFLAGSEMULATE}
+  {$ifend}
+{$else}
+  {$define MANAGERFLAGSEMULATE}
 {$endif}
 
 interface
@@ -241,6 +256,13 @@ type
     function SyncGetMemory(Size: NativeInt): Pointer;
     procedure SyncFreeMemory(P: Pointer);
   end;
+
+
+{$ifdef MANAGERFLAGSEMULATE}
+var
+  ReportMemoryLeaksOnShutdown: Boolean;
+  NeverSleepOnMMThreadContention: Boolean;
+{$endif}
 
 {$ifNdef BRAINMM_UNITTEST}
 implementation
@@ -653,10 +675,22 @@ type
  (* Extended memory API *)
 
 type
+  TBrainMMOptions = packed record
+    RecordSize: Integer;
+    Version: Integer;
+    // version = 1
+    FreePacalCompiler: Boolean;
+    PurePascal: Boolean;
+    Redirect: Boolean;
+    ReportMemoryLeaksOnShutdown: PBoolean;
+  end;
+  PBrainMMOptions = ^TBrainMMOptions;
+
   TBrainMemoryManager = packed record
   case Integer of
     0: (
         BrainMM: packed record
+          Options: PBrainMMOptions;
           {$ifdef MSWINDOWS}
           ThreadFuncEvent: function(ThreadFunc: TThreadFunc; Parameter: Pointer): Pointer;
           {$else .POSIX}
@@ -668,7 +702,7 @@ type
           GetMemoryPages: function(Count: NativeUInt; PagesMode: NativeUInt): MemoryPages;
           FreeMemoryPages: function(Pages: MemoryPages; PagesMode: NativeUInt): Boolean;
           ResizeMemoryPages: function(Pages: MemoryPages; NewCount: NativeUInt; ResizePagesFlags: NativeUInt): MemoryPages;
-          Reserved: array[1..5] of Pointer;
+          Reserved: array[1..4] of Pointer;
           GetMemAligned: function(Align: TMemoryAlign; Size: NativeUInt): Pointer;
           RegetMem: function(P: Pointer; NewSize: NativeUInt): Pointer;
         end;
@@ -9510,11 +9544,34 @@ begin
 end;
 
 
+const
+  BRAINMM_OPTIONS_VERSION = 1;
+  BrainMMOptions: TBrainMMOptions = (
+    RecordSize: SizeOf(TBrainMMOptions);
+    Version: BRAINMM_OPTIONS_VERSION;
+    FreePacalCompiler: {$ifdef FPC}True{$else}False{$endif};
+    Redirect: {$ifdef BRAINMM_REDIRECT}True{$else}False{$endif};
+    ReportMemoryLeaksOnShutdown: @{$ifdef MANAGERFLAGSEMULATE}BrainMM{$else}System{$endif}.ReportMemoryLeaksOnShutdown;
+  );
+
+var
+  BrainMMRegistered: ^TBrainMemoryManager;
+  BrainMMFreeMemOriginal: function(P: Pointer): Integer;
+  {$ifdef MSWINDOWS}
+  BrainMMRegisteredHandle: HWND;
+  {$endif}
+
+function BrainMMFreeMemInverter(P: Pointer): Integer;
+begin
+  Result := BrainMMFreeMemOriginal(P);
+  Result := Byte(Result = 0);
+end;
+
 {$ifdef MSWINDOWS}
 type
   TJumpInfo = packed record
     CodeOffset: Cardinal;
-    Jump: Pointer;
+    Jump: {P}Pointer;
     JumpOffset: Cardinal;
   end;
 
@@ -9539,7 +9596,7 @@ begin
   for i := Low(Jumps) to High(Jumps) do
   with Jumps[i] do
   begin
-    PInteger(@Buffer[CodeOffset])^ := NativeInt(Jump) -
+    PInteger(@Buffer[CodeOffset])^ := NativeInt(PPointer(Jump)^) -
       (NativeInt(AddrProc) + NativeInt(CodeOffset) + 4) + NativeInt(JumpOffset);
   end;
 
@@ -9684,41 +9741,49 @@ end;
 
 procedure BrainMMRedirectInitialize;
 const
+  PRecallFreeMem: Pointer = @RecallFreeMem;
+  PRecallGetMem: Pointer = @RecallGetMem;
+
   JUMPS_GETMEM: array[0..0] of TJumpInfo = (
     ( CodeOffset: {$ifdef CPUX86}7{$else .CPUX64}9{$endif};
-      Jump: @BrainMMGetMem; JumpOffset: 4)
+      Jump: @@MemoryManager.Standard.GetMem; JumpOffset: 4)
   );
   JUMPS_ALLOCMEM: array[0..0] of TJumpInfo = (
     ( CodeOffset: {$ifdef CPUX86}7{$else .CPUX64}9{$endif};
-      Jump: @BrainMMAllocMem; JumpOffset: 4)
+      Jump: @@MemoryManager.Standard.AllocMem; JumpOffset: 4)
   );
   JUMPS_FREEMEM: array[0..0] of TJumpInfo = (
     ( CodeOffset: {$ifdef CPUX86}7{$else .CPUX64}9{$endif};
-      Jump: @BrainMMFreeMem; JumpOffset: 4)
+      Jump: @@MemoryManager.Standard.FreeMem; JumpOffset: 4)
   );
   JUMPS_REALLOCMEM: array[0..2] of TJumpInfo = (
     ( CodeOffset: {$ifdef CPUX86}8{$else .CPUX64}11{$endif};
-      Jump: @RecallFreeMem; JumpOffset: 0),
+      Jump: @PRecallFreeMem; JumpOffset: 0),
     ( CodeOffset: {$ifdef CPUX86}16{$else .CPUX64}20{$endif};
-      Jump: @RecallGetMem; JumpOffset: 0),
+      Jump: @PRecallGetMem; JumpOffset: 0),
     ( CodeOffset: {$ifdef CPUX86}26{$else .CPUX64}29{$endif};
-      Jump: @BrainMMReallocMem; JumpOffset: 8)
+      Jump: @@MemoryManager.Standard.ReallocMem; JumpOffset: 8)
   );
   JUMPS_REGETMEM: array[0..2] of TJumpInfo = (
     ( CodeOffset: {$ifdef CPUX86}8{$else .CPUX64}11{$endif};
-      Jump: @RecallFreeMem; JumpOffset: 0),
+      Jump: @PRecallFreeMem; JumpOffset: 0),
     ( CodeOffset: {$ifdef CPUX86}16{$else .CPUX64}20{$endif};
-      Jump: @RecallGetMem; JumpOffset: 0),
+      Jump: @PRecallGetMem; JumpOffset: 0),
     ( CodeOffset: {$ifdef CPUX86}26{$else .CPUX64}29{$endif};
-      Jump: @BrainMMRegetMem; JumpOffset: 8)
+      Jump: @@MemoryManager.BrainMM.RegetMem; JumpOffset: 8)
   );
 begin
   PatchRedirect(AddrGetMem, {$ifdef CPUX86}14{$else .CPUX64}17{$endif},
     @RedirectGetMem, JUMPS_GETMEM);
   PatchRedirect(AddrAllocMem, {$ifdef CPUX86}14{$else .CPUX64}17{$endif},
     @RedirectAllocMem, JUMPS_ALLOCMEM);
-  PatchRedirect(AddrFreeMem, {$ifdef CPUX86}17{$else .CPUX64}19{$endif},
-    @RedirectFreeMem, JUMPS_FREEMEM);
+  if (BrainMMRegistered = nil) or (
+   (BrainMMRegistered.BrainMM.Options.Version = BRAINMM_OPTIONS_VERSION) and
+   (BrainMMRegistered.BrainMM.Options.FreePacalCompiler = {$ifdef FPC}True{$else}False{$endif})) then
+  begin
+    PatchRedirect(AddrFreeMem, {$ifdef CPUX86}17{$else .CPUX64}19{$endif},
+      @RedirectFreeMem, JUMPS_FREEMEM);
+  end;
   PatchRedirect(AddrReallocMem, {$ifdef CPUX86}30{$else .CPUX64}33{$endif},
     @RedirectReallocRegetMem, JUMPS_REALLOCMEM);
   PatchRedirect(@RegetMem, {$ifdef CPUX86}30{$else .CPUX64}33{$endif},
@@ -9729,12 +9794,14 @@ end;
 procedure BrainMMInitialize;
 {$ifdef THREAD_FUNCS_EMULATE}
 const
+  P__BeginThread: Pointer = @__BeginThread;
+  P__EndThread: Pointer = @__EndThread;
   JUMP_BYTES: array[1..5] of Byte = ($E9, 0, 0, 0, 0);
   JUMP_BEGIN_THREAD: array[0..0] of TJumpInfo = (
-    (CodeOffset: 1; Jump: @__BeginThread; JumpOffset: 0)
+    (CodeOffset: 1; Jump: @P__BeginThread; JumpOffset: 0)
   );
   JUMP_END_THREAD: array[0..0] of TJumpInfo = (
-    (CodeOffset: 1; Jump: @__EndThread; JumpOffset: 0)
+    (CodeOffset: 1; Jump: @P__EndThread; JumpOffset: 0)
   );
 {$endif}
 {$ifdef BRAINMM_REDIRECT}{$ifdef CPUX86}
@@ -9745,19 +9812,19 @@ type
   PMemoryMgr = {$ifdef MEMORYMANAGEREX}^TMemoryManagerEx{$else}^TMemoryManager{$endif};
 {$ifdef MSWINDOWS}
 const
-  BRAINMM_MARKER: array[1..25] of AnsiChar = 'BRAIN_MEMORY_MANAGER_PID_';
+  BRAINMM_MARKER: array[1..18] of AnsiChar = 'Local\BrainMM_PID_';
   HEX_CHARS: array[0..15] of AnsiChar = '0123456789ABCDEF';
 var
   i: Integer;
   ProcessId: Cardinal;
   Buffer: array[0..SizeOf(BRAINMM_MARKER) + 8] of AnsiChar;
-  Handle: HWND;
-  BrainMMRegistered: ^TBrainMemoryManager;
+  MapAddress: Pointer;
 {$endif}
 begin
   InitializeMediumIndexes;
   InitializeMediumOffsets;
 
+  MemoryManager.BrainMM.Options := @BrainMMOptions;
   MemoryManager.BrainMM.ThreadFuncEvent := BrainMMThreadFuncEvent;
   MemoryManager.BrainMM.EndThreadEvent := BrainMMEndThreadEvent;
   MemoryManager.BrainMM.GetMemoryBlock := BrainMMGetMemoryBlock;
@@ -9785,35 +9852,30 @@ begin
     end;
     Buffer[High(Buffer)] := #0;
 
-    Handle := FindWindowA('STATIC', Buffer);
-    if (Handle = 0) then
+    BrainMMRegisteredHandle := OpenFileMappingA(FILE_MAP_READ, False, Buffer);
+    if (BrainMMRegisteredHandle = 0) then
     begin
-      Handle := CreateWindowA('STATIC', Buffer, WS_POPUP, 0, 0, 0, 0, 0, 0, HInstance, nil);
-      SetWindowLong(Handle, GWL_USERDATA, NativeInt(@MemoryManager));
-
-      UnknownThreadHeap := CreateThreadHeap(False);
-      UnknownThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
-      {$ifdef PUREPASCAL}
-        MainThreadHeap := CreateThreadHeap(True);
-      {$else}
-        MainThreadHeap := ThreadHeapInstance;
-      {$endif}
-
-      {$ifdef BRAINMM_REDIRECT}
-        BrainMMRedirectInitialize;
-      {$endif}
+      BrainMMRegisteredHandle := CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0, SizeOf(Pointer), Buffer);
+      MapAddress := MapViewOfFile(BrainMMRegisteredHandle, FILE_MAP_WRITE, 0, 0, 0);
+      PPointer(MapAddress)^ := @MemoryManager;
+      UnmapViewOfFile(MapAddress);
     end else
     begin
-      BrainMMRegistered := Pointer(GetWindowLong(Handle, GWL_USERDATA));
-
-      for i := Low(BrainMMRegistered.POINTERS) to High(BrainMMRegistered.POINTERS) do
-      if (BrainMMRegistered.POINTERS[i] <> nil) then
-        MemoryManager.POINTERS[i] := BrainMMRegistered.POINTERS[i];
+      MapAddress := MapViewOfFile(BrainMMRegisteredHandle, FILE_MAP_READ, 0, 0, 0);
+      BrainMMRegistered := PPointer(MapAddress)^;
+      UnmapViewOfFile(MapAddress);
+      CloseHandle(BrainMMRegisteredHandle);
+      BrainMMRegisteredHandle := 0;
     end;
   end;
   {$else .POSIX}
   begin
     // ToDo
+  end;
+  {$endif}
+
+  if (not Assigned(BrainMMRegistered)) then
+  begin
     UnknownThreadHeap := CreateThreadHeap(False);
     UnknownThreadHeap.LockFlags := THREAD_HEAP_LOCKABLE;
     {$ifdef PUREPASCAL}
@@ -9821,8 +9883,28 @@ begin
     {$else}
       MainThreadHeap := ThreadHeapInstance;
     {$endif}
+
+    {$ifdef BRAINMM_REDIRECT}
+      BrainMMRedirectInitialize;
+    {$endif}
+  end else
+  begin
+    for i := Low(BrainMMRegistered.POINTERS) to High(BrainMMRegistered.POINTERS) do
+    if (BrainMMRegistered.POINTERS[i] <> nil) then
+      MemoryManager.POINTERS[i] := BrainMMRegistered.POINTERS[i];
+
+    if (BrainMMRegistered.BrainMM.Options.FreePacalCompiler <> {$ifdef FPC}True{$else}False{$endif}) then
+    begin
+      BrainMMFreeMemOriginal := MemoryManager.Standard.FreeMem;
+      MemoryManager.Standard.FreeMem := BrainMMFreeMemInverter;
+    end;
+
+    {$ifdef BRAINMM_REDIRECT}
+    if (BrainMMRegistered.BrainMM.Options.Version = BRAINMM_OPTIONS_VERSION) and
+      (not BrainMMRegistered.BrainMM.Options.PurePascal) then
+      BrainMMRedirectInitialize;
+    {$endif}
   end;
-  {$endif}
 
   {$ifdef MSWINDOWS}
     {$ifdef THREAD_FUNCS_EMULATE}
@@ -9848,6 +9930,21 @@ begin
   SetMemoryManager(PMemoryMgr(@MemoryManager.Standard)^);
 end;
 
+procedure BrainMMFinalize;
+begin
+  {$ifdef MSWINDOWS}
+  if (BrainMMRegisteredHandle <> 0) then
+    CloseHandle(BrainMMRegisteredHandle);
+  {$endif}
+
+  if (not ReportMemoryLeaksOnShutdown) then Exit;
+  if (Assigned(BrainMMRegistered)) then
+  begin
+    BrainMMRegistered.BrainMM.Options.ReportMemoryLeaksOnShutdown^ := True;
+    Exit;
+  end;
+end;
+
 
 initialization
   {$ifdef CPUX86}
@@ -9859,5 +9956,6 @@ initialization
   BrainMMInitialize;
 
 finalization
+  BrainMMFinalize;
 
 end.

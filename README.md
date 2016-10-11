@@ -13,16 +13,14 @@ On the other side, as the time goes by, popular memory manager FastMM fails to c
 That is why I started working on project BrainMM, i.e. the memory manager designed on the basis of modern application requirements. I sincerely believe that with time the project will grow to the level of standard Delphi/C++ Builder supply, along with other great libraries. BrainMM memory manager features:
 * Extremely high performance (*not fully implemented*)
 * No locks for memory pieces up to 32Kb
-* Support of all operating systems envisaged by Delphi/C++ Builder
-* DLL-shared memory
+* Support of all operating systems envisaged by Delphi and C++ Builder
+* DLL-shared memory (Delphi/FPC compatibility)
 * Guaranteed aligned address for 16 bytes. It is useful for lock-free algorithms, SEE operations and in general at memory reading/writing/copying
 * RegetMem function. Functionally similar to ReallocMem, but does not guarantee data safety, that is why in some cases it can work faster
 * GetMemAligned function. Allows allocating memory with specific alignment. This memory is released in a standard way, via FreeMem. When the size is changed using ReallocMem/RegetMem, the alignment is preserved. The exception is when NewSize equals zero, in this case, FreeMem shall be induced and alignment information will be lost
 * API for memory block allocation (*not fully implemented*). BrainMM memory blocks are memory pieces of specific granularity, the size of which is unchangeable. Memory blocks are useful for highly specialized performance-demanding memory management. Service information can be stored at the beginning of the block, access to this information may be received by applying the logical multiplication (`and`) operation to the pointer. The management of small (up to 128 bytes) and medium (up to 32Kb) memory pieces in BrainMM is performed, for example, with the help of blocks of 64Kb
 * API for work with memory pages (*not fully implemented*)
  
-Despite the fact that the library underwent a range of unit-tests, at the moment it is on the **unofficial release** stage and it is **not recommended** to use it in commercial applications.
-
 ##### Performance
 This test was conducted on the basis of [Steve Maughan's article](http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/). Source codes are in the repository, but you can also [download binary files]( http://dmozulyov.ucoz.net/BrainMM/Demo.rar).
 
