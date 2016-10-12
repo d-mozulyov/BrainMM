@@ -1355,10 +1355,10 @@ asm
   {$endif}
 
   {$ifdef CPUX86}
-    DB $0F, $28, $78, $70 // movaps xmm7, [eax + 7*16]
-    DB $0F, $29, $7A, $70 // movaps [edx + 7*16], xmm7
-    DB $0F, $28, $70, $60 // movaps xmm6, [eax + 6*16]
-    DB $0F, $29, $72, $60 // movaps [edx + 6*16], xmm6
+    DB $0F, $28, $48, $70 // movaps xmm1, [eax + 7*16]
+    DB $0F, $29, $4A, $70 // movaps [edx + 7*16], xmm1
+    DB $0F, $28, $40, $60 // movaps xmm0, [eax + 6*16]
+    DB $0F, $29, $42, $60 // movaps [edx + 6*16], xmm0
     DB $0F, $28, $68, $50 // movaps xmm5, [eax + 5*16]
     DB $0F, $29, $6A, $50 // movaps [edx + 5*16], xmm5
     DB $0F, $28, $60, $40 // movaps xmm4, [eax + 4*16]
@@ -1374,10 +1374,10 @@ asm
     DB $0F, $29, $02      // movaps [edx], xmm0
     DB $90                // nop
   {$else .CPUX64}
-    movaps xmm7, [rax + 7*16]
-    movaps [rdx + 7*16], xmm7
-    movaps xmm6, [rax + 6*16]
-    movaps [rdx + 6*16], xmm6
+    movaps xmm1, [rax + 7*16]
+    movaps [rdx + 7*16], xmm1
+    movaps xmm0, [rax + 6*16]
+    movaps [rdx + 6*16], xmm0
     movaps xmm5, [rax + 5*16]
     movaps [rdx + 5*16], xmm5
     movaps xmm4, [rax + 4*16]
@@ -1508,10 +1508,10 @@ asm
   {$endif}
 
   {$ifdef CPUX86}
-    DB $0F, $28, $78, $80 // movaps xmm7, [eax - 7*16 - 16]
-    DB $0F, $29, $7A, $80 // movaps [edx - 7*16 - 16], xmm7
-    DB $0F, $28, $70, $90 // movaps xmm6, [eax - 6*16 - 16]
-    DB $0F, $29, $72, $90 // movaps [edx - 6*16 - 16], xmm6
+    DB $0F, $28, $48, $80 // movaps xmm1, [eax - 7*16 - 16]
+    DB $0F, $29, $4A, $80 // movaps [edx - 7*16 - 16], xmm1
+    DB $0F, $28, $40, $90 // movaps xmm0, [eax - 6*16 - 16]
+    DB $0F, $29, $42, $90 // movaps [edx - 6*16 - 16], xmm0
     DB $0F, $28, $68, $A0 // movaps xmm5, [eax - 5*16 - 16]
     DB $0F, $29, $6A, $A0 // movaps [edx - 5*16 - 16], xmm5
     DB $0F, $28, $60, $B0 // movaps xmm4, [eax - 4*16 - 16]
@@ -1525,10 +1525,10 @@ asm
     DB $0F, $28, $40, $F0 // movaps xmm0, [eax - 0*16 - 16]
     DB $0F, $29, $42, $F0 // movaps [edx - 0*16 - 16], xmm0
   {$else .CPUX64}
-    movaps xmm7, [rax - 7*16 - 16]
-    movaps [rdx - 7*16 - 16], xmm7
-    movaps xmm6, [rax - 6*16 - 16]
-    movaps [rdx - 6*16 - 16], xmm6
+    movaps xmm1, [rax - 7*16 - 16]
+    movaps [rdx - 7*16 - 16], xmm1
+    movaps xmm0, [rax - 6*16 - 16]
+    movaps [rdx - 6*16 - 16], xmm0
     movaps xmm5, [rax - 5*16 - 16]
     movaps [rdx - 5*16 - 16], xmm5
     movaps xmm4, [rax - 4*16 - 16]
@@ -1596,10 +1596,10 @@ asm
   {$endif}
 
   {$ifdef CPUX86}
-    DB $0F, $28, $78, $80 // movaps xmm7, [eax - 7*16 - 16]
-    DB $0F, $29, $7A, $80 // movaps [edx - 7*16 - 16], xmm7
-    DB $0F, $28, $70, $90 // movaps xmm6, [eax - 6*16 - 16]
-    DB $0F, $29, $72, $90 // movaps [edx - 6*16 - 16], xmm6
+    DB $0F, $28, $48, $80 // movaps xmm1, [eax - 7*16 - 16]
+    DB $0F, $29, $4A, $80 // movaps [edx - 7*16 - 16], xmm1
+    DB $0F, $28, $40, $90 // movaps xmm0, [eax - 6*16 - 16]
+    DB $0F, $29, $42, $90 // movaps [edx - 6*16 - 16], xmm0
     DB $0F, $28, $68, $A0 // movaps xmm5, [eax - 5*16 - 16]
     DB $0F, $29, $6A, $A0 // movaps [edx - 5*16 - 16], xmm5
     DB $0F, $28, $60, $B0 // movaps xmm4, [eax - 4*16 - 16]
@@ -1613,10 +1613,10 @@ asm
     DB $0F, $28, $40, $F0 // movaps xmm0, [eax - 0*16 - 16]
     DB $0F, $29, $42, $F0 // movaps [edx - 0*16 - 16], xmm0
   {$else .CPUX64}
-    movaps xmm7, [rax - 7*16 - 16]
-    movaps [rdx - 7*16 - 16], xmm7
-    movaps xmm6, [rax - 6*16 - 16]
-    movaps [rdx - 6*16 - 16], xmm6
+    movaps xmm1, [rax - 7*16 - 16]
+    movaps [rdx - 7*16 - 16], xmm1
+    movaps xmm0, [rax - 6*16 - 16]
+    movaps [rdx - 6*16 - 16], xmm0
     movaps xmm5, [rax - 5*16 - 16]
     movaps [rdx - 5*16 - 16], xmm5
     movaps xmm4, [rax - 4*16 - 16]
