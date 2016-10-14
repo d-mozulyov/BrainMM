@@ -5013,7 +5013,7 @@ asm
   jbe @return_made_none
   {$ifdef CPUX86}
     push offset @return_var_p
-    lea ecx, [ecx + FLAG_MEDIUM_COPY]
+    DB $8D, $89 DD FLAG_MEDIUM_COPY // lea ecx, [ecx + FLAG_MEDIUM_COPY]
   {$else .CPUX64}
     push r10
     lea r9, @return_var_p
@@ -6426,15 +6426,15 @@ asm
 
   // mark allocated (Result)
   {$ifdef CPUX86}
-    lea edx, [edx + MASK_MEDIUM_ALLOCATED]
+    add edx, MASK_MEDIUM_ALLOCATED
     mov [ecx - 16].THeaderMedium.Flags, edx
-    lea edx, [edx - MASK_MEDIUM_ALLOCATED]
+    sub edx, MASK_MEDIUM_ALLOCATED
     mov [ecx + edx].THeaderMedium.PreviousSize, edx
     add ecx, edx
   {$else .CPUX64}
-    lea rdx, [rdx + MASK_MEDIUM_ALLOCATED]
+    add rdx, MASK_MEDIUM_ALLOCATED
     mov [r8 - 16].THeaderMedium.Flags, rdx
-    lea rdx, [rdx - MASK_MEDIUM_ALLOCATED]
+    sub rdx, MASK_MEDIUM_ALLOCATED
     mov [r8 + rdx].THeaderMedium.PreviousSize, rdx
     add r8, rdx
   {$endif}
@@ -6586,18 +6586,20 @@ asm
 
 @full_allocated:
   {$ifdef CPUX86}
-    add edx, ebx
+    add ebx, edx
     sub ecx, 16
-    lea ebx, [edx + MASK_MEDIUM_ALLOCATED]
+    mov edx, ebx
+    add ebx, MASK_MEDIUM_ALLOCATED
     mov [ECX].THeaderMedium.Flags, ebx
     add ecx, edx
     shr edx, 4
     movzx edx, byte ptr [MEDIUM_INDEXES + edx]
     pop ebx
   {$else .CPUX64}
-    add rdx, r9
+    add r9, rdx
     sub r8, 16
-    lea r9, [rdx + MASK_MEDIUM_ALLOCATED]
+    mov rdx, r9
+    add r9, MASK_MEDIUM_ALLOCATED
     mov [R8].THeaderMedium.Flags, r9
     add r8, rdx
     shr rdx, 4
