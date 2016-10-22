@@ -21,7 +21,8 @@ That is why I started working on project BrainMM, i.e. the memory manager design
 * API for memory block allocation (*not fully implemented*). BrainMM memory blocks are memory pieces of specific granularity, the size of which is unchangeable. Memory blocks are useful for highly specialized performance-demanding memory management. Service information can be stored at the beginning of the block, access to this information may be received by applying the logical multiplication (`and`) operation to the pointer. The management of small (up to 128 bytes) and medium (up to 32Kb) memory pieces in BrainMM is performed, for example, with the help of blocks of 64Kb
 * API for work with memory pages (*not fully implemented*)
 * Memory leaks reporting (*not fully implemented*), standard `ReportMemoryLeaksOnShutdow` flag
- 
+
+
 ##### Performance
 This test was conducted on the basis of [Steve Maughan's article](http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/). Source codes are in the repository, but you can also [download binary files]( http://dmozulyov.ucoz.net/BrainMM/Demo.rar).
 
@@ -128,5 +129,17 @@ type
     // synchronization (spin lock) + memory management
     function SyncGetMemory(Size: NativeInt): Pointer; stdcall;
     procedure SyncFreeMemory(P: Pointer); stdcall;
+  end;
+
+
+{ TMalloc class }
+
+  TMalloc = class(TInterfacedObject, IMalloc)
+    function Alloc(cb: Longint): Pointer; stdcall;
+    function Realloc(pv: Pointer; cb: Longint): Pointer; stdcall;
+    procedure Free(pv: Pointer); stdcall;
+    function GetSize(pv: Pointer): Longint; stdcall;
+    function DidAlloc(pv: Pointer): Integer; stdcall;
+    procedure HeapMinimize; stdcall;
   end;
 ```

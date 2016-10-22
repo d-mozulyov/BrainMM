@@ -278,6 +278,33 @@ type
   end;
 
 
+{ Winapi.ActiveX.IMalloc implementation (TMalloc class)
+  Unfortunately standard IMalloc interface can not be used, because
+  adding Winapi.ActiveX module leads to automatic linking System.Variants
+
+  To use IMalloc interface, call the following:
+    TMalloc.Create as IMalloc; }
+
+  _IMalloc = interface
+    ['{00000002-0000-0000-C000-000000000046}']
+    function Alloc(cb: Longint): Pointer; stdcall;
+    function Realloc(pv: Pointer; cb: Longint): Pointer; stdcall;
+    procedure Free(pv: Pointer); stdcall;
+    function GetSize(pv: Pointer): Longint; stdcall;
+    function DidAlloc(pv: Pointer): Integer; stdcall;
+    procedure HeapMinimize; stdcall;
+  end;
+
+  TMalloc = class(TInterfacedObject, _IMalloc)
+    function Alloc(cb: Longint): Pointer; stdcall;
+    function Realloc(pv: Pointer; cb: Longint): Pointer; stdcall;
+    procedure Free(pv: Pointer); stdcall;
+    function GetSize(pv: Pointer): Longint; stdcall;
+    function DidAlloc(pv: Pointer): Integer; stdcall;
+    procedure HeapMinimize; stdcall;
+  end;
+
+
 {$ifdef MANAGERFLAGSEMULATE}
 var
   ReportMemoryLeaksOnShutdown: Boolean;
@@ -9821,6 +9848,94 @@ begin
       FSpin := 0; // inline SpinUnlock
     end;
   end;
+end;
+
+
+{ TMalloc }
+
+function TMalloc.Alloc(cb: Longint): Pointer; stdcall;
+begin
+  {$ifdef BRAINMM_REDIRECT}
+    GetMem(Result, cb);
+  {$else}
+    if (cb > 0) then
+    begin
+      Result := MemoryManager.Standard.GetMem(NativeUInt(cb));
+      if (Result = nil) then
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+    end else
+    begin
+      Result := nil;
+    end;
+  {$endif}
+end;
+
+function TMalloc.Realloc(pv: Pointer; cb: Longint): Pointer; stdcall;
+begin
+  {$ifdef BRAINMM_REDIRECT}
+    Result := pv;
+    ReallocMem(Result, cb);
+  {$else}
+    Result := pv;
+    if (cb > 0) then
+    begin
+      if (Result <> nil) then
+      begin
+        Result := MemoryManager.Standard.ReallocMem(Result, NativeUInt(cb));
+      end else
+      begin
+        Result := MemoryManager.Standard.GetMem(NativeUInt(cb));
+      end;
+      if (Result = nil) then
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+    end else
+    begin
+      if (Result <> nil) then
+      begin
+        if (MemoryManager.Standard.FreeMem(Result) {$ifdef FPC}={$else}<>{$endif} 0) then
+          {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+        Result := nil;
+      end;
+    end;
+  {$endif}
+end;
+
+procedure TMalloc.Free(pv: Pointer); stdcall;
+begin
+  {$ifdef BRAINMM_REDIRECT}
+    FreeMem(pv);
+  {$else}
+    if (pv <> nil) then
+    begin
+      if (MemoryManager.Standard.FreeMem(pv) {$ifdef FPC}={$else}<>{$endif} 0) then
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidPtr){$else}System.RunError(204){$endif};
+    end;
+  {$endif}
+end;
+
+function TMalloc.GetSize(pv: Pointer): Longint; stdcall;
+var
+  Options: TMemoryOptions;
+begin
+  if (not MemoryManager.BrainMM.GetMemoryOptions(pv, Options)) then
+  begin
+    Result := -1;
+  end else
+  begin
+    Result := Options.Size;
+  end;
+end;
+
+function TMalloc.DidAlloc(pv: Pointer): Integer; stdcall;
+var
+  Options: TMemoryOptions;
+begin
+  Result := Byte(MemoryManager.BrainMM.GetMemoryOptions(pv, Options));
+end;
+
+procedure TMalloc.HeapMinimize; stdcall;
+begin
+  MemoryManager.BrainMM.ThreadHeapMinimize;
 end;
 
 
