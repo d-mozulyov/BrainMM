@@ -20,6 +20,7 @@ That is why I started working on project BrainMM, i.e. the memory manager design
 * GetMemAligned function. Allows allocating memory with specific alignment. This memory is released in a standard way, via FreeMem. When the size is changed using ReallocMem/RegetMem, the alignment is preserved. The exception is when NewSize equals zero, in this case, FreeMem shall be induced and alignment information will be lost
 * API for memory block allocation (*not fully implemented*). BrainMM memory blocks are memory pieces of specific granularity, the size of which is unchangeable. Memory blocks are useful for highly specialized performance-demanding memory management. Service information can be stored at the beginning of the block, access to this information may be received by applying the logical multiplication (`and`) operation to the pointer. The management of small (up to 128 bytes) and medium (up to 32Kb) memory pieces in BrainMM is performed, for example, with the help of blocks of 64Kb
 * API for work with memory pages (*not fully implemented*)
+* Memory leaks reporting (*not fully implemented*), standard `ReportMemoryLeaksOnShutdow` flag
  
 ##### Performance
 This test was conducted on the basis of [Steve Maughan's article](http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/). Source codes are in the repository, but you can also [download binary files]( http://dmozulyov.ucoz.net/BrainMM/Demo.rar).
@@ -52,8 +53,8 @@ type
   MemoryBlock = type Pointer;
   PMemoryBlock = ^MemoryBlock;
 
-  TMemoryBlockSize = (BLOCK_4K, BLOCK_16K, BLOCK_64K, BLOCK_256K,
-    BLOCK_1MB, BLOCK_4MB, BLOCK_16MB, BLOCK_64MB, BLOCK_256MB);
+  TMemoryBlockSize = (BLOCK_4K, BLOCK_16K, BLOCK_64K, BLOCK_256K, BLOCK_1MB,
+    BLOCK_4MB, BLOCK_16MB, BLOCK_64MB, BLOCK_256MB);
   PMemoryBlockSize = ^TMemoryBlockSize;
 
   MemoryPages = type Pointer;
@@ -63,6 +64,19 @@ type
   PMemoryAccessRight = ^TMemoryAccessRight;
   TMemoryAccessRights = set of TMemoryAccessRight;
   PMemoryAccessRights = ^TMemoryAccessRights;
+
+  TMemoryKind = (mkSmall, mkMedium, mkBig, mkLarge, mkPages, mkBlock, mkJIT);
+  PMemoryKind = ^TMemoryKind;
+
+  TMemoryOptions = packed record
+    Kind: TMemoryKind;
+    Align: TMemoryAlign;
+    BlockSize: TMemoryBlockSize;
+    AccessRights: TMemoryAccessRights;
+    ThreadId: NativeUInt;
+    Size: NativeUInt;
+  end;
+  PMemoryOptions = ^TMemoryOptions;
 
   // additional memory functions
   procedure GetMemAligned(var P: Pointer; Align: TMemoryAlign; Size: NativeInt);
@@ -80,6 +94,11 @@ type
 
   // any 4kb-aligned memory
   procedure ChangeMemoryAccessRights(Pages: MemoryPages; Count: NativeInt; Rights: TMemoryAccessRights);
+  function GetMemoryAccessRights(Pages: MemoryPages): TMemoryAccessRights;
+
+  // low level routine
+  function GetMemoryOptions(const P: Pointer; var Options: TMemoryOptions): Boolean;
+  function ThreadHeapMinimize: Boolean;
 
   // fast SSE-based 16-aligned memory move
   procedure MoveB16Aligned(const Source; var Dest; const B16Count: NativeInt);
@@ -89,25 +108,25 @@ type
 { Just-In-Time memory heap: READ | WRITE | EXECUTE }
 
   IJITHeap = interface
-    procedure Clear;
-    function GetMemory(Size: NativeInt): Pointer;
-    procedure FreeMemory(P: Pointer);
-    function SyncGetMemory(Size: NativeInt): Pointer;
-    procedure SyncFreeMemory(P: Pointer);
+    procedure Clear; stdcall;
+    function GetMemory(Size: NativeInt): Pointer; stdcall;
+    procedure FreeMemory(P: Pointer); stdcall;
+    function SyncGetMemory(Size: NativeInt): Pointer; stdcall;
+    procedure SyncFreeMemory(P: Pointer); stdcall;
   end;
 
   TJITHeap = class(TInterfacedObject, IJITHeap)
   public
     constructor Create;
     destructor Destroy; override;    
-    procedure Clear;
+    procedure Clear; stdcall;
 
     // memory management
-    function GetMemory(Size: NativeInt): Pointer;
-    procedure FreeMemory(P: Pointer);
+    function GetMemory(Size: NativeInt): Pointer; stdcall;
+    procedure FreeMemory(P: Pointer); stdcall;
 
     // synchronization (spin lock) + memory management
-    function SyncGetMemory(Size: NativeInt): Pointer;
-    procedure SyncFreeMemory(P: Pointer);
+    function SyncGetMemory(Size: NativeInt): Pointer; stdcall;
+    procedure SyncFreeMemory(P: Pointer); stdcall;
   end;
 ```

@@ -557,15 +557,15 @@ end;
 procedure CheckEmptyHeap;
 var
   ThreadHeap: PThreadHeap;
-  Info: TThreadHeapInfo;
+  HeapInfo: TThreadHeapInfo;
 begin
   ThreadHeap := ThreadHeapList;
   while (ThreadHeap <> nil) do
   begin
-    Info.Init(ThreadHeap);
+    HeapInfo.Init(ThreadHeap);
 
-    Check(0, Info.PoolSmalls.Count);
-    Check(0, Info.PoolMediums.Count);
+    Check(0, HeapInfo.PoolSmalls.Count);
+    Check(0, HeapInfo.PoolMediums.Count);
 
     if (ThreadHeap.Deferreds.Assigned)
       then SystemError;
@@ -3468,10 +3468,14 @@ const
   M = K * K;
 var
   X: NativeInt;
+  Options: TMemoryOptions;
 begin
   Value := V;
   X := NativeInt(V);
   if (V = nil) or (X and 15 <> 0) then
+    SystemError;
+
+  if (not GetMemoryOptions(V, Options)) then
     SystemError;
 
   if (X and (256 * M - 1) = 0) then Align := align256M
@@ -3521,20 +3525,34 @@ begin
       AsSmall := Pointer(@_[0]);
       AsSmall.Init(V);
       Size := AsSmall.Line.Size;
+
+      if (Options.Kind <> mkSmall) or (Options.Align <> ma16Bytes) then
+        SystemError;
     end else
     begin
       AsMedium := Pointer(@_[0]);
       AsMedium.Init(V);
       Size := AsMedium.Size;
+
+      if (Options.Kind <> mkMedium) or (Options.Align <> AsMedium.Align) then
+        SystemError;
     end;
+
+    if (Options.ThreadId <> MainThreadID) then
+      SystemError;
   end else
   begin
     // big or large
     // todo
-    Size := 0;
+    AsLarge := Pointer(@_[0]);
+    Size := PNativeUInt(X - SizeOf(NativeUInt))^ * SIZE_K4;
+
+    if (Options.Kind <> mkLarge) or (Options.ThreadId <> 0) then
+      SystemError;
   end;
 
-  // todo
+  if (Options.Size <> NativeUInt(Size)) then
+    SystemError;
 end;
 
 { TJitHeapInfo }
