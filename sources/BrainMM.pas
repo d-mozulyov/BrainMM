@@ -672,7 +672,7 @@ type
     FNextHeap: PThreadHeap;
     FK1LineSmalls: array[1..8] of PK1LineSmall;
     FMarkerNotSelf: SupposedPtr;
-    
+
   public
     // 1kb-lines (small) + 64kb pool (small) routine
     QK1LineFull: PK1LineSmall;
@@ -767,43 +767,56 @@ type
     end;
   end;
 
-  TK4Page = array[0..4 * 1024 - 1] of Byte;
-  PK4Page = TK4Page;
+  PMbPoolBigMask = ^TMbPoolBigMask;
+  TMbPoolBigMask = packed record
+  case Integer of
+    0: (Bytes: array[0..31] of Byte);
+    1: (Integers: array[0..7] of Integer);
+    2: (Int64s: array[0..4] of Int64);
+  end;
 
+  PMbPoolBig = ^TMbPoolBig;
+  TMbPoolBig = packed record
+    Pages: PMemoryPages;
+    Prev, Next: PMbPoolBig;
+    Mask: PMbPoolBigMask;
+  end;
+
+  PPartLarge = ^TPartLarge;
+  TPartLarge = packed record
+    Prev: PPartLarge;
+    Pages: PMemoryPages;
+    ReservedPagesCount: NativeUInt;
+    CommitedPagesCount: NativeUInt;
+  end;
+
+  // internal memory: 4 natives/pointers
   PInternalRecord = ^TInternalRecord;
   TInternalRecord = packed record
     Next: PInternalRecord;
     case Integer of
-      0: (SupposedStart: SupposedPtr;
+      0: (SupposedPages: SupposedPtr;
           (*
              PagesMode: Byte:2;
              IsBlock: Boolean:1;
              IsLarge: Boolean:1;
-             Reserved: Byte:8;
-             Pages: Pointer:High(Pointer)-12;
+             Align: TMemoryAlign:3;
+             Reserved: Byte:5;
+             Pages: MemoryPages:High(Pointer)-12;
           *)
           PagesCount: NativeUInt;
           case Integer of
-            // Big
-            0: (BigPool: PInternalRecord);
-            // Large
-            1: (LastPart: PInternalRecord);
-            // Block
-            // todo
+            0: (BigPool: PMbPoolBig);
+            1: (TopPart: PPartLarge);
           );
-    // 1: BigPool
-      2: (ThreadHeap: PThreadHeap);
+      1: (ThreadHeap: PThreadHeap);
+      2: (K64Block: MemoryBlock);
   end;
-
-  TPagesHashItem = packed record
-    Spin: SupposedPtr;
-    List: PInternalRecord;
-  end;
-  PPagesHashItem = ^TPagesHashItem;
 
   // 64 bytes aligned global storage
-  TGlobalStorage = packed record
-    PagesHash: array[0..1023] of TPagesHashItem;
+  TGlobalStorage = object
+  public
+    PagesItems: array[0..1023] of SupposedPtr;
 
     CoreThreadHeaps: TSyncStack64;
     CoreInternalRecords: TSyncStack64;
@@ -818,6 +831,18 @@ type
       Count: NativeUInt;
       _Padding: array[1..64 - SizeOf(TSyncStack) - SizeOf(NativeUInt)] of Byte;
     end;
+  private
+    {class} function GrowThreadHeaps: PThreadHeap;
+    {class} function GrowInternalRecords: PInternalRecord;
+  public
+    {class} function InternalRecordPop: PInternalRecord; {$ifdef INLINESUPPORT}inline;{$endif}
+    {class} procedure InternalRecordPush(const InternalRecord: PInternalRecord); {$ifdef INLINESUPPORT}inline;{$endif}
+
+    {class} function K64BlockCachePop: MemoryBlock;
+    {class} function K64BlockCachePush(const K64Block: MemoryBlock): Boolean;
+
+    {class} function ExcludePagesRecord(const SupposedPages: SupposedPtr): PInternalRecord;
+    {class} procedure IncludePagesRecord(const PagesRecord: PInternalRecord);
   end;
   PGlobalStorage = ^TGlobalStorage;
 
@@ -1097,19 +1122,19 @@ function AtomicCmpExchange(var Target: SupposedPtr; NewValue: SupposedPtr; Compa
 begin
   Result := InterlockedCompareExchange(Target, NewValue, Comparand);
 end;
-function AtomicIncrement(var Target: NativeInt): NativeInt; overload; inline;
+function AtomicIncrement(var Target: NativeUInt): NativeUInt; overload; inline;
 begin
   Result := InterLockedExchangeAdd(Target, 1);
 end;
-function AtomicIncrement(var Target: NativeInt; Increment: NativeInt): NativeInt; overload; inline;
+function AtomicIncrement(var Target: NativeUInt; Increment: NativeUInt): NativeUInt; overload; inline;
 begin
   Result := InterLockedExchangeAdd(Target, Increment);
 end;
-function AtomicDecrement(var Target: NativeInt): NativeInt; overload; inline;
+function AtomicDecrement(var Target: NativeUInt): NativeUInt; overload; inline;
 begin
   Result := InterLockedExchangeAdd(Target, -1);
 end;
-function AtomicDecrement(var Target: NativeInt; Increment: NativeInt): NativeInt; overload; inline;
+function AtomicDecrement(var Target: NativeUInt; Increment: NativeUInt): NativeUInt; overload; inline;
 begin
   Result := InterLockedExchangeAdd(Target, -Increment);
 end;
@@ -1124,7 +1149,7 @@ asm
     lock cmpxchg [rcx], rdx
   {$endif}
 end;
-function AtomicIncrement(var Target: NativeInt): NativeInt; overload;
+function AtomicIncrement(var Target: NativeUInt): NativeUInt; overload;
 asm
   {$ifdef CPUX86}
     mov edx, 1
@@ -1136,7 +1161,7 @@ asm
     lea rax, [rdx + 1]
   {$endif}
 end;
-function AtomicIncrement(var Target: NativeInt; Increment: NativeInt): NativeInt; overload;
+function AtomicIncrement(var Target: NativeUInt; Increment: NativeUInt): NativeUInt; overload;
 asm
   {$ifdef CPUX86}
     mov ecx, edx
@@ -1148,7 +1173,7 @@ asm
     add rax, rdx
   {$endif}
 end;
-function AtomicDecrement(var Target: NativeInt): NativeInt; overload;
+function AtomicDecrement(var Target: NativeUInt): NativeUInt; overload;
 asm
   {$ifdef CPUX86}
     or edx, -1
@@ -1160,7 +1185,7 @@ asm
     lea rax, [rdx - 1]
   {$endif}
 end;
-function AtomicDecrement(var Target: NativeInt; Increment: NativeInt): NativeInt; overload;
+function AtomicDecrement(var Target: NativeUInt; Increment: NativeUInt): NativeUInt; overload;
 asm
   {$ifdef CPUX86}
     neg edx
@@ -1355,86 +1380,6 @@ begin
       ThreadPause;
     end;
   until (False);
-end;
-
-(* procedure SpinLock(var Spin: SupposedPtr);
-begin
-  repeat
-    // wait locked
-    if (Spin <> 0) then SpinWait(Spin, High(NativeUInt));
-
-    // make locked
-  until (0 = AtomicCmpExchange(Spin, 1, 0));
-end;
-
-procedure SpinUnlock(var Spin: SupposedPtr);
-begin
-  Spin := 0;
-end; *)
-
-const
-  SPINEX_LOCK_INCREMENT = 1 shl 16;
-  SPINEX_LOCK_MASK = NativeUInt(High(NativeUInt) shl 16);
-  SPINEX_LOCK_OVERFLOW = 2 * SPINEX_LOCK_INCREMENT;
-  SPINEX_ENTER_MASK = SPINEX_LOCK_INCREMENT - 1;
-
-procedure SpinExLock(var SpinEx: SupposedPtr);
-var
-  Item: SupposedPtr;
-begin
-  Item := SpinEx;
-  repeat
-    // wait locked
-    if (Item and SPINEX_LOCK_MASK <> 0) then SpinWait(SpinEx, SPINEX_LOCK_MASK);
-
-    // make locked
-    Item := AtomicIncrement(NativeInt(SpinEx), SPINEX_LOCK_INCREMENT);
-    if (Item >= SPINEX_LOCK_OVERFLOW) then
-    begin
-      // retrieve lockeds, wait locked
-      Item := AtomicDecrement(NativeInt(SpinEx), SPINEX_LOCK_INCREMENT);
-    end else
-    begin
-      // done
-      Break;
-    end;
-  until (False);
-
-  // wait entered (readonly)
-  if (Item and SPINEX_ENTER_MASK <> 0) then SpinWait(SpinEx, SPINEX_ENTER_MASK);
-end;
-
-procedure SpinExUnlock(var SpinEx: SupposedPtr);
-begin
-  AtomicDecrement(NativeInt(SpinEx), SPINEX_LOCK_INCREMENT);
-end;
-
-procedure SpinExReadEnter{Readonly}(var SpinEx: SupposedPtr);
-var
-  Item: SupposedPtr;
-begin
-  Item := SpinEx;
-  repeat
-    // wait locked
-    if (Item and SPINEX_LOCK_MASK <> 0) then SpinWait(SpinEx, SPINEX_LOCK_MASK);
-
-    // make entered
-    Item := AtomicIncrement(NativeInt(SpinEx));
-    if (Item and SPINEX_LOCK_MASK <> 0) then
-    begin
-      // retrieve counter, wait locked
-      Item := AtomicDecrement(NativeInt(SpinEx));
-    end else
-    begin
-      // done
-      Break;
-    end;
-  until (False);
-end;
-
-procedure SpinExReadLeave{Readonly}(var SpinEx: SupposedPtr);
-begin
-  AtomicDecrement(NativeInt(SpinEx));
 end;
 
 
@@ -1986,11 +1931,11 @@ asm
   mov ebp, ecx // Last
 
   // Item := F.Handle
-  fild qword ptr [esi]
-  sub esp, 8
-  fistp qword ptr [esp]
-  pop eax
-  pop edx
+@move_8:
+  mov eax, [esi]
+  mov edx, [esi + 4]
+  cmp eax, [esi]
+  jne @move_8
 
   // lock-free loop
   @repeat:
@@ -2014,7 +1959,6 @@ end;
 {$endif}
 
 function TSyncStack.Pop: Pointer;
-{$ifNdef CPUX86}
 var
   Item, NewItem: SupposedPtr;
 begin
@@ -2023,44 +1967,11 @@ begin
     Result := Pointer(Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif});
     if (Result = nil) then Exit;
 
-    NewItem := PSupposedPtr(Result)^ {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    NewItem := PSupposedPtr(Result)^ {$ifdef CPUX64}+ (Item and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
-{$else .CPUX86}
-asm
-  push esi
-  push ebx
-  mov esi, eax // Self
-
-  // Item := F.Handle
-  fild qword ptr [esi]
-  sub esp, 8
-  fistp qword ptr [esp]
-  pop eax
-  pop edx
-
-  // lock-free loop
-  @repeat:
-    // if (Result(Item) = nil) then Exit;
-    test eax, eax
-    jz @done
-
-    // NewItem := PStackItem(Item).Next | Counter++
-    mov ebx, [eax]
-    lea ecx, [edx + 1]
-
-    // Item := AtomicCmpExchangeInt64(F.Handle, NewItem, Item)
-    DB $F0, $0F, $C7, $0E // lock cmpxchg8b [esi]
-  jnz @repeat
-
-@done:
-  pop ebx
-  pop esi
-end;
-{$endif}
 
 function TSyncStack.PopList: Pointer;
-{$ifNdef CPUX86}
 var
   Item, NewItem: SupposedPtr;
 begin
@@ -2069,60 +1980,34 @@ begin
     Result := Pointer(Item {$ifdef CPUX64}and X64_SYNCSTACK_MASK{$endif});
     if (Result = nil) then Exit;
 
-    NewItem := {nil}0 {$ifdef CPUX64}+ (((Item or X64_SYNCSTACK_MASK) + 1) and X64_SYNCSTACK_CLEAR){$endif};
+    NewItem := {nil}0 {$ifdef CPUX64}+ (Item and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
-{$else .CPUX86}
-asm
-  push esi
-  push ebx
-  mov esi, eax // Self
-
-  // Item := F.Handle
-  fild qword ptr [esi]
-  sub esp, 8
-  fistp qword ptr [esp]
-  pop eax
-  pop edx
-
-  // lock-free loop
-  @repeat:
-    // if (Result(Item) = nil) then Exit;
-    test eax, eax
-    jz @done
-
-    // NewItem := 0 | Counter++
-    xor ebx, ebx
-    lea ecx, [edx + 1]
-
-    // Item := AtomicCmpExchangeInt64(F.Handle, NewItem, Item)
-    DB $F0, $0F, $C7, $0E // lock cmpxchg8b [esi]
-  jnz @repeat
-
-@done:
-  pop ebx
-  pop esi
-end;
-{$endif}
 
 
- (* Global storage routine *)
+{ TGlobalStorage }
 
-function GrowCoreThreadHeaps(Storage: PGlobalStorage): PThreadHeap;
+{class} function TGlobalStorage.GrowThreadHeaps: PThreadHeap;
 type
   TCoreThreadHeapList = array[0..SIZE_K64 div SizeOf(TThreadHeap) - 1] of TThreadHeap;
   PCoreThreadHeapList = ^TCoreThreadHeapList;
 var
-  i: Integer;
+  i: NativeInt;
+  Instance: PGlobalStorage;
   CoreThreadHeapList: PCoreThreadHeapList;
 begin
+  Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+
   {$ifdef MSWINDOWS}
     CoreThreadHeapList := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT or MEM_TOP_DOWN, PAGE_READWRITE);
   {$else .POSIX}
     CoreThreadHeapList := memalign(SIZE_K64, SIZE_K64);
   {$endif}
   if (CoreThreadHeapList = nil) then
-    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+  begin
+    Result := nil;
+    Exit;
+  end;
 
   {$ifdef BRAINMM_UNITTEST}
   FillRandomBytes(Pointer(CoreThreadHeapList), SIZE_K64);
@@ -2131,52 +2016,194 @@ begin
   for i := 1 to High(TCoreThreadHeapList) - 1 do
     CoreThreadHeapList[i].FNextHeap := @CoreThreadHeapList[i + 1];
 
-  Storage.CoreThreadHeaps.PushList(@CoreThreadHeapList[1],
+  Instance.CoreThreadHeaps.PushList(@CoreThreadHeapList[1],
     @CoreThreadHeapList[High(TCoreThreadHeapList)]);
 
   Result := @CoreThreadHeapList[0];
 end;
 
-function GrowCoreInternalRecords(Storage: PGlobalStorage): PInternalRecord;
+{class} function TGlobalStorage.GrowInternalRecords: PInternalRecord;
 type
   TCoreInternalRecordList = array[0..SizeOf(TThreadHeap) div SizeOf(TInternalRecord) - 1] of TInternalRecord;
   PCoreInternalRecordList = ^TCoreInternalRecordList;
 var
-  i: Integer;
+  i: NativeInt;
+  Instance: PGlobalStorage;
   CoreInternalRecordList: PCoreInternalRecordList;
 begin
-  CoreInternalRecordList := Storage.CoreThreadHeaps.Pop;
+  Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  CoreInternalRecordList := Instance.CoreThreadHeaps.Pop;
   if (CoreInternalRecordList = nil) then
   begin
-    CoreInternalRecordList := Pointer(GrowCoreThreadHeaps(Storage));
+    CoreInternalRecordList := Pointer(TGlobalStorage(nil^).GrowThreadHeaps);
+    if (CoreInternalRecordList = nil) then
+    begin
+      Result := nil;
+      Exit;
+    end;
   end;
 
   for i := 1 to High(TCoreInternalRecordList) - 1 do
     CoreInternalRecordList[i].Next := @CoreInternalRecordList[i + 1];
 
-  Storage.CoreInternalRecords.PushList(@CoreInternalRecordList[1],
+  Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  Instance.CoreInternalRecords.PushList(@CoreInternalRecordList[1],
     @CoreInternalRecordList[High(TCoreInternalRecordList)]);
 
   Result := @CoreInternalRecordList[0];
 end;
 
-function CoreInternalRecordPop: PInternalRecord;
-var
-  GlobalStorage: PGlobalStorage;
+{class} function TGlobalStorage.InternalRecordPop: PInternalRecord;
 begin
-  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-
-  Result := GlobalStorage.CoreInternalRecords.Pop;
+  Result := PGlobalStorage(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR).CoreInternalRecords.Pop;
   if (Result = nil) then
-    Result := GrowCoreInternalRecords(GlobalStorage);
+    Result := PGlobalStorage(Result).GrowInternalRecords;
 end;
 
-procedure CoreInternalRecordPush(const InternalRecord: PInternalRecord);
-var
-  GlobalStorage: PGlobalStorage;
+{class} procedure TGlobalStorage.InternalRecordPush(const InternalRecord: PInternalRecord);
 begin
-  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-  GlobalStorage.CoreInternalRecords.Push(InternalRecord);
+  PGlobalStorage(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR).
+    CoreInternalRecords.PushList(InternalRecord, InternalRecord);
+end;
+
+{class} function TGlobalStorage.K64BlockCachePop: MemoryBlock;
+var
+  Instance: PGlobalStorage;
+  InternalRecord: PInternalRecord;
+begin
+  Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  if (Instance.K64BlockCache.Stack.Assigned) then
+  begin
+    InternalRecord := Instance.K64BlockCache.Stack.Pop;
+    if (InternalRecord <> nil) then
+    begin
+      Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+      AtomicDecrement(Instance.K64BlockCache.Count);
+
+      Result := InternalRecord.K64Block;
+      Instance.CoreInternalRecords.Push(InternalRecord);
+
+      Exit;
+    end;
+  end;
+
+  Result := nil;
+end;
+
+{class} function TGlobalStorage.K64BlockCachePush(const K64Block: MemoryBlock): Boolean;
+const
+  CACHE_LIMIT = 16;
+var
+  Instance: PGlobalStorage;
+  InternalRecord: PInternalRecord;
+begin
+  Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  if (Instance.K64BlockCache.Count < CACHE_LIMIT) then
+  begin
+    InternalRecord := TGlobalStorage(nil^).InternalRecordPop;
+    if (InternalRecord <> nil) then
+    begin
+      InternalRecord.K64Block := K64Block;
+
+      Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+      AtomicIncrement(Instance.K64BlockCache.Count);
+      Instance.K64BlockCache.Stack.Push(InternalRecord);
+
+      Result := True;
+      Exit;
+    end;
+  end;
+
+  Result := False;
+end;
+
+{class} function TGlobalStorage.ExcludePagesRecord(const SupposedPages: SupposedPtr): PInternalRecord;
+const
+  // clear IsLarge/Align
+  PAGES_MASK_CLEAR = SupposedPtr(-1) xor ((1 shl 4 - 1) shl 3);
+var
+  Hash, PagesValue: NativeUInt;
+  Instance: PGlobalStorage;
+  PItem: PSupposedPtr;
+  Item: SupposedPtr;
+  Prev: PInternalRecord;
+  Store: record
+    PItem: PSupposedPtr;
+    Item: SupposedPtr;
+    Result: PInternalRecord;
+  end;
+begin
+  // item
+  Hash := (SupposedPages shr 16) xor ((SupposedPages shr 6) and ($f shl 6));
+  Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  PItem := @Instance.PagesItems[Hash and High(PagesItems)];
+
+  // pages bits
+  PagesValue := SupposedPages and PAGES_MASK_CLEAR;
+
+  // inline SpinLock
+  Store.PItem := PItem;
+  repeat
+    Item := PItem^;
+    if (Item and 1 <> 0) then
+    begin
+      Item := SpinWait(PItem^, 1);
+      PItem := Store.PItem;
+    end;
+  until (Item = AtomicCmpExchange(PItem^, Item + 1, Item));
+  Store.Item := Item;
+
+  // find and exclude
+  Result := Pointer(Item);
+  if (Item <> 0) then
+  try
+    if (Result.SupposedPages and PAGES_MASK_CLEAR = PagesValue) then
+    begin
+      Store.Item := 0;
+    end else
+    begin
+      repeat
+        Prev := Result;
+        Result := Result.Next;
+        if (Result = nil) then Break;
+
+        if (Result.SupposedPages and PAGES_MASK_CLEAR = PagesValue) then
+        begin
+          Prev.Next := Result.Next;
+          Break;
+        end;
+      until (False);
+    end;
+
+    Store.Result := Result;
+  finally
+    Store.PItem^ := Store.Item; // inline SpinUnlock
+    Result := Store.Result;
+  end;
+end;
+
+{class} procedure TGlobalStorage.IncludePagesRecord(const PagesRecord: PInternalRecord);
+var
+  Hash: NativeUInt;
+  Instance: PGlobalStorage;
+  PItem: PSupposedPtr;
+  Item: SupposedPtr;
+begin
+  // item
+  Hash := PagesRecord.SupposedPages;
+  Hash := (Hash{SupposedPages} shr 16) xor ((Hash{SupposedPages} shr 6) and ($f shl 6));
+  Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  PItem := @Instance.PagesItems[Hash and High(PagesItems)];
+
+  // wait and include
+  repeat
+    Item := PItem^;
+    if (Item and 1 <> 0) then
+    begin
+      Item := SpinWait(PItem^, 1);
+    end;
+    PagesRecord.Next := Pointer(Item);
+  until (Item = AtomicCmpExchange(PItem^, SupposedPtr(PagesRecord), Item))
 end;
 
 
@@ -2230,7 +2257,9 @@ begin
     Result := GlobalStorage.CoreThreadHeaps.Pop;
     if (Result = nil) then
     begin
-      Result := GrowCoreThreadHeaps(GlobalStorage);
+      Result := TGlobalStorage(nil^).GrowThreadHeaps;
+      if (Result = nil) then
+        {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
     end;
     FillChar(Result^, SizeOf(TThreadHeap), #0);
     Result.FMarkerNotSelf := not SupposedPtr(Result);
@@ -2360,7 +2389,7 @@ begin
   if (0 = AtomicCmpExchange(ThreadHeap.LockFlags, THREAD_HEAP_LOCKED, 0)) then
   begin
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicDecrement(NativeInt(GlobalStorage.ThreadsCount));
+    AtomicDecrement(GlobalStorage.ThreadsCount);
     try
       if (ThreadHeap.Deferreds.Assigned) then
       begin
@@ -2371,9 +2400,16 @@ begin
     end;
 
     // push heaps deffered
-    InternalRecord := CoreInternalRecordPop;
-    InternalRecord.ThreadHeap := ThreadHeap;
-    GlobalStorage.HeapsDeferred.Push(InternalRecord);
+    InternalRecord := TGlobalStorage(nil^).InternalRecordPop;
+    if (InternalRecord <> nil) then
+    begin
+      InternalRecord.ThreadHeap := ThreadHeap;
+      GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+      GlobalStorage.HeapsDeferred.Push(InternalRecord);
+    end else
+    begin
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+    end;
   end else
   begin
     // dirty lock flags
@@ -2395,7 +2431,7 @@ begin
   ThreadRec := PThreadRec(Parameter)^;
   GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   GlobalStorage.CoreInternalRecords.Push(Parameter);
-  AtomicIncrement(NativeInt(GlobalStorage.ThreadsCount));
+  AtomicIncrement(GlobalStorage.ThreadsCount);
 
   try
     // thread function
@@ -2505,7 +2541,10 @@ function BrainMMThreadFuncEvent(ThreadFunc: TThreadFunc; Parameter: Pointer): Po
 var
   Proxy, P: PThreadRec;
 begin
-  Proxy := Pointer(CoreInternalRecordPop);
+  Proxy := Pointer(TGlobalStorage(nil^).InternalRecordPop);
+  if (Proxy = nil) then
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+
   Proxy.Func := ThreadFunc;
   Proxy.Parameter := Parameter;
 
@@ -2526,7 +2565,10 @@ function BrainMMThreadFuncEvent(Attribute: PThreadAttr;
 var
   Proxy, P: PThreadRec;
 begin
-  Proxy := Pointer(CoreInternalRecordPop);
+  Proxy := Pointer(TGlobalStorage(nil^).InternalRecordPop);
+  if (Proxy = nil) then
+    {$ifdef CONDITIONALEXPRESSIONS}System.Error(reOutOfMemory){$else}System.RunError(203){$endif};
+
   Proxy.Func := ThreadFunc;
   Proxy.Parameter := Parameter;
 
@@ -2596,12 +2638,8 @@ begin
   end;
 
   {$ifNdef BRAINMM_UNITTEST}
-  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-  Result := GlobalStorage.K64BlockCache.Stack.Pop;
-  if (Result <> nil) then
-  begin
-    AtomicDecrement(NativeInt(GlobalStorage.K64BlockCache.Count));
-  end else
+  Result := TGlobalStorage(nil^).K64BlockCachePop;
+  if (Result = nil) then
   {$endif}
   begin
     {$ifdef MSWINDOWS}
@@ -2619,7 +2657,7 @@ begin
   if (Result <> nil) then
   begin
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicIncrement(NativeInt(GlobalStorage.PagesAllocated), SIZE_K64 div SIZE_K4);
+    AtomicIncrement(GlobalStorage.PagesAllocated, SIZE_K64 div SIZE_K4);
 
     if (PagesMode = PAGESMODE_JIT) then
       ChangeMemoryAccessRights(Result, 64 div 4, [marRead, marWrite, marExecute]);
@@ -2638,13 +2676,8 @@ begin
   end;
 
   {$ifNdef BRAINMM_UNITTEST}
-  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-  if (GlobalStorage.K64BlockCache.Count < 16) then
-  begin
-    AtomicIncrement(NativeInt(GlobalStorage.K64BlockCache.Count));
-    GlobalStorage.K64BlockCache.Stack.Push(Block);
-    Result := True;
-  end else
+  Result := TGlobalStorage(nil^).K64BlockCachePush(Block));
+  if (not Result) then
   {$endif}
   begin
     {$ifdef MSWINDOWS}
@@ -2658,7 +2691,7 @@ begin
   if (Result) then
   begin
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicDecrement(NativeInt(GlobalStorage.PagesAllocated), SIZE_K64 div SIZE_K4);
+    AtomicDecrement(GlobalStorage.PagesAllocated, SIZE_K64 div SIZE_K4);
   end;
 end;
 
@@ -2683,7 +2716,7 @@ begin
   if (Result <> nil) then
   begin
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicIncrement(NativeInt(GlobalStorage.PagesAllocated), Count);
+    AtomicIncrement(GlobalStorage.PagesAllocated, Count);
 
     {$ifdef BRAINMM_UNITTEST}
     FillRandomBytes(Result, K64Count * SIZE_K64);
@@ -2721,7 +2754,7 @@ begin
   if (Result) then
   begin
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicDecrement(NativeInt(GlobalStorage.PagesAllocated), NativeInt(Count));
+    AtomicDecrement(GlobalStorage.PagesAllocated, Count);
   end;
 end;
 
@@ -2749,7 +2782,7 @@ begin
 
     Dec(NewCount, LastCount);
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicIncrement(NativeInt(GlobalStorage.PagesAllocated), NativeInt(NewCount));
+    AtomicIncrement(GlobalStorage.PagesAllocated, NewCount);
 
     Result := Pages;
   end else
