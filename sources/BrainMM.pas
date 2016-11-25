@@ -1959,6 +1959,7 @@ end;
 {$endif}
 
 function TSyncStack.Pop: Pointer;
+{$ifNdef CPUX86}
 var
   Item, NewItem: SupposedPtr;
 begin
@@ -1970,8 +1971,41 @@ begin
     NewItem := PSupposedPtr(Result)^ {$ifdef CPUX64}+ (Item and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
+{$else .CPUX86}
+asm
+  push esi
+  push ebx
+  mov esi, eax // Self
+
+  // Item := F.Handle
+@move_8:
+  mov eax, [esi]
+  mov edx, [esi + 4]
+  cmp eax, [esi]
+  jne @move_8
+
+  // lock-free loop
+  @repeat:
+    // if (Result(Item) = nil) then Exit;
+    test eax, eax
+    jz @done
+
+    // NewItem := PStackItem(Item).Next | Counter
+    mov ebx, [eax]
+    mov ecx, edx
+
+    // Item := AtomicCmpExchangeInt64(F.Handle, NewItem, Item)
+    DB $F0, $0F, $C7, $0E // lock cmpxchg8b [esi]
+  jnz @repeat
+
+@done:
+  pop ebx
+  pop esi
+end;
+{$endif}
 
 function TSyncStack.PopList: Pointer;
+{$ifNdef CPUX86}
 var
   Item, NewItem: SupposedPtr;
 begin
@@ -1983,6 +2017,38 @@ begin
     NewItem := {nil}0 {$ifdef CPUX64}+ (Item and X64_SYNCSTACK_CLEAR){$endif};
   until (Item = AtomicCmpExchange(F.Handle, NewItem, Item));
 end;
+{$else .CPUX86}
+asm
+  push esi
+  push ebx
+  mov esi, eax // Self
+
+  // Item := F.Handle
+@move_8:
+  mov eax, [esi]
+  mov edx, [esi + 4]
+  cmp eax, [esi]
+  jne @move_8
+
+  // lock-free loop
+  @repeat:
+    // if (Result(Item) = nil) then Exit;
+    test eax, eax
+    jz @done
+
+    // NewItem := 0 | Counter
+    xor ebx, ebx
+    mov ecx, edx
+
+    // Item := AtomicCmpExchangeInt64(F.Handle, NewItem, Item)
+    DB $F0, $0F, $C7, $0E // lock cmpxchg8b [esi]
+  jnz @repeat
+
+@done:
+  pop ebx
+  pop esi
+end;
+{$endif}
 
 
 { TGlobalStorage }
@@ -2092,7 +2158,7 @@ end;
 
 {class} function TGlobalStorage.K64BlockCachePush(const K64Block: MemoryBlock): Boolean;
 const
-  CACHE_LIMIT = 16;
+  CACHE_LIMIT = 64 {4Mb cache};
 var
   Instance: PGlobalStorage;
   InternalRecord: PInternalRecord;
@@ -2676,7 +2742,7 @@ begin
   end;
 
   {$ifNdef BRAINMM_UNITTEST}
-  Result := TGlobalStorage(nil^).K64BlockCachePush(Block));
+  Result := TGlobalStorage(nil^).K64BlockCachePush(Block);
   if (not Result) then
   {$endif}
   begin
@@ -2691,7 +2757,7 @@ begin
   if (Result) then
   begin
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicDecrement(GlobalStorage.PagesAllocated, SIZE_K64 div SIZE_K4);
+    AtomicIncrement{AtomicDecrement}(GlobalStorage.PagesAllocated, NativeUInt(-NativeInt(SIZE_K64 div SIZE_K4)));
   end;
 end;
 
@@ -10362,8 +10428,8 @@ type
   PMemoryMgr = {$ifdef MEMORYMANAGEREX}^TMemoryManagerEx{$else}^TMemoryManager{$endif};
 {$ifdef MSWINDOWS}
 const
-  BRAINMM_MARKER: array[1..18] of WideChar = 'Local\BrainMM_PID_';
-  HEX_CHARS: array[0..15] of WideChar = '0123456789ABCDEF';
+  BRAINMM_MARKER: array[1..18] of WideChar = ('L','o','c','a','l','\','B','r','a','i','n','M','M','_','P','I','D','_');
+  HEX_CHARS: array[0..15] of WideChar = ('0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F');
 var
   i: Integer;
   ProcessId: Cardinal;

@@ -643,7 +643,6 @@ begin
   CheckSize(SizeOf(TK64PoolMedium), 64 * 1024);
   CheckSize(SizeOf(TSyncStack64), 64);
   CheckSize(SizeOf(TThreadHeap), {$ifdef CPUX64}7{$else}4{$endif} * 64);
-  CheckSize(SizeOf(TK4Page), 4 * 1024);
 end;
 
 const
