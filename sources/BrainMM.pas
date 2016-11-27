@@ -127,6 +127,16 @@ unit BrainMM;
   {$endif}
 {$endif}
 
+{$ifdef BRAINMM_NOFIXFINALIZES}
+  {$undef BRAINMM_FIXFINALIZES}
+{$else}
+  {$ifdef CONDITIONALEXPRESSIONS}
+    {$if (not Defined(FPC)) and (CompilerVersion >= 23) and Defined(MSWINDOWS)}
+      {$define BRAINMM_FIXFINALIZES}
+    {$ifend}
+  {$endif}
+{$endif}
+
 {$ifdef CONDITIONALEXPRESSIONS}
   {$if Defined(FPC) or (CompilerVersion < 18)}
     {$define MANAGERFLAGSEMULATE}
@@ -2509,7 +2519,7 @@ begin
 end;
 
 {$ifdef FPC}
-  {$MESSAGE ERROR 'THREAD ROUTINE NOT YET REALIZED'}
+  {$MESSAGE ERROR 'THREAD ROUTINE NOT YET IMPLEMENTED'}
 {$else}
   {$ifdef MSWINDOWS}
     {$ifdef CONDITIONALEXPRESSIONS}
@@ -10163,7 +10173,7 @@ var
   BrainMMRegistered: ^TBrainMemoryManager;
   BrainMMFreeMemOriginal: function(P: Pointer): Integer;
   {$ifdef MSWINDOWS}
-  BrainMMRegisteredHandle: HWND;
+  BrainMMRegisteredHandle: THandle;
   {$endif}
 
 function BrainMMFreeMemInverter(P: Pointer): Integer;
@@ -10557,6 +10567,7 @@ begin
   SetMemoryManager(PMemoryMgr(@MemoryManager.Standard)^);
 end;
 
+
 procedure BrainMMFinalize;
 var
   GlobalStorage: PGlobalStorage;
@@ -10608,9 +10619,60 @@ begin
 end;
 
 
+{$ifdef BRAINMM_FIXFINALIZES}
+procedure BrainMMFixFinalizes;
+var
+  i: NativeInt;
+  InitProc: Pointer;
+  LibModule: PLibModule;
+  Info: PackageInfo;
+  OldProtect: Cardinal;
+  Temp: PackageUnitEntry;
+begin
+  InitProc := Pointer(NativeUInt(ReturnAddress) - {$ifdef CPUX86}24{$else .CPUX64}37{$endif});
+
+  LibModule := LibModuleList;
+  if (Assigned(LibModule)) then
+  begin
+    while Assigned(LibModule.Next) do
+      LibModule := LibModule.Next;
+
+    if Assigned(LibModule.TypeInfo) then
+    begin
+      Info := PackageInfo(PPackageTypeInfo(NativeUInt(LibModule.TypeInfo) -
+        NativeUInt(@PackageInfoTable(nil^).TypeInfo)));
+
+      for i := 0 to Info.UnitCount - 1 do
+      if (NativeUInt(NativeUInt(InitProc) - NativeUInt(Info.UnitInfo[i].Init) + 4) < 8) then
+      begin
+        if (i <> 0) then
+        begin
+          VirtualProtect(Info.UnitInfo, (i + 1) * SizeOf(PackageUnitEntry), PAGE_EXECUTE_READWRITE, OldProtect);
+          begin
+            Temp := Info.UnitInfo[i];
+            Move(Info.UnitInfo[0], Info.UnitInfo[1], (i - 1 + 1) * SizeOf(PackageUnitEntry));
+            Info.UnitInfo[0] := Temp;
+          end;
+          VirtualProtect(Info.UnitInfo, (i + 1) * SizeOf(PackageUnitEntry), OldProtect, OldProtect);
+        end;
+        Exit;
+      end;
+
+      // unit not found
+      {$ifdef CONDITIONALEXPRESSIONS}System.Error(reInvalidCast){$else}System.RunError(219){$endif};
+    end;
+  end;
+end;
+{$endif}
+
+
 initialization
+  {$ifdef BRAINMM_FIXFINALIZES}
+    BrainMMFixFinalizes({@initialization});
+  {$endif}
+
   {$ifdef CPUX86}
-  CheckSSESupport;
+    CheckSSESupport;
   {$endif}
   {$ifdef MSWINDOWS}
     @SwitchToThreadFunc := GetProcAddress(LoadLibrary(kernel32), 'SwitchToThread');
