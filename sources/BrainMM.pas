@@ -335,12 +335,14 @@ const
   SIZE_64 = 64;
   MASK_64_CLEAR = -SIZE_64;
   MASK_64_TEST = SIZE_64 - 1;
+  SHIFT_64 = 6;
   SIZE_K1 = 1024;
   MASK_K1_CLEAR = -SIZE_K1;
   MASK_K1_TEST = SIZE_K1 - 1;
   SIZE_K4 = 4 * 1024;
   MASK_K4_CLEAR = -SIZE_K4;
   MASK_K4_TEST = SIZE_K4 - 1;
+  SHIFT_K4 = 12;
   SIZE_K16 = 16 * 1024;
   MASK_K16_CLEAR = -SIZE_K16;
   MASK_K16_TEST = SIZE_K16 - 1;
@@ -350,6 +352,10 @@ const
   SIZE_K64 = 64 * 1024;
   MASK_K64_CLEAR = -SIZE_K64;
   MASK_K64_TEST = SIZE_K64 - 1;
+  SHIFT_K64 = 16;
+  SIZE_M1 = 1024 * 1024;
+  MASK_M1_CLEAR = -SIZE_M1;
+  MASK_M1_TEST = SIZE_M1 - 1;
 
   B16_PER_PAGE = SIZE_K4 div SIZE_16;
   B16_PER_PAGE_SHIFT = 12 - 4;
@@ -363,10 +369,6 @@ const
   MAX_MEDIUM_B16COUNT = MAX_MEDIUM_SIZE div 16;
   MAX_BIG_SIZE = 8 * SIZE_K64;
   MAX_BIG_B16COUNT = MAX_BIG_SIZE div 16;
-
-  PAGESMODE_USER = 0;
-  PAGESMODE_SYSTEM = 1;
-  PAGESMODE_JIT = 2;
 
   THREAD_HEAP_LOCKABLE = 2;
   THREAD_HEAP_LOCKED_BIT = 1;
@@ -384,6 +386,33 @@ const
   {$endif}
   MASK_HIGH_NATIVE_BIT = NativeInt(1) shl HIGH_NATIVE_BIT;
   MASK_HIGH_NATIVE_TEST = NativeInt(-1) shr 1;
+
+  PAGESMODE_USER = 0;
+  PAGESMODE_CORE = 1;
+  PAGESMODE_JIT  = 2;
+
+  PAGESOPTION_BLOCK = 1 shl 2;
+  PAGESOPTION_LARGE = 1 shl 3;
+  PAGESOPTION_ALIGN_SHIFT = 4;
+
+  RESIZE_PAGES_COPY_SHIFT = 1;
+  RESIZE_PAGES_COPY{2} = 1 shl RESIZE_PAGES_COPY_SHIFT;
+  RESIZE_PAGES_USER_REGET   = PAGESMODE_USER{0} + 0;
+  RESIZE_PAGES_USER_REALLOC = PAGESMODE_USER{0} + RESIZE_PAGES_COPY;
+  RESIZE_PAGES_CORE_REGET   = PAGESMODE_CORE{1} + 0;
+  RESIZE_PAGES_CORE_REALLOC = PAGESMODE_CORE{1} + RESIZE_PAGES_COPY;
+
+  MEMORY_BLOCK_SIZES: array[TMemoryBlockSize] of Cardinal = (
+      {BLOCK_4K} SIZE_K4,
+     {BLOCK_16K} SIZE_K16,
+     {BLOCK_64K} SIZE_K64,
+    {BLOCK_256K} 256 * SIZE_K1,
+     {BLOCK_1MB}   1 * SIZE_M1,
+     {BLOCK_4MB}   4 * SIZE_M1,
+    {BLOCK_16MB}  16 * SIZE_M1,
+    {BLOCK_64MB}  64 * SIZE_M1,
+   {BLOCK_256MB} 256 * SIZE_M1
+  );
 
   DEFAULT_BITSETS_SMALL: array[0..15] of Int64 = (
     {16}   Int64($FFFFFFFFFFFFFFFC),
@@ -439,13 +468,6 @@ const
   FLAG_MEDIUM_COPY_SHIFT = 16;
   FLAG_MEDIUM_COPY = NativeUInt(1 shl FLAG_MEDIUM_COPY_SHIFT);
   FULL_MEDIUM_EMPTY_SIZE = SIZE_K64 - 48{internal usage} - 2 * 16{start/finish};
-
-  RESIZE_PAGES_COPY_SHIFT = 1;
-  RESIZE_PAGES_COPY = 1 shl RESIZE_PAGES_COPY_SHIFT;
-  RESIZE_PAGES_USER_REGET = 0 + PAGESMODE_USER;
-  RESIZE_PAGES_USER_REALLOC = RESIZE_PAGES_COPY + PAGESMODE_USER;
-  RESIZE_PAGES_SYSTEM_REGET = 0 + PAGESMODE_SYSTEM;
-  RESIZE_PAGES_SYSTEM_REALLOC = RESIZE_PAGES_COPY + PAGESMODE_SYSTEM;
 
 var
   (*
@@ -807,12 +829,14 @@ type
     case Integer of
       0: (SupposedPages: SupposedPtr;
           (*
-             PagesMode: Byte:2;
-             IsBlock: Boolean:1;
-             IsLarge: Boolean:1;
-             Align: TMemoryAlign:3;
-             Reserved: Byte:5;
-             Pages: MemoryPages:High(Pointer)-12;
+            PagesMode: User/Core/JIT:2;
+            IsBlock: Boolean:1;
+            NonBlocked: packed record
+              IsLarge: Boolean:1;
+              Align: TMemoryAlign:3;
+            end;
+            Reserved: Byte:5;
+            Pages: MemoryPages:High(Pointer)-12;
           *)
           PagesCount: NativeUInt;
           case Integer of
@@ -821,12 +845,14 @@ type
           );
       1: (ThreadHeap: PThreadHeap);
       2: (K64Block: MemoryBlock);
+      3: (MemoryLeak0, MemoryLeak1, MemoryLeak2: Pointer);
   end;
 
   // 64 bytes aligned global storage
   TGlobalStorage = object
   public
     PagesItems: array[0..1023] of SupposedPtr;
+    ExpectedMemoryLeaks: array[0..63] of SupposedPtr;
 
     CoreThreadHeaps: TSyncStack64;
     CoreInternalRecords: TSyncStack64;
@@ -2196,7 +2222,7 @@ end;
 {class} function TGlobalStorage.ExcludePagesRecord(const SupposedPages: SupposedPtr): PInternalRecord;
 const
   // clear IsLarge/Align
-  PAGES_MASK_CLEAR = SupposedPtr(-1) xor ((1 shl 4 - 1) shl 3);
+  PAGES_MASK_CLEAR = SupposedPtr(-1) xor ($f shl (PAGESOPTION_ALIGN_SHIFT - 1));
 var
   Hash, PagesValue: NativeUInt;
   Instance: PGlobalStorage;
@@ -2210,7 +2236,7 @@ var
   end;
 begin
   // item
-  Hash := (SupposedPages shr 16) xor ((SupposedPages shr 6) and ($f shl 6));
+  Hash := (SupposedPages shr SHIFT_K64) xor ((SupposedPages and ($f shl SHIFT_K4)) shr (10 - 4));
   Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   PItem := @Instance.PagesItems[Hash and High(PagesItems)];
 
@@ -2267,7 +2293,7 @@ var
 begin
   // item
   Hash := PagesRecord.SupposedPages;
-  Hash := (Hash{SupposedPages} shr 16) xor ((Hash{SupposedPages} shr 6) and ($f shl 6));
+  Hash := (Hash{SupposedPages} shr SHIFT_K64) xor ((Hash{SupposedPages} and ($f shl SHIFT_K4)) shr (10 - 4));
   Instance := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
   PItem := @Instance.PagesItems[Hash and High(PagesItems)];
 
@@ -2703,71 +2729,197 @@ end;
 
 function BrainMMGetMemoryBlock(BlockSize: TMemoryBlockSize;
   PagesMode: NativeUInt): MemoryBlock;
+label
+  done;
+{$ifdef MSWINDOWS}
+const
+  ACCESS_RIGHTS: array[PAGESMODE_USER..PAGESMODE_JIT] of Cardinal = (
+    PAGE_READWRITE, PAGE_READWRITE, PAGE_EXECUTE_READWRITE);
+{$endif}
 var
+  Size: NativeUInt;
+  Address: NativeInt;
+  PagesRecord: PInternalRecord;
   GlobalStorage: PGlobalStorage;
 begin
-  // todo
-  if (BlockSize <> BLOCK_64K) or (PagesMode = PAGESMODE_USER) then
+  Size := MEMORY_BLOCK_SIZES[BlockSize];
+
+  // most frequently used: Core/JIT (64K) - without global storage
+  if (PagesMode <> PAGESMODE_USER) {and (BlockSize = BLOCK_64K)} then
+  begin
+    {$ifNdef BRAINMM_UNITTEST}
+    Result := TGlobalStorage(nil^).K64BlockCachePop;
+    if (Assigned(Result)) then
+    begin
+      if (PagesMode = PAGESMODE_JIT) then
+        ChangeMemoryAccessRights(Result, SIZE_K64 div SIZE_K4, [marRead, marWrite, marExecute]);
+    end else
+    {$endif}
+    begin
+      {$ifdef MSWINDOWS}
+        Result := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT, ACCESS_RIGHTS[PagesMode]);
+      {$else .POSIX}
+        Result := memalign(SIZE_K64, SIZE_K64);
+        if (Assigned(Result)) and (PagesMode = PAGESMODE_JIT) then
+          ChangeMemoryAccessRights(Result, SIZE_K64 div SIZE_K4, [marRead, marWrite, marExecute]);
+      {$endif}
+
+      if (not Assigned(Result)) then
+        Exit;
+    end;
+
+    goto done;
+  end;
+
+  // user block options
+  PagesRecord := TGlobalStorage(nil^).InternalRecordPop;
+  if (not Assigned(PagesRecord)) then
   begin
     Result := nil;
     Exit;
   end;
+  PagesRecord.SupposedPages := PagesMode + PAGESOPTION_BLOCK;
+  PagesRecord.PagesCount := Size shr SHIFT_K4;
 
-  {$ifNdef BRAINMM_UNITTEST}
-  Result := TGlobalStorage(nil^).K64BlockCachePop;
-  if (Result = nil) then
+  // user block allocate
+  // BLOCK_4K, BLOCK_16K, BLOCK_64K, BLOCK_256K, BLOCK_1MB, BLOCK_4MB, BLOCK_16MB, BLOCK_64MB, BLOCK_256MB
+  {$ifdef MSWINDOWS}
+    case (Size) of
+      SIZE_K4,
+      SIZE_K16:
+      begin
+        Result := nil;
+        // ToDo
+
+        // PagesRecord.BigPool
+      end;
+      SIZE_K64:
+      begin
+        Result := TGlobalStorage(nil^).K64BlockCachePop;
+        if (not Assigned(Result)) then
+        begin
+          Result := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT, PAGE_READWRITE);
+        end;
+      end;
+      SIZE_K1*256..SIZE_M1*16:
+      begin
+        repeat
+          Result := VirtualAlloc(nil, Size * 2 - SIZE_K64, MEM_RESERVE, 0);
+          if (not Assigned(Result)) then
+            Break;
+
+          VirtualFree(Result, 0, MEM_RELEASE);
+          Address := (NativeInt(Result) + NativeInt(Size) - SIZE_K64) and -NativeInt(Size);
+          Result := VirtualAlloc(Pointer(Address), Size, MEM_COMMIT, PAGE_READWRITE);
+        until (Assigned(Result));
+      end;
+    else
+      // SIZE_M1*64, SIZE_M1*256
+      Result := VirtualAlloc(nil, Size * 2 - SIZE_K64, MEM_RESERVE, 0);
+      if (not Assigned(Result)) then
+        Result := VirtualAlloc(nil, Size, MEM_RESERVE, 0);
+
+      if (Assigned(Result)) then
+      begin
+        VirtualFree(Result, 0, MEM_RELEASE);
+        Address := (NativeInt(Result) + NativeInt(Size) - SIZE_K64) and -NativeInt(Size);
+
+        while (NativeUInt(Address) <> {$ifdef CPUX86}3{$else .CPUX64}16{$endif} * 1024 * NativeUInt(SIZE_M1)) do
+        begin
+          Result := VirtualAlloc(Pointer(Address), Size, MEM_COMMIT, PAGE_READWRITE);
+          if (Assigned(Result)) then
+            Break;
+
+          Inc(Address, Size);
+        end;
+      end;
+    end;
+  {$else .POSIX}
+    Result := memalign(Size, Size);
   {$endif}
-  begin
-    {$ifdef MSWINDOWS}
-      Result := VirtualAlloc(nil, SIZE_K64, MEM_COMMIT, PAGE_READWRITE);
-    {$else .POSIX}
-      Result := memalign(SIZE_K64, SIZE_K64);
-    {$endif}
 
+  if (Assigned(Result)) then
+  begin
+    Inc(PagesRecord.SupposedPages, NativeUInt(Result));
+    TGlobalStorage(nil^).IncludePagesRecord(PagesRecord);
+
+  done:
     {$ifdef BRAINMM_UNITTEST}
-    if (Result <> nil) then
-      FillRandomBytes(Result, SIZE_K64);
+    FillRandomBytes(Result, Size);
     {$endif}
-  end;
-
-  if (Result <> nil) then
+    GlobalStorage := PGlobalStorage(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+    AtomicIncrement(GlobalStorage.PagesAllocated, Size shr SHIFT_K4);
+  end else
   begin
-    GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicIncrement(GlobalStorage.PagesAllocated, SIZE_K64 div SIZE_K4);
-
-    if (PagesMode = PAGESMODE_JIT) then
-      ChangeMemoryAccessRights(Result, 64 div 4, [marRead, marWrite, marExecute]);
+    TGlobalStorage(nil^).InternalRecordPush(PagesRecord);
   end;
 end;
 
 function BrainMMFreeMemoryBlock(Block: MemoryBlock; PagesMode: NativeUInt): Boolean;
+label
+  failure, done;
 var
+  PagesRecord: PInternalRecord;
+  PagesCount: NativeUInt;
+  // BigPool: PMbPoolBig;
   GlobalStorage: PGlobalStorage;
 begin
-  // todo
-  if (PagesMode = PAGESMODE_USER) then
+  // most frequently used: Core/JIT (64K) - without global storage
+  if (PagesMode <> PAGESMODE_USER) then
   begin
-    Result := False;
+    if (PagesMode = PAGESMODE_JIT) then
+      ChangeMemoryAccessRights(Block, SIZE_K64 div SIZE_K4, [marRead, marWrite]);
+
+    {$ifNdef BRAINMM_UNITTEST}
+    Result := TGlobalStorage(nil^).K64BlockCachePush(Block);
+    if (not Result) then
+    {$endif}
+    begin
+      {$ifdef MSWINDOWS}
+        Result := VirtualFree(Block, 0, MEM_RELEASE);
+      {$else .POSIX}
+        free(Block);
+        Result := True;
+      {$endif}
+    end;
+
+    PagesCount := SIZE_K64 div SIZE_K4;
+    if (Result) then goto done;
     Exit;
   end;
 
-  {$ifNdef BRAINMM_UNITTEST}
-  Result := TGlobalStorage(nil^).K64BlockCachePush(Block);
-  if (not Result) then
-  {$endif}
+  // user block
+  PagesRecord := TGlobalStorage(nil^).ExcludePagesRecord(SupposedPtr(Block) + PagesMode + PAGESOPTION_BLOCK);
+  if (not Assigned(PagesRecord)) then
   begin
-    {$ifdef MSWINDOWS}
-      Result := VirtualFree(Block, 0, MEM_RELEASE);
-    {$else .POSIX}
-      free(Block);
-      Result := True;
-    {$endif}
-  end;
+  failure:
+    Result := False;
+  end else
+  begin
+    // pages count, big pool
+    PagesCount := PagesRecord.PagesCount;
+    // BigPool := PagesRecord.BigPool;
+    TGlobalStorage(nil^).InternalRecordPush(PagesRecord);
 
-  if (Result) then
-  begin
+    if (PagesCount <= SIZE_K16 div SIZE_K4) then
+    begin
+      // BigPool
+      // todo
+    end else
+    begin
+      {$ifdef MSWINDOWS}
+        if (not VirtualFree(Block, 0, MEM_RELEASE)) then
+          goto failure;
+      {$else .POSIX}
+        free(Block);
+      {$endif}
+    end;
+
+  done:
+    // pages allocated
     GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
-    AtomicIncrement{AtomicDecrement}(GlobalStorage.PagesAllocated, NativeUInt(-NativeInt(SIZE_K64 div SIZE_K4)));
+    AtomicDecrement(GlobalStorage.PagesAllocated, PagesCount);
+    Result := True;
   end;
 end;
 
@@ -2842,7 +2994,7 @@ var
   GlobalStorage: PGlobalStorage;
 begin
   // todo
-  if (ResizePagesFlags and PAGESMODE_SYSTEM = 0) then
+  if (ResizePagesFlags and PAGESMODE_CORE = 0) then
   begin
     Result := nil;
     Exit;
@@ -3148,7 +3300,7 @@ begin
     else
       Result := BrainMMGetMemoryPages(
         (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-        PAGESMODE_SYSTEM);
+        PAGESMODE_CORE);
       if (Result = nil) then
         Result := ThreadHeap.ErrorOutOfMemory;
     end;
@@ -3186,7 +3338,7 @@ begin
       else
         Result := BrainMMGetMemoryPages(
           (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-          PAGESMODE_SYSTEM);
+          PAGESMODE_CORE);
         { if (Result = nil) then
           Result := ThreadHeap.ErrorOutOfMemory; }
       end;
@@ -3251,7 +3403,7 @@ asm
   //   Exit ThreadHeap.GetSmall(B16Count)
   //   Exit ThreadHeap.FMedium.Get(B16Count, Ord(ma16Bytes))
   //   Exit ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes))
-  //   Exit BrainMM.etMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
+  //   Exit BrainMM.etMemoryPages(PagesOf(B16Count), PAGESMODE_CORE)
   {$ifdef CPUX86}
     xor ecx, ecx
     cmp edx, MAX_SMALL_B16COUNT
@@ -3274,11 +3426,11 @@ asm
 
   {$ifdef CPUX86}
     lea eax, [edx + B16_PER_PAGE - 1]
-    mov edx, PAGESMODE_SYSTEM
+    mov edx, PAGESMODE_CORE
     shr eax, B16_PER_PAGE_SHIFT
   {$else .CPUX64}
     lea rcx, [rdx + B16_PER_PAGE - 1]
-    mov edx, PAGESMODE_SYSTEM
+    mov edx, PAGESMODE_CORE
     shr rcx, B16_PER_PAGE_SHIFT
   {$endif}
   call BrainMMGetMemoryPages
@@ -3557,7 +3709,7 @@ begin
       else
         Result := BrainMMGetMemoryPages(
           (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-          PAGESMODE_SYSTEM);
+          PAGESMODE_CORE);
         { if (Result = nil) then
           Result := ThreadHeap.ErrorOutOfMemory; }
       end;
@@ -3627,7 +3779,7 @@ asm
   //   call ThreadHeap.GetSmall(B16Count)
   //   call ThreadHeap.FMedium.Get(B16Count, Ord(ma16Bytes))
   //   call ThreadHeap.FMedium.GetAdvanced(B16Count, Ord(ma16Bytes))
-  //   call BrainMMGetMemoryPages(PagesOf(B16Count), PAGESMODE_SYSTEM)
+  //   call BrainMMGetMemoryPages(PagesOf(B16Count), PAGESMODE_CORE)
   {$ifdef CPUX86}
     push edx
     push offset @fill_zero
@@ -3655,12 +3807,12 @@ asm
 
   {$ifdef CPUX86}
     lea eax, [edx + B16_PER_PAGE - 1]
-    mov edx, PAGESMODE_SYSTEM
+    mov edx, PAGESMODE_CORE
     shr eax, B16_PER_PAGE_SHIFT
     pop ecx
   {$else .CPUX64}
     lea rcx, [rdx + B16_PER_PAGE - 1]
-    mov edx, PAGESMODE_SYSTEM
+    mov edx, PAGESMODE_CORE
     shr rcx, B16_PER_PAGE_SHIFT
     pop r8
   {$endif}
@@ -3783,7 +3935,7 @@ begin
     else
       Result := BrainMMGetMemoryPages(
         (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-        PAGESMODE_SYSTEM);
+        PAGESMODE_CORE);
       if (Result = nil) then
         Result := ThreadHeap.ErrorOutOfMemory;
     end;
@@ -3830,7 +3982,7 @@ begin
       else
         Result := BrainMMGetMemoryPages(
           (B16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-          PAGESMODE_SYSTEM);
+          PAGESMODE_CORE);
         { if (Result = nil) then
           Result := ThreadHeap.ErrorOutOfMemory; }
       end;
@@ -3905,7 +4057,7 @@ begin
         end else
         begin
           // big or large
-          if (not BrainMMFreeMemoryPages(MemoryPages(P), PAGESMODE_SYSTEM)) then
+          if (not BrainMMFreeMemoryPages(MemoryPages(P), PAGESMODE_CORE)) then
             goto error_invalid_ptr;
 
           Result := FREEMEM_DONE;
@@ -3982,7 +4134,7 @@ begin
           end else
           begin
             // big or large
-            if (not BrainMMFreeMemoryPages(MemoryPages(P), PAGESMODE_SYSTEM)) then
+            if (not BrainMMFreeMemoryPages(MemoryPages(P), PAGESMODE_CORE)) then
               goto error_invalid_ptr;
 
             Result := FREEMEM_DONE;
@@ -4114,7 +4266,7 @@ asm
 
 @not_small:
   // if (P(v2) and MASK_K4_TEST = 0) then
-  //   BrainMMFreeMemoryPages(P, PAGESMODE_SYSTEM)
+  //   BrainMMFreeMemoryPages(P, PAGESMODE_CORE)
   {$ifdef CPUX86}
     test edx, MASK_K4_TEST
   {$else .CPUX64}
@@ -4138,7 +4290,7 @@ asm
   {$else .CPUX64}
     mov rcx, rdx
   {$endif}
-  mov edx, PAGESMODE_SYSTEM
+  mov edx, PAGESMODE_CORE
   call BrainMMFreeMemoryPages
   test al, al
   jz @error_invalid_ptr
@@ -4511,7 +4663,7 @@ begin
           // big or large
           Result := BrainMMResizeMemoryPages(MemoryPages(P),
             (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-            (FlagCopy shl RESIZE_PAGES_COPY_SHIFT) + PAGESMODE_SYSTEM);
+            (FlagCopy shl RESIZE_PAGES_COPY_SHIFT) + PAGESMODE_CORE);
           if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
           begin
             if (Result = PTR_INVALID) then goto raise_invalid_ptr;
@@ -4618,7 +4770,7 @@ begin
           begin
             // big or large
             Result := BrainMMResizeMemoryPages(MemoryPages(P),
-              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, RESIZE_PAGES_SYSTEM_REGET);
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, RESIZE_PAGES_CORE_REGET);
             if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
             begin
               if (Result = PTR_INVALID) then goto raise_invalid_ptr;
@@ -4872,16 +5024,16 @@ asm
   jmp @raise_invalid_ptr
 
 @reget_big_large:
-  // Exit BrainMM"RegetMemoryPages"(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  // Exit BrainMM"RegetMemoryPages"(P, PagesOf(NewB16Count), PAGESMODE_CORE);
   {$ifdef CPUX86}
     mov eax, edx
     lea edx, [ecx + B16_PER_PAGE - 1]
-    mov ecx, RESIZE_PAGES_SYSTEM_REGET
+    mov ecx, RESIZE_PAGES_CORE_REGET
     shr edx, B16_PER_PAGE_SHIFT
   {$else .CPUX64}
     mov rcx, rdx
     lea rdx, [r8 + B16_PER_PAGE - 1]
-    mov r8d, RESIZE_PAGES_SYSTEM_REGET
+    mov r8d, RESIZE_PAGES_CORE_REGET
     shr rdx, B16_PER_PAGE_SHIFT
     push r10
   {$endif}
@@ -5078,7 +5230,7 @@ begin
           begin
             // big or large
             Result := BrainMMResizeMemoryPages(MemoryPages(P),
-              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, RESIZE_PAGES_SYSTEM_REALLOC);
+              (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT, RESIZE_PAGES_CORE_REALLOC);
             if (NativeUInt(Result) <= NativeUInt(PTR_INVALID)) then
             begin
               if (Result = PTR_INVALID) then goto raise_invalid_ptr;
@@ -5335,16 +5487,16 @@ asm
   jmp @raise_invalid_ptr
 
 @realloc_big_large:
-  // Exit BrainMM"ReallocMemoryPages"(P, PagesOf(NewB16Count), PAGESMODE_SYSTEM);
+  // Exit BrainMM"ReallocMemoryPages"(P, PagesOf(NewB16Count), PAGESMODE_CORE);
   {$ifdef CPUX86}
     mov eax, edx
     lea edx, [ecx + B16_PER_PAGE - 1]
-    mov ecx, RESIZE_PAGES_SYSTEM_REALLOC
+    mov ecx, RESIZE_PAGES_CORE_REALLOC
     shr edx, B16_PER_PAGE_SHIFT
   {$else .CPUX64}
     mov rcx, rdx
     lea rdx, [r8 + B16_PER_PAGE - 1]
-    mov r8d, RESIZE_PAGES_SYSTEM_REALLOC
+    mov r8d, RESIZE_PAGES_CORE_REALLOC
     shr rdx, B16_PER_PAGE_SHIFT
     push r10
   {$endif}
@@ -8943,7 +9095,7 @@ begin
   else
     Result := BrainMMGetMemoryPages(
       (NewB16Count + (B16_PER_PAGE - 1)) shr B16_PER_PAGE_SHIFT,
-      PAGESMODE_SYSTEM);
+      PAGESMODE_CORE);
     if (Result = nil) then
       Result := Self.ErrorOutOfMemory;
   end;
@@ -8979,7 +9131,7 @@ var
   PagesMode: NativeUInt;
   Next: PK64PoolSmall;
 begin
-  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  PagesMode := PAGESMODE_CORE + NativeUInt(FNextHeap = JITHEAP_MARKER);
   Result := BrainMMGetMemoryBlock(BLOCK_64K, PagesMode);
   if (Result = nil) then
   begin
@@ -9023,7 +9175,7 @@ begin
   PoolSmall.ThreadHeap := nil;
   PK64PoolMedium(PoolSmall).ThreadHeap := nil;
 
-  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  PagesMode := PAGESMODE_CORE + NativeUInt(FNextHeap = JITHEAP_MARKER);
   if (BrainMMFreeMemoryBlock(PoolSmall, PagesMode)) then
   begin
     Result := FREEMEM_DONE;
@@ -9403,7 +9555,7 @@ var
   Next: Pointer;
 begin
   // allocate
-  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  PagesMode := PAGESMODE_CORE + NativeUInt(FNextHeap = JITHEAP_MARKER);
   Result := BrainMMGetMemoryBlock(BLOCK_64K, PagesMode);
   if (Result = nil) then
   begin
@@ -9466,7 +9618,7 @@ begin
   PoolMedium.ThreadHeap := nil;
   PK64PoolSmall(PoolMedium).ThreadHeap := nil;
 
-  PagesMode := PAGESMODE_SYSTEM + NativeUInt(FNextHeap = JITHEAP_MARKER);
+  PagesMode := PAGESMODE_CORE + NativeUInt(FNextHeap = JITHEAP_MARKER);
   if (BrainMMFreeMemoryBlock(PoolMedium, PagesMode)) then
   begin
     Result := FREEMEM_DONE;
@@ -10051,14 +10203,238 @@ end;
  (* Debug memory routine  *)
 
 function BrainMMRegisterExpectedMemoryLeak(P: Pointer): Boolean;
+label
+  include, done;
+var
+  Hash: NativeUInt;
+  PItem: PSupposedPtr;
+  Item: SupposedPtr;
+  GlobalStorage: PGlobalStorage;
+  InternalRecord: PInternalRecord;
+  Store: record
+    PItem: PSupposedPtr;
+    Item: SupposedPtr;
+    Result: Boolean;
+  end;
 begin
-  // todo
-  Result := False;
+  Store.Result := False;
+  if (P = nil) or (NativeInt(P) and MASK_16_TEST <> 0) then
+    goto done;
+
+  // item
+  Hash := (NativeUInt(P) shr SHIFT_K64) xor (NativeUInt(P) shr SHIFT_64);
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  PItem := @GlobalStorage.ExpectedMemoryLeaks[Hash and High(GlobalStorage.ExpectedMemoryLeaks)];
+
+  // inline SpinLock
+  Store.PItem := PItem;
+  repeat
+    Item := PItem^;
+    if (Item and 1 <> 0) then
+    begin
+      Item := SpinWait(PItem^, 1);
+      PItem := Store.PItem;
+    end;
+  until (Item = AtomicCmpExchange(PItem^, Item + 1, Item));
+  Store.Item := Item;
+
+  // find or include
+  try
+    if (Item <> 0) then
+    begin
+      // find P
+      InternalRecord := Pointer(Item);
+      repeat
+        if (InternalRecord.MemoryLeak0 = P) or
+          (InternalRecord.MemoryLeak1 = P) or
+          (InternalRecord.MemoryLeak2 = P) then
+        begin
+          Store.Result := True;
+          Break;
+        end;
+
+        InternalRecord := InternalRecord.Next;
+        if (not Assigned(InternalRecord)) then
+        begin
+          // find first empty
+          InternalRecord := Pointer(Store.Item);
+          repeat
+            if (Assigned(InternalRecord.MemoryLeak0)) then
+            begin
+              if (Assigned(InternalRecord.MemoryLeak1)) then
+              begin
+                if (not Assigned(InternalRecord.MemoryLeak2)) then
+                begin
+                  InternalRecord.MemoryLeak2 := P;
+                  Store.Result := True;
+                  Break;
+                end;
+              end else
+              begin
+                InternalRecord.MemoryLeak1 := P;
+                Store.Result := True;
+                Break;
+              end;
+            end else
+            begin
+              InternalRecord.MemoryLeak0 := P;
+              Store.Result := True;
+              Break;
+            end;
+
+            InternalRecord := InternalRecord.Next;
+          until (not Assigned(InternalRecord));
+
+          // not found: include new
+          if (Assigned(InternalRecord)) then Break;
+          goto include;
+        end;
+      until (False);
+    end else
+    begin
+    include:
+      InternalRecord := TGlobalStorage(nil^).InternalRecordPop;
+      if (Assigned(InternalRecord)) then
+      begin
+        InternalRecord.Next := Pointer(Store.Item);
+        InternalRecord.MemoryLeak0 := P;
+        InternalRecord.MemoryLeak1 := nil;
+        InternalRecord.MemoryLeak2 := nil;
+
+        Store.Item := SupposedPtr(InternalRecord);
+        Store.Result := True;
+      end;
+    end;
+  finally
+    Store.PItem^ := Store.Item; // inline SpinUnlock
+  end;
+
+done:
+  Result := Store.Result;
 end;
 
 function BrainMMUnregisterExpectedMemoryLeak(P: Pointer): Boolean;
+label
+  done;
+var
+  Hash: NativeUInt;
+  PItem: PSupposedPtr;
+  Item: SupposedPtr;
+  GlobalStorage: PGlobalStorage;
+  PrevRecord, InternalRecord: PInternalRecord;
+  Store: record
+    PItem: PSupposedPtr;
+    Item: SupposedPtr;
+    Result: Boolean;
+  end;
 begin
-  // todo
+  Store.Result := False;
+  if (P = nil) or (NativeInt(P) and MASK_16_TEST <> 0) then
+    goto done;
+
+  // item
+  Hash := (NativeUInt(P) shr SHIFT_K64) xor (NativeUInt(P) shr SHIFT_64);
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  PItem := @GlobalStorage.ExpectedMemoryLeaks[Hash and High(GlobalStorage.ExpectedMemoryLeaks)];
+
+  // inline SpinLock
+  Store.PItem := PItem;
+  repeat
+    Item := PItem^;
+    if (Item and 1 <> 0) then
+    begin
+      Item := SpinWait(PItem^, 1);
+      PItem := Store.PItem;
+    end;
+  until (Item = AtomicCmpExchange(PItem^, Item + 1, Item));
+  Store.Item := Item;
+
+  // find and exclude
+  try
+    if (Item <> 0) then
+    begin
+      InternalRecord := Pointer(Item);
+      PrevRecord := nil;
+      repeat
+        if (InternalRecord.MemoryLeak0 <> P) then
+        begin
+          if (InternalRecord.MemoryLeak1 <> P) then
+          begin
+            if (InternalRecord.MemoryLeak2 = P) then
+            begin
+              InternalRecord.MemoryLeak2 := nil;
+              Store.Result := True;
+              Break;
+            end;
+          end else
+          begin
+            InternalRecord.MemoryLeak1 := nil;
+            Store.Result := True;
+            Break;
+          end;
+        end else
+        begin
+          InternalRecord.MemoryLeak0 := nil;
+          Store.Result := True;
+          Break;
+        end;
+
+        PrevRecord := InternalRecord;
+        InternalRecord := InternalRecord.Next;
+      until (not Assigned(InternalRecord));
+
+      if (Assigned(InternalRecord)) and
+        (not Assigned(InternalRecord.MemoryLeak0)) and
+        (not Assigned(InternalRecord.MemoryLeak1)) and
+        (not Assigned(InternalRecord.MemoryLeak2)) then
+      begin
+        if (PrevRecord = nil) then
+        begin
+          Store.Item := SupposedPtr(InternalRecord.Next);
+        end else
+        begin
+          PrevRecord.Next := InternalRecord.Next;
+        end;
+
+        TGlobalStorage(nil^).InternalRecordPush(InternalRecord);
+      end;
+    end;
+  finally
+    Store.PItem^ := Store.Item; // inline SpinUnlock
+  end;
+
+done:
+  Result := Store.Result;
+end;
+
+// unlockable
+function BrainMMContainsExpectedMemoryLeak(P: Pointer): Boolean;
+var
+  Hash: NativeUInt;
+  PItem: PSupposedPtr;
+  GlobalStorage: PGlobalStorage;
+  InternalRecord: PInternalRecord;
+begin
+  // item
+  Hash := (NativeUInt(P) shr SHIFT_K64) xor (NativeUInt(P) shr SHIFT_64);
+  GlobalStorage := Pointer(NativeInt(@GLOBAL_STORAGE[63]) and MASK_64_CLEAR);
+  PItem := @GlobalStorage.ExpectedMemoryLeaks[Hash and High(GlobalStorage.ExpectedMemoryLeaks)];
+
+  // find
+  InternalRecord := Pointer(PItem^ and SupposedPtr(-2));
+  if (Assigned(InternalRecord)) then
+  repeat
+    if (InternalRecord.MemoryLeak0 = P) or
+      (InternalRecord.MemoryLeak1 = P) or
+      (InternalRecord.MemoryLeak2 = P) then
+    begin
+      Result := True;
+      Exit;
+    end;
+
+    InternalRecord := InternalRecord.Next;
+  until (not Assigned(InternalRecord));
+
   Result := False;
 end;
 
@@ -10180,16 +10556,6 @@ function BrainMMFreeMemInverter(P: Pointer): Integer;
 begin
   Result := BrainMMFreeMemOriginal(P);
   Result := Byte(Result = 0);
-end;
-
-function BrainMMGetMemoryOptionsEmulate(const P: Pointer; var Options: TMemoryOptions): Boolean;
-begin
-  Result := False;
-end;
-
-function BrainMMThreadHeapMinimizeEmulate: Boolean;
-begin
-  Result := False;
 end;
 
 
@@ -10524,16 +10890,6 @@ begin
     begin
       BrainMMFreeMemOriginal := MemoryManager.Standard.FreeMem;
       MemoryManager.Standard.FreeMem := BrainMMFreeMemInverter;
-    end;
-
-    if (not Assigned(BrainMMRegistered.BrainMM.GetMemoryOptions)) then
-    begin
-      MemoryManager.BrainMM.GetMemoryOptions := BrainMMGetMemoryOptionsEmulate;
-    end;
-
-    if (not Assigned(BrainMMRegistered.BrainMM.ThreadHeapMinimize)) then
-    begin
-      MemoryManager.BrainMM.ThreadHeapMinimize := BrainMMThreadHeapMinimizeEmulate;
     end;
 
     {$ifdef BRAINMM_REDIRECT}
