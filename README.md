@@ -145,8 +145,11 @@ type
   end;
 ```
 
-##### Development was temporarily suspended
+## Development was temporarily suspended
 I want to say thank you for your anticipation and patience! However, at the moment there are more priority tasks. The next possible release date is winter (2019). Or if someone succeeds in attracting donations/investments of $5000-$10000 - the development will continue immediately. Thank you again for your attention to the project!
+
 [Donate Link](https://www.paypal.me/BrainMM/100usd)
+
 USD VISA 4779 6426 1574 7797
+
 RUB VISA 4154 8120 7035 2715
