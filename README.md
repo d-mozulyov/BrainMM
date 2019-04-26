@@ -1,5 +1,5 @@
 # BrainMM
-![](https://github.com/d-mozulyov/BrainMM/raw/master/data/Logo/Logo.png)
+![](https://github.com/d-mozulyov/BrainMM/raw/master/data/Logo.png)
 
 Several years ago, I started studying garbage collection algorithms and memory management principles in such systems. Rare defragmentation and fast memory allocation at the end of the pool are considered to be performed by the memory manager with a more effective principle of garbage collection than the one used in traditional approaches, when allocation and release of memory require complicated slow manipulations. However, as a matter of fact, memory managers with garbage collection principle can hardly be called effective due to the following:
 * Realloc always leads to the new memory piece allocation and data copying in it, which does not always take place in traditional-approach managers
