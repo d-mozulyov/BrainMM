@@ -1,5 +1,5 @@
 # BrainMM
-![](http://dmozulyov.ucoz.net/BrainMM/Logo/Logo.png)
+![](https://github.com/d-mozulyov/BrainMM/raw/master/data/Logo/Logo.png)
 
 Several years ago, I started studying garbage collection algorithms and memory management principles in such systems. Rare defragmentation and fast memory allocation at the end of the pool are considered to be performed by the memory manager with a more effective principle of garbage collection than the one used in traditional approaches, when allocation and release of memory require complicated slow manipulations. However, as a matter of fact, memory managers with garbage collection principle can hardly be called effective due to the following:
 * Realloc always leads to the new memory piece allocation and data copying in it, which does not always take place in traditional-approach managers
@@ -25,15 +25,15 @@ That is why I started working on project BrainMM, i.e. the memory manager design
 
 
 ##### Performance
-This test was conducted on the basis of [Steve Maughan's article](http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/). Source codes are in the repository, but you can also [download binary files]( http://dmozulyov.ucoz.net/BrainMM/Demo.rar).
+This test was conducted on the basis of [Steve Maughan's article](http://www.stevemaughan.com/delphi/delphi-parallel-programming-library-memory-managers/). Source codes are in the repository, but you can also [download binary files](https://github.com/d-mozulyov/BrainMM/raw/master/data/Demo.rar).
 
-![](http://dmozulyov.ucoz.net/BrainMM/SpeedTest.png)
+![](https://github.com/d-mozulyov/BrainMM/raw/master/data/SpeedTest.png)
 ##### System memory consumption
 System memory consumption is always larger than the developer tried to allocate as it is necessary to store service information on each allocated piece. Besides service information, the notion of granularity also influences memory consumption. For example, if you allocate 20 bytes and the granularity equals 16, the size shall be rounded off to 32 bytes.
 
 Source codes of this test are in the repository. The results are presented in megabytes at the rate of 100 Mb of useful data. BrainMM was compared to two popular managers: FastMM, ScaleMM2. The difference of system memory consumption is explained by architecture peculiarities of each manager. Default FastMM x86 granularity is 8 bytes, optionally 16 bytes can be adjusted, for x64 - always 16 bytes. The approximate size of service information is 8 bytes for each piece. In BrainMM, for small pieces (up to 128 bytes), compact bit masks are used, that is why the average system memory consumption is lower. However, BrainMM granularity is always 16 bytes, that is why, for example, for pieces of 8 and 24 bytes, FastMM steals a march, although insignificantly. Large consumption by ScaleMM2 manager is most probably explained by the less economical service information storage. 
 
-![](http://dmozulyov.ucoz.net/BrainMM/MemoryUsageTest.png)
+![](https://github.com/d-mozulyov/BrainMM/raw/master/data/MemoryUsageTest.png)
 
 ##### What shall be improved
 * Management of large memory pieces (more than 32Kb)
@@ -146,10 +146,6 @@ type
 ```
 
 ## Development was temporarily suspended
-I want to say thank you for your anticipation and patience! However, at the moment there are more priority tasks. The next possible release date is winter (2019). Or if someone succeeds in attracting donations/investments of $5000-$10000 - the development will continue immediately. Thank you again for your attention to the project!
+I want to say thank you for your anticipation and patience! However, at the moment there are more priority tasks. If someone succeeds in attracting donations/investments of $5000-$10000 - the development will continue immediately. Thank you again for your attention to the project!
 
 [Donate Link](https://www.paypal.me/BrainMM/100usd)
-
-USD VISA 4779 6426 1574 7797
-
-RUB VISA 4154 8120 7035 2715
